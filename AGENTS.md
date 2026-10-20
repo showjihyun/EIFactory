@@ -32,6 +32,26 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 - 판정 결과는 `verdict:` 줄(`RED_OK`, `PASSING_BEFORE_IMPL`, `INVALID_RED`, `NO_TESTS`, `GREEN_OK`, `NOT_GREEN`)로 읽는다. 기계 판독용은 `--json`(마지막 줄 JSON)을 쓴다.
 - 종료 코드(0 기대 상태 / 1 통과·실패 불일치 / 2 오류 / 3 테스트 없음 / 4 사용법 오류)는 **스크립트를 직접 실행할 때만** 구분된다. `make test-red`를 거치면 실패는 모두 make의 종료 코드 2가 된다.
 
+## 수락 테스트 위치
+
+수락 테스트는 작업별 **전용 파일**에 둔다. 기존 테스트 파일에 섞으면 같은 파일의 기존 통과 테스트 때문에 Red 판정이 `PASSING_BEFORE_IMPL`로 잘못 나온다.
+
+| 영역 | 위치 |
+|---|---|
+| 백엔드 | `backend/tests/acceptance/test_<job_id>.py` (예: `test_E03.py`) |
+| 프론트엔드 | 대상 컴포넌트 옆 `<Name>.<job_id>.accept.test.tsx` (예: `BookmarkList.E01.accept.test.tsx`) |
+
+- Red/Green 판정은 이 파일들만 대상으로 한다.
+- 기존 테스트를 바꿔야 하면 Spec 단계에서 바꾸고, 그 목록을 spec에 적는다.
+
+## 명령 실행 형태
+
+권한 허용 목록과 맞도록 명령은 **한 번에 하나, 레포 루트에서** 실행한다.
+
+- 레포 루트 기준 경로를 쓰고 `cd ... &&`로 이동하지 않는다.
+- `;`, `&&`, `|`로 명령을 이어 붙이지 않는다. 종료 코드는 `check_red.py --json` 출력의 `exit_code`, 또는 `verify.py` 출력의 `verify: PASS/FAIL (exit N)` 줄로 확인한다.
+- 파일 내용은 셸 명령(`cat`, `head`) 대신 파일 읽기 도구로 본다.
+
 ## 에이전트 작업 원칙
 
 1. 완료 주장에는 근거(실행한 명령, 종료 코드)를 붙인다. 실행하지 않은 검사는 "미실행"으로 보고한다.
