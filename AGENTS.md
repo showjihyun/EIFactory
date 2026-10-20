@@ -3,7 +3,7 @@
 AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(백엔드 FastAPI, 프론트엔드 React)과 검증 도구로 이루어진다.
 기획 문서는 이 레포 밖(`C:\WorkSpace\sw-factory\기획안\ai_sw_factory_기획안.md`)에 있다.
 
-> 현재 Phase 0 상태다. 팩토리 정책(위험 등급, 승인 기준, 상태 머신)은 Phase 1에서 이 파일과 `factory/PROCESS.md`에 추가한다.
+> 현재 Phase 1(단일 작업 성공 경로)이다. 팩토리 절차는 `factory/PROCESS.md`, 정책 요약은 아래 "팩토리 정책"에 있다.
 
 ## 구조
 
@@ -13,6 +13,11 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `frontend/` | React + Vite 앱 (`src/`), Vitest 테스트 (`*.test.tsx`). npm으로 관리 |
 | `scripts/verify.py` | 전체 검증 (린트·포맷·타입체크·테스트) |
 | `scripts/check_red.py` | 수락 테스트 Red/Green 판정 |
+| `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
+| `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
+| `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |
+| `factory/prompts/validator.md` | Validator 지시문 |
+| `factory/state.json`, `factory-state.md` | 작업 상태 (`factory.py`만 씀, Git 추적 제외) |
 | `factory/evals/tasks.md` | 평가 과제 (요구사항만, 기대 결과는 레포 밖) |
 | `.devcontainer/` | 격리 실행 환경 |
 
@@ -31,6 +36,22 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 - `check_red.py`는 assertion 실패(화면 요소 없음 포함)만 Red로 인정한다. import 오류, 문법 오류, 수집 실패, skip은 Red가 아니다.
 - 판정 결과는 `verdict:` 줄(`RED_OK`, `PASSING_BEFORE_IMPL`, `INVALID_RED`, `NO_TESTS`, `GREEN_OK`, `NOT_GREEN`)로 읽는다. 기계 판독용은 `--json`(마지막 줄 JSON)을 쓴다.
 - 종료 코드(0 기대 상태 / 1 통과·실패 불일치 / 2 오류 / 3 테스트 없음 / 4 사용법 오류)는 **스크립트를 직접 실행할 때만** 구분된다. `make test-red`를 거치면 실패는 모두 make의 종료 코드 2가 된다.
+
+## 팩토리 정책
+
+- **완료의 정의**: 수락 테스트가 구현 전 Red(assertion 실패)였고, 구현 후 Green이며, `verify.py`가 통과하고, Validator가 PASS한 상태. `factory.py`가 이 순서를 직접 확인한다.
+- **상태는 `python scripts/factory.py`만 바꾼다.** 절차와 명령은 `factory/PROCESS.md`를 따른다.
+- **위험 등급**: contract 선언과 `factory.py verify`가 diff로 계산한 등급 중 높은 쪽.
+
+  | 등급 | 예시 |
+  |---|---|
+  | LOW | 일반 코드 수정, 테스트 추가 |
+  | MEDIUM | refactor, 공개 API·DB 스키마·의존성·검증 설정 변경, 테스트 skip 추가, 400줄 또는 15파일 이상 |
+  | HIGH | 인증·인가, 데이터 삭제, 정책·절차 파일, CI 설정 |
+
+- **승인**: Phase 1은 위험 등급과 관계없이 전부 사람이 승인한다. `approve`, `resume`, `drop`은 사람 전용이다.
+- **시간 상한**: 소형 20분, 중형 30분 (활성 시간). 80%를 넘으면 재시도 대신 중단, 100%를 넘으면 hook이 수정을 막는다.
+- **재시도 상한**: 검증 실패 3회, 같은 실패 2회 연속, 스펙 재작성 1회를 넘으면 BLOCKED.
 
 ## 수락 테스트 위치
 

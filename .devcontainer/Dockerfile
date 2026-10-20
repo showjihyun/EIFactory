@@ -6,7 +6,8 @@ ARG INSTALL_CLAUDE_CODE=true
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends make git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/python3 /usr/local/bin/python
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.2 /uv /uvx /usr/local/bin/
 

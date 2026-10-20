@@ -9,3 +9,7 @@ __pycache__/
 .env
 .env.*
 .pytest_tmp*/
+factory/state.json
+factory/state.tmp
+factory-state.md
+factory/reviews/

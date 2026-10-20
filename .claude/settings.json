@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scripts/factory.py new:*)",
+      "Bash(python scripts/factory.py spec:*)",
+      "Bash(python scripts/factory.py red:*)",
+      "Bash(python scripts/factory.py verify:*)",
+      "Bash(python scripts/factory.py validate:*)",
+      "Bash(python scripts/factory.py block:*)",
+      "Bash(python scripts/factory.py status:*)",
+      "Bash(python scripts/check_red.py:*)",
+      "Bash(python scripts/verify.py:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(git push:*)",
+      "Bash(python scripts/factory.py approve:*)",
+      "Bash(python scripts/factory.py resume:*)",
+      "Bash(python scripts/factory.py drop:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$CLAUDE_PROJECT_DIR/backend\" --no-sync python \"$CLAUDE_PROJECT_DIR/scripts/hooks/guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,934 @@
+"""팩토리 상태 관리 CLI (factory/PROCESS.md).
+
+상태는 factory/state.json에만 있고 이 명령만 바꾼다. 단계 전이에 필요한 판단
+(Red/Green 확인, 전체 검증, 잠긴 파일 대조, 시간·재시도 상한)은 이 명령이 직접 실행한다.
+
+사용법: python scripts/factory.py <명령> ...
+명령: new, spec, red, verify, validate, block, status, approve, resume, drop
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from proc import resolve_command, use_utf8_output  # noqa: E402
+
+Job = dict[str, Any]
+State = dict[str, Any]
+
+STATE_PATH = "factory/state.json"
+SUMMARY_PATH = "factory-state.md"
+SPECS_DIR = "factory/specs"
+REVIEWS_DIR = "factory/reviews"
+VALIDATOR_PROMPT = "factory/prompts/validator.md"
+
+TYPES = {"feature", "bugfix", "copy", "refactor"}
+SIZE_CAPS = {"small": 20 * 60, "medium": 30 * 60}
+RISKS = ["LOW", "MEDIUM", "HIGH"]
+SOFT_RATIO = 0.8
+MAX_ATTEMPTS = 3
+MAX_SPEC_REVISIONS = 1
+EXTEND_RATIO = 0.5
+
+ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING"}
+CLOSED_STATUSES = {"APPROVED", "DROPPED"}
+
+# 잠금 대상: 기존 테스트, 검증 설정, 정책·절차 파일
+LOCK_PATTERNS = [
+    "Makefile",
+    "scripts/*",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "backend/tests/*.py",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.ts",
+    "frontend/eslint.config.js",
+    "frontend/src/*.test.ts",
+    "frontend/src/*.test.tsx",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "factory/PROCESS.md",
+    "factory/prompts/*",
+    ".claude/*",
+]
+# 새로 만들어져도 안 되는 경로 (테스트 추가는 허용)
+NO_NEW_FILE_PATTERNS = ["scripts/*", "factory/prompts/*", ".claude/*", "Makefile"]
+
+# 위험 등급 계산에서 제외하는 팩토리 산출물
+RISK_EXCLUDE = [STATE_PATH, SUMMARY_PATH, f"{SPECS_DIR}/*", f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
+SKIP_DIRS = {"__pycache__", "node_modules", ".venv", ".git", ".mypy_cache", ".ruff_cache"}
+
+HIGH_PATHS = [
+    "backend/src/bookmarks/auth.py",
+    "backend/src/bookmarks/settings.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "factory/PROCESS.md",
+    "factory/prompts/*",
+    ".claude/*",
+    ".github/*",
+    ".devcontainer/*",
+]
+MEDIUM_PATHS = [
+    "Makefile",
+    "scripts/*",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.ts",
+    "frontend/eslint.config.js",
+]
+HIGH_CONTENT = [(re.compile(r"DELETE\s+FROM", re.I), "데이터 삭제 SQL 추가")]
+MEDIUM_CONTENT = [
+    (re.compile(r"\b(CREATE|ALTER)\s+TABLE\b", re.I), "DB 스키마 변경"),
+    (
+        re.compile(r"@\w+\.(get|post|put|patch|delete)\("),
+        "API 경로 추가·삭제",
+    ),
+    (
+        re.compile(r"pytest\.mark\.(skip|xfail)|\b(it|test|describe)\.(skip|todo|only)\("),
+        "테스트 skip·xfail·only 추가",
+    ),
+]
+MAX_LINES = 400
+MAX_FILES = 15
+
+
+class FactoryError(Exception):
+    """사용법·상태 오류. 상태를 바꾸지 않는다."""
+
+
+# ---------------------------------------------------------------- 시간
+
+
+def now() -> float:
+    fake = os.environ.get("FACTORY_FAKE_NOW")
+    return float(fake) if fake else time.time()
+
+
+def active_seconds(job: Job, now: float) -> float:
+    total = 0.0
+    for start, end in job["time"]["segments"]:
+        total += (end if end is not None else now) - start
+    return total
+
+
+def _clock_running(job: Job) -> bool:
+    segments = job["time"]["segments"]
+    return bool(segments) and segments[-1][1] is None
+
+
+def _stop_clock(job: Job, at: float) -> None:
+    if _clock_running(job):
+        job["time"]["segments"][-1][1] = at
+    job["time"]["active_s"] = round(active_seconds(job, at), 1)
+
+
+def _start_clock(job: Job, at: float) -> None:
+    if not _clock_running(job):
+        job["time"]["segments"].append([at, None])
+
+
+# ---------------------------------------------------------------- 상태 파일
+
+
+def load_state(root: Path) -> State:
+    path = root / STATE_PATH
+    if not path.exists():
+        return {"version": 1, "active": None, "jobs": {}}
+    loaded: State = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def save_state(root: Path, state: State) -> None:
+    at = now()
+    for job in state["jobs"].values():
+        job["time"]["active_s"] = round(active_seconds(job, at), 1)
+    path = root / STATE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    (root / SUMMARY_PATH).write_text(render_summary(state), encoding="utf-8")
+
+
+def _fmt_minutes(seconds: float) -> str:
+    return f"{seconds / 60:.1f}분"
+
+
+def render_summary(state: State) -> str:
+    lines = [
+        "# 팩토리 상태",
+        "",
+        "> `python scripts/factory.py`가 자동으로 다시 쓰는 파일이다. 직접 고치지 않는다.",
+        "",
+        f"- 진행 중 작업: {state['active'] or '없음'}",
+        "",
+        "| ID | 상태 | 유형/규모 | 위험 | 시도 | 활성 시간 / 상한 | 요구사항 | 비고 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for job in state["jobs"].values():
+        note = ""
+        if job["status"] == "BLOCKED" and job.get("blocked"):
+            note = f"{job['blocked']['reason']}: {job['blocked']['detail']}"[:80]
+        cells = [
+            job["id"],
+            job["status"],
+            f"{job.get('type') or '-'}/{job.get('size') or '-'}",
+            job.get("risk") or job.get("risk_declared") or "-",
+            str(job["attempts"]),
+            f"{_fmt_minutes(job['time']['active_s'])} / {_fmt_minutes(job['time']['cap_s'])}",
+            job["requirement"][:60],
+            note,
+        ]
+        lines.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+    waiting = [j["id"] for j in state["jobs"].values() if j["status"] == "APPROVAL_REQUIRED"]
+    lines += ["", f"- 승인 대기: {', '.join(waiting) if waiting else '없음'}", ""]
+    return "\n".join(lines)
+
+
+def _job(state: State, job_id: str) -> Job:
+    if job_id not in state["jobs"]:
+        raise FactoryError(f"작업 {job_id}가 없습니다")
+    job: Job = state["jobs"][job_id]
+    return job
+
+
+def _require(job: Job, *statuses: str) -> None:
+    if job["status"] not in statuses:
+        raise FactoryError(
+            f"{job['id']}는 {job['status']} 상태라 이 명령을 실행할 수 없습니다 "
+            f"(허용: {', '.join(statuses)})"
+        )
+
+
+def _set_status(job: Job, status: str) -> None:
+    job["status"] = status
+    if status not in {"BLOCKED", "DROPPED"}:
+        job["checkpoint"] = status
+    job["history"].append({"status": status, "at": now()})
+
+
+def _block(job: Job, reason: str, detail: str) -> None:
+    _set_status(job, "BLOCKED")
+    job["blocked"] = {"reason": reason, "detail": detail, "at": now()}
+    _stop_clock(job, now())
+
+
+# ---------------------------------------------------------------- 외부 명령
+
+
+def _git(root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise FactoryError(f"git {' '.join(args)} 실패: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _command(kind: str, default: list[str]) -> list[str]:
+    override = os.environ.get(f"FACTORY_{kind.upper()}_CMD")
+    return list(json.loads(override)) if override else default
+
+
+def _run(cmd: list[str], root: Path, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        resolve_command(cmd),
+        cwd=root,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def run_check_red(root: Path, expect: str, tests: list[str]) -> dict[str, Any]:
+    cmd = _command("check_red", [sys.executable, "scripts/check_red.py"])
+    proc = _run([*cmd, "--expect", expect, "--json", *tests], root)
+    for line in reversed(proc.stdout.strip().splitlines()):
+        try:
+            parsed: dict[str, Any] = json.loads(line)
+            return parsed
+        except json.JSONDecodeError:
+            continue
+    return {
+        "verdict": "NO_OUTPUT",
+        "exit_code": proc.returncode,
+        "tests": [],
+        "detail": (proc.stdout + proc.stderr)[-1500:],
+    }
+
+
+def run_verify(root: Path) -> tuple[int, str]:
+    cmd = _command("verify", [sys.executable, "scripts/verify.py"])
+    proc = _run(cmd, root)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+# ---------------------------------------------------------------- 파일·diff
+
+
+def _matches(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+
+def _repo_files(root: Path) -> list[str]:
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".pytest_tmp")
+        ]
+        for name in filenames:
+            rel = Path(dirpath, name).relative_to(root).as_posix()
+            found.append(rel)
+    return found
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _lock_targets(root: Path, job: Job) -> list[str]:
+    allowed = set(job["allowed_config_changes"])
+    targets = {
+        rel for rel in _repo_files(root) if _matches(rel, LOCK_PATTERNS) and rel not in allowed
+    }
+    targets.update(t.split("::")[0] for t in job["acceptance_tests"])
+    targets.update(job["changed_tests"])
+    targets.add(job["spec_path"])
+    return sorted(targets)
+
+
+def _changed_locks(root: Path, job: Job) -> list[str]:
+    changed = []
+    for rel, digest in job["locks"].items():
+        path = root / rel
+        if not path.exists():
+            changed.append(f"{rel} (삭제됨)")
+        elif _sha(path) != digest:
+            changed.append(rel)
+    for rel in _repo_files(root):
+        if rel not in job["locks"] and _matches(rel, NO_NEW_FILE_PATTERNS):
+            changed.append(f"{rel} (새 파일)")
+    return changed
+
+
+def _diff(root: Path, base: str) -> tuple[str, dict[str, tuple[list[str], list[str]]]]:
+    """기준 커밋 대비 작업 트리 변경. (원문 diff, 파일별 (추가 줄, 삭제 줄))"""
+    raw = _git(root, "diff", "--no-color", "--unified=0", base)
+    files: dict[str, tuple[list[str], list[str]]] = {}
+    current: str | None = None
+    for line in raw.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:]
+            current = target[2:] if target.startswith("b/") else None
+            if current is not None:
+                files.setdefault(current, ([], []))
+        elif line.startswith("--- "):
+            source = line[4:]
+            if source.startswith("a/"):
+                files.setdefault(source[2:], ([], []))
+                current = source[2:]
+        elif current is not None and line.startswith("+"):
+            files[current][0].append(line[1:])
+        elif current is not None and line.startswith("-"):
+            files[current][1].append(line[1:])
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard").splitlines()
+    extra = []
+    for rel in untracked:
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        files[rel] = (text.splitlines(), [])
+        extra.append(
+            f"--- /dev/null\n+++ b/{rel} (새 파일)\n"
+            + "".join(f"+{ln}\n" for ln in text.splitlines())
+        )
+    files = {p: v for p, v in files.items() if not _matches(p, RISK_EXCLUDE)}
+    return raw + "\n".join(extra), files
+
+
+def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
+    _, files = _diff(root, job["base_commit"])
+    level = RISKS.index(job["risk_declared"])
+    reasons = [f"contract 선언: {job['risk_declared']}"]
+
+    def raise_to(target: str, reason: str) -> None:
+        nonlocal level
+        reasons.append(f"{target}: {reason}")
+        level = max(level, RISKS.index(target))
+
+    if job["type"] == "refactor":
+        raise_to("MEDIUM", "refactor 유형")
+    if job["allowed_config_changes"]:
+        raise_to("MEDIUM", "설정 파일 변경 허용")
+    total_lines = 0
+    for path, (added, removed) in files.items():
+        total_lines += len(added) + len(removed)
+        if _matches(path, HIGH_PATHS):
+            raise_to("HIGH", f"{path} 변경")
+        elif _matches(path, MEDIUM_PATHS):
+            raise_to("MEDIUM", f"{path} 변경")
+        for pattern, reason in HIGH_CONTENT:
+            if any(pattern.search(ln) for ln in added):
+                raise_to("HIGH", f"{reason} ({path})")
+        for pattern, reason in MEDIUM_CONTENT:
+            if any(pattern.search(ln) for ln in added + removed):
+                raise_to("MEDIUM", f"{reason} ({path})")
+    if total_lines > MAX_LINES or len(files) > MAX_FILES:
+        raise_to("MEDIUM", f"변경 규모 {len(files)}파일 {total_lines}줄")
+    return RISKS[level], reasons
+
+
+# ---------------------------------------------------------------- 실패 처리
+
+
+def _record_failure(job: Job, signature: str, detail: str) -> str:
+    previous = job.get("last_failure")
+    job["attempts"] += 1
+    job["last_failure"] = signature
+    if previous == signature:
+        _block(job, "REPEATED_FAILURE", f"같은 실패 2회 연속: {detail}")
+    elif job["attempts"] >= MAX_ATTEMPTS:
+        _block(job, "RETRY_LIMIT", f"검증 실패 {job['attempts']}회: {detail}")
+    elif active_seconds(job, now()) > job["time"]["cap_s"] * SOFT_RATIO:
+        _block(job, "TIMEOUT", f"소프트 상한 이후 재시도 필요: {detail}")
+    else:
+        _set_status(job, "RETRY_REQUIRED")
+    return str(job["status"])
+
+
+def _check_time(job: Job) -> bool:
+    """하드 상한을 넘었으면 BLOCKED(TIMEOUT)으로 바꾸고 False."""
+    elapsed = active_seconds(job, now())
+    if elapsed > job["time"]["cap_s"]:
+        _block(
+            job,
+            "TIMEOUT",
+            f"활성 시간 {_fmt_minutes(elapsed)}가 상한 {_fmt_minutes(job['time']['cap_s'])} 초과",
+        )
+        return False
+    return True
+
+
+# ---------------------------------------------------------------- spec
+
+
+def parse_contract(text: str, job_id: str) -> dict[str, Any]:
+    blocks = re.findall(r"```json\s*\n(.*?)\n```", text, re.S)
+    if len(blocks) != 1:
+        raise FactoryError("spec에 ```json contract 블록이 정확히 하나 있어야 합니다")
+    try:
+        contract: dict[str, Any] = json.loads(blocks[0])
+    except json.JSONDecodeError as error:
+        raise FactoryError(f"contract JSON 오류: {error}") from error
+    errors = []
+    if contract.get("type") not in TYPES:
+        errors.append(f"type은 {sorted(TYPES)} 중 하나")
+    if contract.get("size") not in SIZE_CAPS:
+        errors.append(f"size는 {sorted(SIZE_CAPS)} 중 하나 (더 크면 분할)")
+    if contract.get("risk") not in RISKS:
+        errors.append(f"risk는 {RISKS} 중 하나")
+    if not contract.get("acceptance_criteria"):
+        errors.append("acceptance_criteria가 비어 있음")
+    tests = contract.get("acceptance_tests") or []
+    if not tests:
+        errors.append("acceptance_tests가 비어 있음")
+    backend = re.compile(rf"^backend/tests/acceptance/test_{job_id}\.py(::\w+)?$")
+    frontend = re.compile(rf"^frontend/src/(.+/)?\w+\.{job_id}\.accept\.test\.tsx$")
+    for test in tests:
+        if not (backend.match(test) or frontend.match(test)):
+            errors.append(
+                f"수락 테스트 경로 규칙 위반: {test} "
+                f"(backend/tests/acceptance/test_{job_id}.py 또는 "
+                f"frontend/src/**/<Name>.{job_id}.accept.test.tsx)"
+            )
+    for key in ("changed_tests", "allowed_config_changes"):
+        if not isinstance(contract.get(key, []), list):
+            errors.append(f"{key}는 목록")
+    if errors:
+        raise FactoryError("contract 형식 오류:\n- " + "\n- ".join(errors))
+    contract.setdefault("changed_tests", [])
+    contract.setdefault("allowed_config_changes", [])
+    return contract
+
+
+# ---------------------------------------------------------------- 명령
+
+
+def _exclude_factory_files(root: Path) -> None:
+    """상태·리뷰 파일을 레포 설정과 관계없이 Git 추적에서 뺀다 (.git/info/exclude)."""
+    exclude = root / _git(root, "rev-parse", "--git-path", "info/exclude").strip()
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    wanted = [
+        STATE_PATH,
+        f"{STATE_PATH[:-5]}.tmp",
+        SUMMARY_PATH,
+        f"{REVIEWS_DIR}/",
+        ".pytest_tmp*/",
+    ]
+    missing = [w for w in wanted if w not in current.splitlines()]
+    if missing:
+        prefix = "" if current.endswith("\n") or not current else "\n"
+        block = "# AI SW Factory\n" + "\n".join(missing) + "\n"
+        exclude.write_text(current + prefix + block, encoding="utf-8")
+
+
+def cmd_new(root: Path, state: State, requirement: str) -> str:
+    active = state["active"]
+    if active and state["jobs"][active]["status"] not in CLOSED_STATUSES:
+        raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (Phase 1은 한 번에 하나)")
+    if _git(root, "status", "--porcelain", "--untracked-files=no").strip():
+        raise FactoryError("작업 트리에 커밋되지 않은 변경이 있습니다")
+    job_id = f"J{len(state['jobs']) + 1:03d}"
+    branch = f"factory/{job_id}"
+    base = _git(root, "rev-parse", "HEAD").strip()
+    base_branch = _git(root, "branch", "--show-current").strip()
+    _git(root, "switch", "-q", "-c", branch)
+    _exclude_factory_files(root)
+    at = now()
+    state["jobs"][job_id] = {
+        "id": job_id,
+        "requirement": requirement,
+        "status": "QUEUED",
+        "checkpoint": "QUEUED",
+        "branch": branch,
+        "base_commit": base,
+        "base_branch": base_branch,
+        "created_at": at,
+        "spec_path": f"{SPECS_DIR}/{job_id}.md",
+        "type": None,
+        "size": None,
+        "risk_declared": None,
+        "risk": None,
+        "risk_reasons": [],
+        "acceptance_tests": [],
+        "changed_tests": [],
+        "allowed_config_changes": [],
+        "contract_version": 0,
+        "locks": {},
+        "red": [],
+        "validation": [],
+        "reviews": [],
+        "attempts": 0,
+        "spec_revisions": 0,
+        "last_failure": None,
+        "approval": None,
+        "blocked": None,
+        "time": {
+            "segments": [[at, None]],
+            "cap_s": SIZE_CAPS["small"],
+            "extended": False,
+            "active_s": 0.0,
+        },
+        "history": [{"status": "QUEUED", "at": at}],
+    }
+    state["active"] = job_id
+    return f"{job_id} 생성 (브랜치 {branch}). 다음: {SPECS_DIR}/{job_id}.md 작성 후 spec {job_id}"
+
+
+def cmd_spec(root: Path, state: State, job_id: str) -> str:
+    job = _job(state, job_id)
+    _require(job, "QUEUED", "SPEC_READY")
+    spec = root / job["spec_path"]
+    if not spec.exists():
+        raise FactoryError(f"{job['spec_path']}가 없습니다")
+    contract = parse_contract(spec.read_text(encoding="utf-8"), job_id)
+    missing = [t for t in contract["acceptance_tests"] if not (root / t.split("::")[0]).exists()]
+    if missing:
+        raise FactoryError(f"수락 테스트 파일이 없습니다: {', '.join(missing)}")
+    job.update(
+        type=contract["type"],
+        size=contract["size"],
+        risk_declared=contract["risk"],
+        acceptance_tests=contract["acceptance_tests"],
+        changed_tests=contract["changed_tests"],
+        allowed_config_changes=contract["allowed_config_changes"],
+        contract=contract,
+    )
+    job["contract_version"] += 1
+    if not job["time"]["extended"]:
+        job["time"]["cap_s"] = SIZE_CAPS[contract["size"]]
+    _set_status(job, "SPEC_READY")
+    return f"{job_id}: SPEC_READY (contract v{job['contract_version']}). 다음: red {job_id}"
+
+
+def cmd_red(root: Path, state: State, job_id: str) -> tuple[int, str]:
+    job = _job(state, job_id)
+    _require(job, "SPEC_READY")
+    if not _check_time(job):
+        return 1, f"{job_id}: BLOCKED (TIMEOUT)"
+    expect = "green" if job["type"] == "refactor" else "red"
+    result = run_check_red(root, expect, job["acceptance_tests"])
+    job["red"].append(
+        {
+            "expect": expect,
+            "verdict": result["verdict"],
+            "tests": result.get("tests", []),
+            "at": now(),
+            "contract_version": job["contract_version"],
+        }
+    )
+    wanted = "GREEN_OK" if expect == "green" else "RED_OK"
+    if result["verdict"] == wanted:
+        job["locks"] = {rel: _sha(root / rel) for rel in _lock_targets(root, job)}
+        _set_status(job, "BUILDING")
+        return 0, (
+            f"{job_id}: {wanted} → BUILDING. 파일 {len(job['locks'])}개 잠금. "
+            f"다음: Builder 호출 후 verify {job_id}"
+        )
+    job["spec_revisions"] += 1
+    detail = f"{result['verdict']}: " + ", ".join(
+        f"{t.get('id')}={t.get('outcome')}" for t in result.get("tests", [])
+    )
+    if job["spec_revisions"] > MAX_SPEC_REVISIONS:
+        _block(job, "SPEC_INVALID", f"Red 확인 {job['spec_revisions']}회 실패. {detail}")
+        return 1, f"{job_id}: BLOCKED (SPEC_INVALID). {detail}"
+    _set_status(job, "SPEC_READY")
+    return 1, (
+        f"{job_id}: {result['verdict']} → SPEC_READY (스펙 재작성 "
+        f"{job['spec_revisions']}/{MAX_SPEC_REVISIONS}회 사용). {detail}"
+    )
+
+
+def _failed_lines(output: str) -> list[str]:
+    return sorted(
+        {
+            ln.strip()
+            for ln in output.splitlines()
+            if re.search(r"\bFAIL\b", ln) and not ln.strip().startswith("verify:")
+        }
+    )
+
+
+def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
+    job = _job(state, job_id)
+    _require(job, "BUILDING", "RETRY_REQUIRED")
+    if not _check_time(job):
+        return 1, f"{job_id}: BLOCKED (TIMEOUT)"
+    changed = _changed_locks(root, job)
+    if changed:
+        _block(job, "PROTECTED_FILE_CHANGED", "잠긴 파일 변경: " + ", ".join(changed))
+        return 1, f"{job_id}: BLOCKED (PROTECTED_FILE_CHANGED): {', '.join(changed)}"
+
+    green = run_check_red(root, "green", job["acceptance_tests"])
+    verify_exit, verify_output = run_verify(root)
+    risk, reasons = compute_risk(root, job)
+    job["risk"], job["risk_reasons"] = risk, reasons
+    record = {
+        "kind": "verify",
+        "attempt": job["attempts"] + 1,
+        "green_verdict": green["verdict"],
+        "green_tests": green.get("tests", []),
+        "verify_exit": verify_exit,
+        "verify_tail": verify_output.strip()[-2500:],
+        "risk": risk,
+        "at": now(),
+    }
+    job["validation"].append(record)
+    if green["verdict"] == "GREEN_OK" and verify_exit == 0:
+        _set_status(job, "VERIFYING")
+        return 0, f"{job_id}: 검증 통과 → VERIFYING (위험 {risk}). 다음: validate {job_id}"
+
+    problems = []
+    if green["verdict"] != "GREEN_OK":
+        failing = [t.get("id") for t in green.get("tests", []) if t.get("outcome") != "passed"]
+        problems.append(f"수락 테스트 {green['verdict']}: {', '.join(map(str, failing))}")
+    if verify_exit != 0:
+        problems.append("verify 실패: " + "; ".join(_failed_lines(verify_output)))
+    signature = " | ".join(problems)
+    status = _record_failure(job, signature, signature)
+    return 1, f"{job_id}: {status}. {signature}\n{verify_output.strip()[-2500:]}"
+
+
+DEFAULT_VALIDATOR_INSTRUCTIONS = """너는 AI SW Factory의 Validator다.
+구현자의 대화는 보지 못하고 아래 자료만 본다.
+판정 기준:
+1. diff가 contract의 acceptance_criteria를 실제로 충족하는가
+2. 요구사항 범위 밖 변경이 없는가
+3. 테스트 skip·assertion 약화·검증 설정 변경 같은 우회가 없는가
+4. 명백한 버그·보안 문제가 없는가
+필요하면 Read/Glob/Grep으로 레포 파일을 확인한다. 파일을 고치지 않는다.
+마지막 줄에 JSON 한 줄로만 판정한다: {"verdict": "PASS" 또는 "FAIL", "issues": ["..."]}
+"""
+
+
+def build_validator_prompt(root: Path, job: Job) -> str:
+    instructions_path = root / VALIDATOR_PROMPT
+    instructions = (
+        instructions_path.read_text(encoding="utf-8")
+        if instructions_path.exists()
+        else DEFAULT_VALIDATOR_INSTRUCTIONS
+    )
+    diff_text, _ = _diff(root, job["base_commit"])
+    last = job["validation"][-1] if job["validation"] else {}
+    red = job["red"][-1] if job["red"] else {}
+    return "\n\n".join(
+        [
+            instructions,
+            f"## 요구사항\n{job['requirement']}",
+            "## contract\n```json\n"
+            + json.dumps(job.get("contract", {}), ensure_ascii=False, indent=2)
+            + "\n```",
+            "## Red 확인 기록\n" + json.dumps(red, ensure_ascii=False),
+            "## 최근 검증 기록\n"
+            + json.dumps(
+                {k: last.get(k) for k in ("green_verdict", "verify_exit", "risk")},
+                ensure_ascii=False,
+            )
+            + f"\n위험 판단 근거: {job['risk_reasons']}",
+            "## diff (기준 커밋 대비)\n```diff\n" + diff_text[:60000] + "\n```",
+        ]
+    )
+
+
+def _parse_verdict(text: str) -> dict[str, Any] | None:
+    for match in reversed(re.findall(r"\{[^{}]*\"verdict\"[^{}]*\}", text)):
+        try:
+            parsed: dict[str, Any] = json.loads(match)
+        except json.JSONDecodeError:
+            continue
+        if parsed.get("verdict") in {"PASS", "FAIL"}:
+            return parsed
+    return None
+
+
+def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
+    job = _job(state, job_id)
+    _require(job, "VERIFYING")
+    if not _check_time(job):
+        return 1, f"{job_id}: BLOCKED (TIMEOUT)"
+    prompt = build_validator_prompt(root, job)
+    cmd = _command(
+        "validator",
+        [
+            "claude",
+            "-p",
+            "--model",
+            "claude-sonnet-5-5",
+            "--output-format",
+            "json",
+            "--allowedTools",
+            "Read",
+            "Glob",
+            "Grep",
+        ],
+    )
+    proc = _run(cmd, root, stdin=prompt)
+    text = proc.stdout
+    try:
+        envelope = json.loads(proc.stdout)
+        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+            text = envelope["result"]
+    except json.JSONDecodeError:
+        pass
+    review_no = len(job["reviews"]) + 1
+    review_path = f"{REVIEWS_DIR}/{job_id}-{review_no}.txt"
+    (root / REVIEWS_DIR).mkdir(parents=True, exist_ok=True)
+    (root / review_path).write_text(text + "\n\n[stderr]\n" + proc.stderr, encoding="utf-8")
+    verdict = _parse_verdict(text)
+    if verdict is None:
+        job["reviews"].append({"path": review_path, "verdict": None, "at": now()})
+        raise FactoryError(
+            f"Validator 출력에서 판정 JSON을 찾지 못했습니다 (상태 유지). 원문: {review_path}"
+        )
+    job["reviews"].append(
+        {
+            "path": review_path,
+            "verdict": verdict["verdict"],
+            "issues": verdict.get("issues", []),
+            "at": now(),
+        }
+    )
+    job["validation"].append(
+        {
+            "kind": "validator",
+            "attempt": job["attempts"] + 1,
+            "verdict": verdict["verdict"],
+            "issues": verdict.get("issues", []),
+            "at": now(),
+        }
+    )
+    if verdict["verdict"] == "PASS":
+        _set_status(job, "APPROVAL_REQUIRED")
+        _stop_clock(job, now())
+        return 0, (
+            f"{job_id}: Validator PASS → APPROVAL_REQUIRED (위험 {job['risk']}). "
+            "사람의 승인을 기다립니다."
+        )
+    issues = "; ".join(map(str, verdict.get("issues", []))) or "사유 없음"
+    status = _record_failure(job, f"validator: {issues}", f"Validator FAIL: {issues}")
+    return 1, f"{job_id}: Validator FAIL → {status}. {issues}"
+
+
+def cmd_block(state: State, job_id: str, reason: str, detail: str) -> str:
+    job = _job(state, job_id)
+    _require(job, *sorted(ACTIVE_STATUSES))
+    _block(job, reason, detail)
+    return f"{job_id}: BLOCKED ({reason})"
+
+
+def _commit_and_return(root: Path, job: Job, message: str) -> str | None:
+    """작업 브랜치에 결과를 커밋하고 원래 브랜치로 돌아간다. 사람이 실행한 명령에서만 호출된다."""
+    _git(root, "add", "-A")
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
+    commit: str | None = None
+    if staged.returncode == 1:
+        identity: list[str] = []
+        if (
+            subprocess.run(
+                ["git", "config", "user.email"], cwd=root, capture_output=True, check=False
+            ).returncode
+            != 0
+        ):
+            identity = ["-c", "user.name=factory", "-c", "user.email=factory@localhost"]
+        _git(root, *identity, "commit", "-q", "-m", message)
+        commit = _git(root, "rev-parse", "HEAD").strip()
+    _git(root, "switch", "-q", job["base_branch"])
+    return commit
+
+
+def cmd_approve(root: Path, state: State, job_id: str, reject: str | None) -> str:
+    job = _job(state, job_id)
+    _require(job, "APPROVAL_REQUIRED")
+    if reject:
+        job["approval"] = {"by": "human", "decision": "rejected", "reason": reject, "at": now()}
+        _set_status(job, "RETRY_REQUIRED")
+        _start_clock(job, now())
+        return f"{job_id}: 반려 → RETRY_REQUIRED ({reject})"
+    job["approval"] = {"by": "human", "decision": "approved", "reason": "", "at": now()}
+    job["commit"] = _commit_and_return(
+        root, job, f"factory {job_id}: {job['requirement']}\n\n위험 {job['risk']}, 사람 승인"
+    )
+    _set_status(job, "APPROVED")
+    state["active"] = None
+    return (
+        f"{job_id}: APPROVED. 브랜치 {job['branch']}에 커밋 {str(job['commit'])[:7]}, "
+        f"{job['base_branch']}로 돌아왔습니다. 머지는 Phase 2에서 자동화합니다."
+    )
+
+
+def cmd_resume(state: State, job_id: str, extend: bool) -> str:
+    job = _job(state, job_id)
+    _require(job, "BLOCKED")
+    if extend:
+        if job["time"]["extended"]:
+            raise FactoryError(f"{job_id}는 이미 한 번 연장했습니다 (split 또는 drop)")
+        base_cap = SIZE_CAPS.get(job.get("size") or "small", SIZE_CAPS["small"])
+        job["time"]["cap_s"] = job["time"]["cap_s"] + int(base_cap * EXTEND_RATIO)
+        job["time"]["extended"] = True
+    target = job["checkpoint"]
+    job["blocked"] = None
+    job["last_failure"] = None
+    _set_status(job, target)
+    _start_clock(job, now())
+    return f"{job_id}: 재개 → {target} (상한 {_fmt_minutes(job['time']['cap_s'])})"
+
+
+def cmd_drop(root: Path, state: State, job_id: str) -> str:
+    job = _job(state, job_id)
+    if job["status"] in CLOSED_STATUSES:
+        raise FactoryError(f"{job_id}는 이미 {job['status']}입니다")
+    job["commit"] = _commit_and_return(
+        root, job, f"factory {job_id} (중단 보관): {job['requirement']}"
+    )
+    _set_status(job, "DROPPED")
+    _stop_clock(job, now())
+    if state["active"] == job_id:
+        state["active"] = None
+    return f"{job_id}: DROPPED (브랜치 {job['branch']}는 보관)"
+
+
+def cmd_status(state: State, as_json: bool) -> str:
+    if as_json:
+        return json.dumps(state, ensure_ascii=False, indent=2)
+    return render_summary(state)
+
+
+def main(argv: list[str] | None = None, root: Path | None = None) -> int:
+    use_utf8_output()
+    root = root or Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(prog="factory", description="팩토리 상태 관리")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("new").add_argument("requirement")
+    for name in ("spec", "red", "verify", "validate", "drop"):
+        sub.add_parser(name).add_argument("job_id")
+    block = sub.add_parser("block")
+    block.add_argument("job_id")
+    block.add_argument(
+        "--reason", required=True, choices=["TEST_INVALID", "SPEC_INVALID", "MANUAL"]
+    )
+    block.add_argument("--detail", required=True)
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
+    approve = sub.add_parser("approve")
+    approve.add_argument("job_id")
+    approve.add_argument("--reject")
+    resume = sub.add_parser("resume")
+    resume.add_argument("job_id")
+    resume.add_argument("--extend", action="store_true")
+    args = parser.parse_args(argv)
+
+    state = load_state(root)
+    code = 0
+    try:
+        if args.command == "new":
+            message = cmd_new(root, state, args.requirement)
+        elif args.command == "spec":
+            message = cmd_spec(root, state, args.job_id)
+        elif args.command == "red":
+            code, message = cmd_red(root, state, args.job_id)
+        elif args.command == "verify":
+            code, message = cmd_verify(root, state, args.job_id)
+        elif args.command == "validate":
+            code, message = cmd_validate(root, state, args.job_id)
+        elif args.command == "block":
+            message = cmd_block(state, args.job_id, args.reason, args.detail)
+        elif args.command == "approve":
+            message = cmd_approve(root, state, args.job_id, args.reject)
+        elif args.command == "resume":
+            message = cmd_resume(state, args.job_id, args.extend)
+        elif args.command == "drop":
+            message = cmd_drop(root, state, args.job_id)
+        else:
+            print(cmd_status(state, args.json))
+            return 0
+    except FactoryError as error:
+        print(f"오류: {error}")
+        if args.command == "validate":
+            save_state(root, state)
+        return 2
+    save_state(root, state)
+    print(message)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
