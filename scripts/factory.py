@@ -501,17 +501,38 @@ def _exclude_factory_files(root: Path) -> None:
         exclude.write_text(current + prefix + block, encoding="utf-8")
 
 
+def _create_job_branch(root: Path, state: State) -> tuple[str, str]:
+    """다음 job ID로 브랜치를 만든다.
+
+    브랜치는 worktree끼리 공유되므로, 상태 파일의 작업 수가 아니라 이미 있는 factory/J*
+    브랜치까지 보고 번호를 정한다. 다른 worktree가 동시에 같은 번호를 잡으면 다음 번호로 재시도한다.
+    """
+    used = {int(j[1:]) for j in state["jobs"] if re.fullmatch(r"J\d+", j)}
+    for ref in _git(root, "branch", "--list", "factory/J*", "--format=%(refname:short)").split():
+        if re.fullmatch(r"factory/J\d+", ref):
+            used.add(int(ref.split("/J")[1]))
+    number = max(used, default=0) + 1
+    for _ in range(20):
+        job_id = f"J{number:03d}"
+        branch = f"factory/{job_id}"
+        created = subprocess.run(
+            ["git", "switch", "-q", "-c", branch], cwd=root, capture_output=True, check=False
+        )
+        if created.returncode == 0:
+            return job_id, branch
+        number += 1
+    raise FactoryError("새 작업 브랜치를 만들지 못했습니다 (factory/J* 번호 충돌)")
+
+
 def cmd_new(root: Path, state: State, requirement: str) -> str:
     active = state["active"]
     if active and state["jobs"][active]["status"] not in CLOSED_STATUSES:
         raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (Phase 1은 한 번에 하나)")
     if _git(root, "status", "--porcelain", "--untracked-files=no").strip():
         raise FactoryError("작업 트리에 커밋되지 않은 변경이 있습니다")
-    job_id = f"J{len(state['jobs']) + 1:03d}"
-    branch = f"factory/{job_id}"
     base = _git(root, "rev-parse", "HEAD").strip()
     base_branch = _git(root, "branch", "--show-current").strip()
-    _git(root, "switch", "-q", "-c", branch)
+    job_id, branch = _create_job_branch(root, state)
     _exclude_factory_files(root)
     at = now()
     state["jobs"][job_id] = {

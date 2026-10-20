@@ -607,3 +607,12 @@ def test_drop_keeps_work_on_branch_and_returns_to_base(h: Harness) -> None:
     assert git(h.repo, "branch", "--show-current") == "main"
     assert "return []" in (h.repo / "backend/src/bookmarks/main.py").read_text()
     assert "return [2]" in git(h.repo, "show", "factory/J001:backend/src/bookmarks/main.py")
+
+
+def test_new_skips_ids_whose_branch_already_exists(h: Harness) -> None:
+    # 다른 worktree가 이미 factory/J001, J002를 쓰고 있는 경우 (브랜치는 worktree끼리 공유)
+    git(h.repo, "branch", "factory/J001")
+    git(h.repo, "branch", "factory/J002")
+    assert h.run("new", "요구사항") == 0
+    assert h.state()["active"] == "J003"
+    assert git(h.repo, "branch", "--show-current") == "factory/J003"
