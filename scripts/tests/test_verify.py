@@ -56,3 +56,13 @@ def test_every_area_has_lint_type_and_test_steps() -> None:
     for area in ("backend", "frontend"):
         names = {s.name for s in STEPS if s.area == area}
         assert {"lint", "typecheck", "test"} <= names, area
+
+
+def test_every_pytest_step_uses_a_checkout_local_basetemp() -> None:
+    # 여러 checkout(worktree)이 동시에 검증할 때 pytest 공용 임시 폴더를 서로 지우지 않도록
+    pytest_steps = [s for s in STEPS if "pytest" in s.cmd]
+    assert pytest_steps
+    for step in pytest_steps:
+        basetemp = [a for a in step.cmd if a.startswith("--basetemp=")]
+        assert basetemp, f"{step.area}/{step.name}"
+        assert not Path(basetemp[0].removeprefix("--basetemp=")).is_absolute()

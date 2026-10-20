@@ -140,7 +140,17 @@ def run_pytest(targets: list[str], cwd: Path, base: list[str] | None = None) -> 
     base = base if base is not None else ["uv", "run"]
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "junit.xml"
-        cmd = [*base, "pytest", *targets, f"--junitxml={report}", "-q", "-p", "no:cacheprovider"]
+        # checkout마다 임시 폴더를 따로 써서 동시에 실행되는 다른 worktree와 충돌하지 않게 한다.
+        cmd = [
+            *base,
+            "pytest",
+            *targets,
+            f"--junitxml={report}",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--basetemp=.pytest_tmp_check_red",
+        ]
         subprocess.run(
             resolve_command(cmd),
             cwd=cwd,

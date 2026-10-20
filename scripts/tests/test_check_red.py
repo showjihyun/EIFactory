@@ -193,3 +193,12 @@ def test_cli_prints_json_summary(tmp_path: Path) -> None:
     summary = json.loads(proc.stdout.strip().splitlines()[-1])
     assert summary["verdict"] == "RED_OK"
     assert summary["tests"][0]["outcome"] == "assertion_failed"
+
+
+def test_run_pytest_uses_a_checkout_local_basetemp(tmp_path: Path) -> None:
+    (tmp_path / "test_tmp.py").write_text(
+        "def test_where(tmp_path):\n    assert '.pytest_tmp' in str(tmp_path)\n",
+        encoding="utf-8",
+    )
+    found = by_name(run_pytest(["test_tmp.py"], cwd=tmp_path, base=[sys.executable, "-m"]))
+    assert found == {"test_where": Outcome.PASSED}
