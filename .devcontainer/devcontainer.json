@@ -1,0 +1,25 @@
+{
+  "name": "bookmark-factory",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/workspaces/bookmark-factory",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/bookmark-factory,type=bind",
+  "mounts": [
+    "source=bookmark-factory-node-modules,target=/workspaces/bookmark-factory/frontend/node_modules,type=volume"
+  ],
+  "remoteUser": "node",
+  "containerEnv": {
+    "BOOKMARKS_DB_PATH": "/home/node/bookmarks.db"
+  },
+  "forwardPorts": [5173, 8000],
+  "postCreateCommand": "make setup",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "dbaeumer.vscode-eslint",
+        "anthropic.claude-code"
+      ]
+    }
+  }
+}

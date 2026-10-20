@@ -1,0 +1,138 @@
+:root {
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6b6b73;
+  --border: #dedee3;
+  --accent: #2f6fde;
+  --danger: #c7362f;
+  font-family: system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+.app {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bookmark-form,
+.login-form {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+}
+
+input,
+select {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+button[type="submit"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.filters {
+  display: flex;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.filters label {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+}
+
+.bookmark-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.bookmark-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.bookmark-main {
+  display: grid;
+}
+
+.bookmark-main a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.url,
+time,
+.empty,
+.loading {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.bookmark-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e8effc;
+  color: var(--accent);
+  font-size: 0.8em;
+}
+
+.error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.9em;
+}
