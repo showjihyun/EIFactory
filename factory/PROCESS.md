@@ -33,7 +33,7 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 |---|---|---|---|---|
 | `new "<요구사항>"` | 진행 중 작업 없음, 작업 트리 깨끗함 | job ID 부여, 브랜치 `factory/<ID>` 생성 | QUEUED | - |
 | `spec <ID>` | QUEUED, SPEC_READY | `factory/specs/<ID>.md`의 contract 형식 검사 | SPEC_READY | 오류 출력, 상태 유지 |
-| `red <ID>` | SPEC_READY | 수락 테스트 Red 확인 (refactor는 Green). 통과하면 파일 잠금 | BUILDING | 1회: SPEC_READY로 되돌림, 2회: BLOCKED(`SPEC_INVALID`) |
+| `red <ID>` | SPEC_READY | 수락 테스트·바꾼 기존 테스트의 형식·린트 확인 → 수락 테스트 Red 확인 (refactor는 Green). 통과하면 파일 잠금 | BUILDING | 형식·린트 문제: SPEC_READY 유지 (재작성 횟수 안 씀). Red 실패 1회: SPEC_READY로 되돌림, 2회: BLOCKED(`SPEC_INVALID`) |
 | `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 → 검증한 변경의 지문 기록 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
 | `validate <ID>` | VERIFYING | 변경 지문 대조 → Validator 프로세스 실행 | LOW: APPROVED (자동 승인), 그 밖: APPROVAL_REQUIRED | RETRY_REQUIRED 또는 BLOCKED. verify 이후 변경이 있으면 BUILDING |
 | `merge <ID>` | APPROVED | 아래 "머지" 순서대로 base 브랜치에 머지 | MERGED | BLOCKED(`CONFLICT`, `MERGE_CHECK_FAILED`, `TREE_CHANGED`) 또는 상태 유지(lock 사용 중) |
@@ -122,6 +122,7 @@ push는 하지 않는다. 원격 반영은 사람이 한다.
 4. `python scripts/factory.py spec <ID>` → 형식 오류가 있으면 고친다
 5. `python scripts/factory.py red <ID>`
    - `BUILDING`이면 다음 단계
+   - 형식·린트 문제가 출력되면 그 내용대로 테스트 파일을 고치고 다시 `red` (미리 확인하려면 `python scripts/check_style.py <테스트 경로들>`)
    - `SPEC_READY`로 돌아오면 출력된 이유를 보고 spec·수락 테스트를 **한 번만** 다시 써서 4번부터 반복
    - 이미 구현되어 있어 Red가 안 나는 요구사항이면 억지로 바꾸지 말고 그대로 두어 BLOCKED로 끝낸다
 6. Builder를 호출한다 (job ID, spec 경로, 수락 테스트 경로만 전달)

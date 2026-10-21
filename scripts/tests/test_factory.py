@@ -33,6 +33,10 @@ if kind == "check_red":
     print("verdict line")
     print(json.dumps(result))
     sys.exit(result["exit_code"])
+if kind == "style":
+    result = control.get("style", {"ok": True, "problems": []})
+    print(json.dumps(result))
+    sys.exit(0 if result["ok"] else 1)
 if kind == "verify":
     result = take("verify")
     print(result["output"])
@@ -165,7 +169,7 @@ def h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     log = tmp_path / "calls.log"
     monkeypatch.setenv("FAKE_CONTROL", str(control))
     monkeypatch.setenv("FAKE_LOG", str(log))
-    for kind in ("check_red", "verify", "validator"):
+    for kind in ("check_red", "style", "verify", "validator"):
         monkeypatch.setenv(
             f"FACTORY_{kind.upper()}_CMD", json.dumps([sys.executable, str(fake), kind])
         )
@@ -280,6 +284,28 @@ def test_red_for_refactor_expects_green(h: Harness) -> None:
     h.run("spec", "J001")
     assert h.run("red", "J001") == 0
     assert h.calls("check_red")[0]["args"][:2] == ["--expect", "green"]
+
+
+def test_red_checks_style_of_tests_before_locking(h: Harness) -> None:
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator="",
+        style={"ok": False, "problems": ["backend format: 다시 포맷 필요"]},
+    )
+    h.run("new", "요구사항")
+    h.write_spec(changed_tests=["backend/tests/test_existing.py"])
+    h.run("spec", "J001")
+    assert h.run("red", "J001") != 0
+    job = h.job()
+    assert job["status"] == "SPEC_READY"
+    assert job["spec_revisions"] == 0
+    assert job["locks"] == {}
+    assert h.calls("check_red") == []
+    args = h.calls("style")[0]["args"]
+    assert "backend/tests/acceptance/test_J001.py" in args
+    assert "backend/tests/test_existing.py" in args
 
 
 def test_red_requires_spec_ready(h: Harness) -> None:

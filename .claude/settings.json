@@ -11,6 +11,7 @@
       "Bash(python scripts/factory.py block:*)",
       "Bash(python scripts/factory.py status:*)",
       "Bash(python scripts/check_red.py:*)",
+      "Bash(python scripts/check_style.py:*)",
       "Bash(python scripts/verify.py:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",

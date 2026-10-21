@@ -13,6 +13,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `frontend/` | React + Vite 앱 (`src/`), Vitest 테스트 (`*.test.tsx`). npm으로 관리 |
 | `scripts/verify.py` | 전체 검증 (린트·포맷·타입체크·테스트) |
 | `scripts/check_red.py` | 수락 테스트 Red/Green 판정 |
+| `scripts/check_style.py` | 테스트 파일 형식·린트 확인 (잠그기 전) |
 | `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |

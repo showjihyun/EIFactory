@@ -307,6 +307,18 @@ def run_verify(root: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def run_style(root: Path, files: list[str]) -> tuple[bool, list[str]]:
+    cmd = _command("style", [sys.executable, "scripts/check_style.py"])
+    proc = _run([*cmd, *files], root)
+    for line in reversed(proc.stdout.strip().splitlines()):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        return bool(parsed.get("ok")), list(parsed.get("problems", []))
+    return False, [f"check_style 출력 없음 (exit {proc.returncode}): {proc.stderr[-500:]}"]
+
+
 # ---------------------------------------------------------------- 파일·diff
 
 
@@ -719,6 +731,13 @@ def cmd_red(root: Path, state: State, job_id: str) -> tuple[int, str]:
     _require(job, "SPEC_READY")
     if not _check_time(job):
         return 1, f"{job_id}: BLOCKED (TIMEOUT)"
+    # 잠근 뒤에는 고칠 수 없으므로 verify의 형식·린트에 걸릴 테스트는 지금 돌려보낸다
+    style_ok, problems = run_style(root, [*job["acceptance_tests"], *job["changed_tests"]])
+    if not style_ok:
+        return 1, (
+            f"{job_id}: 테스트 파일 형식·린트 문제 → SPEC_READY 유지 "
+            "(스펙 재작성 횟수는 쓰지 않음). 고친 뒤 다시 red\n" + "\n".join(problems)
+        )
     expect = "green" if job["type"] == "refactor" else "red"
     result = run_check_red(root, expect, job["acceptance_tests"])
     job["red"].append(
