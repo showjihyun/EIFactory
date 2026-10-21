@@ -23,7 +23,8 @@
       "Bash(git push:*)",
       "Bash(python scripts/factory.py approve:*)",
       "Bash(python scripts/factory.py resume:*)",
-      "Bash(python scripts/factory.py drop:*)"
+      "Bash(python scripts/factory.py drop:*)",
+      "Bash(python scripts/dispatch.py:*)"
     ]
   },
   "hooks": {

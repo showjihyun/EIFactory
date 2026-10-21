@@ -3,7 +3,7 @@
 AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(백엔드 FastAPI, 프론트엔드 React)과 검증 도구로 이루어진다.
 기획 문서는 이 레포 밖(`C:\WorkSpace\sw-factory\기획안\ai_sw_factory_기획안.md`)에 있다.
 
-> 현재 Phase 2(실패 복구와 안전한 머지)다. 팩토리 절차는 `factory/PROCESS.md`, 정책 요약은 아래 "팩토리 정책"에 있다.
+> 현재 Phase 3(병렬화와 운영)이다. 팩토리 절차는 `factory/PROCESS.md`, 정책 요약은 아래 "팩토리 정책"에 있다.
 
 ## 구조
 
@@ -14,6 +14,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/verify.py` | 전체 검증 (린트·포맷·타입체크·테스트) |
 | `scripts/check_red.py` | 수락 테스트 Red/Green 판정 |
 | `scripts/check_style.py` | 테스트 파일 형식·린트 확인 (잠그기 전) |
+| `scripts/dispatch.py` | 여러 요구사항을 worktree별 headless 세션으로 동시 실행 (사람 전용) |
 | `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |
@@ -51,7 +52,8 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
   | HIGH | 인증·인가, 데이터 삭제, 정책·절차 파일, CI 설정 |
 
 - **승인과 머지**: LOW는 Validator PASS 후 자동 승인되고 `factory.py merge`가 머지한다. MEDIUM·HIGH는 사람이 `approve`해야 머지된다. 머지는 한 번에 하나씩, base 브랜치가 앞서 있으면 rebase 후 재검증하고 `--no-ff` 머지 커밋으로 남긴다. push는 사람만 한다.
-- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`.
+- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`.
+- **병렬 실행**: 작업마다 worktree 하나, 상태도 worktree마다 따로. 머지는 merge lock으로 한 번에 하나씩 기본 checkout에 한다. 전체 상태는 `factory.py status --all`.
 - **세션 복구**: 다른 세션이 작업 중이면 hook이 막는다. 이전 세션이 끊긴 지 5분이 지나면 `factory.py recover`로 이어받는다.
 - **시간 상한**: 소형 15분, 중형 30분 (활성 시간). 80%를 넘으면 재시도 대신 중단, 100%를 넘으면 hook이 수정을 막는다.
 - **재시도 상한**: 검증 실패 3회, 같은 실패 2회 연속, 스펙 재작성 1회를 넘으면 BLOCKED.

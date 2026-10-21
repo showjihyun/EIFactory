@@ -169,6 +169,7 @@ def h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     log = tmp_path / "calls.log"
     monkeypatch.setenv("FAKE_CONTROL", str(control))
     monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("FACTORY_MERGE_WAIT_S", "0")
     for kind in ("check_red", "style", "verify", "validator"):
         monkeypatch.setenv(
             f"FACTORY_{kind.upper()}_CMD", json.dumps([sys.executable, str(fake), kind])
@@ -911,3 +912,162 @@ def test_merged_job_removes_heartbeat(h: Harness) -> None:
     write_heartbeat(h, "s1", h.now)
     h.run("merge", "J001")
     assert not (h.repo / "factory" / "heartbeat.json").exists()
+
+
+# ---------- Phase 3: worktree 병렬 실행 ----------
+
+
+def make_worktree(h: Harness, name: str) -> Path:
+    path = h.repo.parent / name
+    git(h.repo, "worktree", "add", "-q", "--detach", str(path), "main")
+    return path
+
+
+def wt_run(wt: Path, *argv: str) -> int:
+    return factory.main(list(argv), root=wt)
+
+
+def wt_job(wt: Path, job_id: str) -> dict[str, Any]:
+    state = json.loads((wt / "factory" / "state.json").read_text(encoding="utf-8"))
+    job: dict[str, Any] = state["jobs"][job_id]
+    return job
+
+
+def wt_to_approved(h: Harness, wt: Path, filename: str) -> str:
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert wt_run(wt, "new", f"{filename} 추가", "--base", "main") == 0
+    state = json.loads((wt / "factory" / "state.json").read_text(encoding="utf-8"))
+    job_id = str(state["active"])
+    contract = {
+        "type": "feature",
+        "size": "small",
+        "risk": "LOW",
+        "risk_reason": "새 모듈",
+        "acceptance_criteria": ["모듈이 있다"],
+        "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
+        "changed_tests": [],
+        "allowed_config_changes": [],
+    }
+    spec = wt / "factory" / "specs" / f"{job_id}.md"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text(f"```json\n{json.dumps(contract)}\n```\n", encoding="utf-8")
+    (wt / contract["acceptance_tests"][0]).write_text("def test_x():\n    assert False\n")
+    assert wt_run(wt, "spec", job_id) == 0
+    assert wt_run(wt, "red", job_id) == 0
+    (wt / "backend/src/bookmarks" / filename).write_text("VALUE = 1\n", encoding="utf-8")
+    assert wt_run(wt, "verify", job_id) == 0
+    assert wt_run(wt, "validate", job_id) == 0
+    assert wt_job(wt, job_id)["status"] == "APPROVED"
+    return job_id
+
+
+def test_new_in_detached_worktree_requires_base(h: Harness) -> None:
+    wt = make_worktree(h, "wt1")
+    assert wt_run(wt, "new", "요구사항") != 0
+    assert wt_run(wt, "new", "요구사항", "--base", "main") == 0
+    job = wt_job(wt, "J001")
+    assert job["base_branch"] == "main"
+    assert job["base_commit"] == git(h.repo, "rev-parse", "main")
+    assert git(wt, "branch", "--show-current") == "factory/J001"
+
+
+def test_new_base_must_match_head(h: Harness) -> None:
+    wt = make_worktree(h, "wt1")
+    (h.repo / "frontend/src/Other.tsx").write_text("export const x = 1;\n", encoding="utf-8")
+    git(h.repo, "add", "-A")
+    git(h.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main 진행")
+    assert wt_run(wt, "new", "요구사항", "--base", "main") != 0
+
+
+def test_merge_from_worktree_merges_into_base_checkout(h: Harness) -> None:
+    wt = make_worktree(h, "wt1")
+    job_id = wt_to_approved(h, wt, "alpha.py")
+    assert wt_run(wt, "merge", job_id) == 0
+    job = wt_job(wt, job_id)
+    assert job["status"] == "MERGED"
+    # base(main)는 기본 checkout에 있으므로 그쪽에서 머지되고, 작업 worktree는 그대로 둔다
+    assert git(h.repo, "branch", "--show-current") == "main"
+    assert (h.repo / "backend/src/bookmarks/alpha.py").exists()
+    assert git(h.repo, "status", "--porcelain", "--untracked-files=no") == ""
+    assert git(h.repo, "rev-parse", "main") == job["merge_commit"]
+    assert len(git(h.repo, "rev-list", "--parents", "-n", "1", "main").split()) == 3
+    assert git(wt, "branch", "--show-current") == f"factory/{job_id}"
+
+
+def test_merge_waits_when_base_checkout_is_dirty(h: Harness) -> None:
+    wt = make_worktree(h, "wt1")
+    job_id = wt_to_approved(h, wt, "alpha.py")
+    (h.repo / "AGENTS.md").write_text("사람이 고치는 중\n", encoding="utf-8")
+    base = git(h.repo, "rev-parse", "main")
+    assert wt_run(wt, "merge", job_id) != 0
+    assert wt_job(wt, job_id)["status"] == "APPROVED"
+    assert git(h.repo, "rev-parse", "main") == base
+    assert not merge_lock(h).exists()
+
+
+def test_parallel_worktree_jobs_merge_one_after_another(h: Harness) -> None:
+    wt1, wt2 = make_worktree(h, "wt1"), make_worktree(h, "wt2")
+    first = wt_to_approved(h, wt1, "alpha.py")
+    second = wt_to_approved(h, wt2, "beta.py")
+    assert first != second
+    assert wt_run(wt1, "merge", first) == 0
+    verify_calls = len(h.calls("verify"))
+    assert wt_run(wt2, "merge", second) == 0
+    # 두 번째 작업은 main이 앞서 있으므로 rebase 후 다시 검증한다
+    assert len(h.calls("verify")) == verify_calls + 1
+    assert (h.repo / "backend/src/bookmarks/alpha.py").exists()
+    assert (h.repo / "backend/src/bookmarks/beta.py").exists()
+    merges = git(h.repo, "rev-list", "--merges", "main").splitlines()
+    assert len(merges) == 2
+
+
+def test_drop_in_worktree_keeps_branch_without_switching(h: Harness) -> None:
+    wt = make_worktree(h, "wt1")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    wt_run(wt, "new", "요구사항", "--base", "main")
+    (wt / "backend/src/bookmarks/main.py").write_text("def list_items():\n    return [5]\n")
+    assert wt_run(wt, "drop", "J001") == 0
+    assert wt_job(wt, "J001")["status"] == "DROPPED"
+    assert "return [5]" in git(h.repo, "show", "factory/J001:backend/src/bookmarks/main.py")
+
+
+def test_status_all_lists_jobs_from_every_worktree(
+    h: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wt1, wt2 = make_worktree(h, "wt1"), make_worktree(h, "wt2")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    wt_run(wt1, "new", "첫 번째", "--base", "main")
+    wt_run(wt2, "new", "두 번째", "--base", "main")
+    capsys.readouterr()
+    assert h.run("status", "--all") == 0
+    out = capsys.readouterr().out
+    assert "J001" in out and "J002" in out
+    assert "wt1" in out and "wt2" in out
+
+
+def test_merge_waits_for_lock_held_by_another_job(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    to_validated(h)
+    merge_lock(h).write_text(json.dumps({"job": "J999", "at": h.now}), encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MERGE_WAIT_S", "10")
+    threading.Timer(0.5, lambda: merge_lock(h).unlink()).start()
+    assert h.run("merge", "J001") == 0
+    assert h.job()["status"] == "MERGED"
+
+
+def test_block_with_timeout_reason(h: Harness) -> None:
+    h.to_building()
+    assert h.run("block", "J001", "--reason", "TIMEOUT", "--detail", "실행 래퍼 시간 초과") == 0
+    assert h.job()["blocked"]["reason"] == "TIMEOUT"
+
+
+def test_merge_never_commits_python_caches(h: Harness) -> None:
+    to_validated(h)
+    cache = h.repo / "backend/src/bookmarks/__pycache__/main.cpython-312.pyc"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(b"\x00cache")
+    assert h.run("merge", "J001") == 0
+    assert "__pycache__" not in git(h.repo, "ls-files")

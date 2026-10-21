@@ -7,7 +7,7 @@ Claude Code·Codex 등 도구 전용 파일은 이 문서를 따르는 얇은 �
 
 - 상태는 `factory/state.json`에만 있고, **`python scripts/factory.py` 명령만** 상태를 바꾼다. 사람이 읽는 요약 `factory-state.md`, 세션 표시 `factory/heartbeat.json`도 직접 고치지 않는다.
 - 단계를 넘기는 판단(Red 확인, 검증 통과, 잠긴 파일 변경 여부, 위험 등급, 시간·재시도 상한, 머지 결과)은 `factory.py`가 직접 실행하고 기록한다. 에이전트의 "완료했다"는 말은 근거가 아니다.
-- 한 번에 작업 하나만 진행한다. 머지도 한 번에 하나씩이다 (merge lock).
+- checkout(worktree) 하나에 작업 하나다. 여러 작업은 `scripts/dispatch.py`가 작업마다 worktree를 만들어 동시에 진행한다. 머지는 한 번에 하나씩이다 (merge lock).
 
 ## 역할
 
@@ -73,6 +73,23 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 
 push는 하지 않는다. 원격 반영은 사람이 한다.
 
+base 브랜치가 다른 worktree(보통 기본 checkout)에 checkout되어 있으면, rebase·재검증은 작업 worktree에서 하고 머지 커밋은 그 base checkout에서 만든다. base checkout에 커밋되지 않은 변경이 있으면 머지하지 않고 상태를 유지한다. 다른 작업이 머지 중이면 lock을 최대 3분 기다린다.
+
+## 병렬 실행 (`scripts/dispatch.py`, 사람 전용)
+
+```
+python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>" "<요구사항 3>"
+```
+
+1. 기본 checkout이 base 브랜치 위에 있고 깨끗해야 한다 (머지가 이곳에서 일어난다). 실행 중에는 기본 checkout을 고치지 않는다.
+2. 요구사항마다 `../<레포>.jobs/<작업 ID>/`에 worktree를 만들고 의존성을 설치한 뒤 `factory.py new --base <base>`로 작업을 만든다. 작업 상태는 worktree마다 따로 있다.
+3. 작업마다 headless `claude -p` 세션을 띄운다. 권한은 `.claude/settings.json`의 allow 목록을 그대로 넘긴다 (새 worktree는 신뢰 승인 전이라 프로젝트 설정의 allow가 무시된다. hook은 동작한다).
+4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
+5. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다. 사람은 그 worktree에서 `approve`·`resume`·`drop`을 실행한다.
+6. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
+- 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).
+- 인증: `ANTHROPIC_API_KEY` 환경변수가 있으면 API 키, 없으면 로그인 세션(구독). `--require-api-key`로 API 키를 강제할 수 있다. 키 값은 출력·기록하지 않는다.
+
 ## 세션 복구 (`recover`)
 
 - 진행 중 작업이 있으면 보호 hook이 도구 호출마다 `factory/heartbeat.json`에 세션 ID와 시각을 남긴다.
@@ -114,7 +131,8 @@ push는 하지 않는다. 원격 반영은 사람이 한다.
 ## 오케스트레이터 진행 순서
 
 0. `python scripts/factory.py status`로 진행 중 작업이 있는지 본다.
-   - 진행 중(또는 APPROVED) 작업이 있으면 새 작업을 만들지 않는다. 이전 세션이 끊긴 것이므로 `recover <ID>`로 이어받고, 출력된 다음 단계부터 아래 순서를 이어 간다.
+   - dispatcher가 배정한 작업(프롬프트에 작업 ID가 있고 QUEUED)이면 recover 없이 3번부터 진행한다.
+   - 그 밖에 진행 중(또는 APPROVED) 작업이 있으면 새 작업을 만들지 않는다. 이전 세션이 끊긴 것이므로 `recover <ID>`로 이어받고, 출력된 다음 단계부터 아래 순서를 이어 간다.
    - `recover`가 "5분이 지난 뒤"라며 거부하면 멈추고 보고한다.
 1. 요구사항이 검증을 약하게 하거나(테스트 건너뛰기, 검사 끄기) 그 밖에 사람이 정해야 하는 내용이면, `new` 후 바로 `block <ID> --reason NEEDS_DECISION --detail "<이유>"`로 기록하고 멈춘다.
 2. `python scripts/factory.py new "<요구사항>"` → job ID 확인

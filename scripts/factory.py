@@ -44,6 +44,7 @@ MAX_ATTEMPTS = 3
 MAX_SPEC_REVISIONS = 1
 EXTEND_RATIO = 0.5
 LOCK_TTL_S = 300  # 마지막 활동 후 이 시간이 지나야 다른 세션이 작업을 이어받는다
+MERGE_WAIT_S = 180  # 다른 작업이 머지 중이면 lock을 이만큼 기다린다 (병렬 실행)
 AUTO_MERGE_RISKS = {"LOW"}
 
 ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING"}
@@ -182,6 +183,17 @@ def _fmt_minutes(seconds: float) -> str:
     return f"{seconds / 60:.1f}분"
 
 
+def _job_note(job: Job) -> str:
+    if job["status"] == "BLOCKED" and job.get("blocked"):
+        return f"{job['blocked']['reason']}: {job['blocked']['detail']}"[:80]
+    if job["status"] in {"APPROVED", "MERGED"} and job.get("approval"):
+        note = f"승인 {job['approval']['by']}"
+        if job.get("merge_commit"):
+            note += f", 머지 커밋 {job['merge_commit'][:7]}"
+        return note
+    return ""
+
+
 def render_summary(state: State) -> str:
     lines = [
         "# 팩토리 상태",
@@ -194,13 +206,7 @@ def render_summary(state: State) -> str:
         "|---|---|---|---|---|---|---|---|",
     ]
     for job in state["jobs"].values():
-        note = ""
-        if job["status"] == "BLOCKED" and job.get("blocked"):
-            note = f"{job['blocked']['reason']}: {job['blocked']['detail']}"[:80]
-        elif job["status"] in {"APPROVED", "MERGED"} and job.get("approval"):
-            note = f"승인 {job['approval']['by']}"
-            if job.get("merge_commit"):
-                note += f", 머지 커밋 {job['merge_commit'][:7]}"
+        note = _job_note(job)
         cells = [
             job["id"],
             job["status"],
@@ -511,17 +517,24 @@ def _read_merge_lock(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _acquire_merge_lock(root: Path, job_id: str) -> str | None:
-    """lock을 잡으면 None, 다른 작업이 잡고 있으면 그 작업 ID."""
+def _acquire_merge_lock(root: Path, job_id: str, wait_s: float = 0.0) -> str | None:
+    """lock을 잡으면 None. 다른 작업이 wait_s 동안 놓지 않으면 그 작업 ID."""
     path = _git_path(root, MERGE_LOCK, common=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        holder = str(_read_merge_lock(path).get("job"))
-        return None if holder == job_id else holder
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"job": job_id, "at": now()}, handle)
-    return None
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            holder = str(_read_merge_lock(path).get("job"))
+            if holder == job_id:
+                return None
+            if time.monotonic() >= deadline:
+                return holder
+            time.sleep(1.0)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"job": job_id, "at": now()}, handle)
+        return None
 
 
 def _release_merge_lock(root: Path, job_id: str) -> bool:
@@ -616,7 +629,11 @@ def parse_contract(text: str, job_id: str) -> dict[str, Any]:
 
 
 def _exclude_factory_files(root: Path) -> None:
-    """상태·리뷰 파일을 레포 설정과 관계없이 Git 추적에서 뺀다 (.git/info/exclude)."""
+    """상태·리뷰 파일과 실행 캐시를 레포 설정과 관계없이 Git 추적에서 뺀다 (.git/info/exclude).
+
+    merge가 작업 브랜치를 `git add -A`로 커밋하므로, .gitignore가 빠진 레포에서도 캐시가
+    커밋되어 병렬 작업끼리 충돌하지 않게 한다.
+    """
     exclude = root / _git(root, "rev-parse", "--git-path", "info/exclude").strip()
     exclude.parent.mkdir(parents=True, exist_ok=True)
     current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
@@ -627,6 +644,10 @@ def _exclude_factory_files(root: Path) -> None:
         HEARTBEAT_PATH,
         f"{REVIEWS_DIR}/",
         ".pytest_tmp*/",
+        "__pycache__/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        ".pytest_cache/",
     ]
     missing = [w for w in wanted if w not in current.splitlines()]
     if missing:
@@ -658,14 +679,23 @@ def _create_job_branch(root: Path, state: State) -> tuple[str, str]:
     raise FactoryError("새 작업 브랜치를 만들지 못했습니다 (factory/J* 번호 충돌)")
 
 
-def cmd_new(root: Path, state: State, requirement: str) -> str:
+def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None = None) -> str:
     active = state["active"]
     if active and state["jobs"][active]["status"] not in CLOSED_STATUSES:
-        raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (Phase 1은 한 번에 하나)")
+        raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (checkout 하나에 한 작업)")
     if _git(root, "status", "--porcelain", "--untracked-files=no").strip():
         raise FactoryError("작업 트리에 커밋되지 않은 변경이 있습니다")
     base = _git(root, "rev-parse", "HEAD").strip()
-    base_branch = _git(root, "branch", "--show-current").strip()
+    if base_branch is None:
+        base_branch = _git(root, "branch", "--show-current").strip()
+        if not base_branch:
+            raise FactoryError(
+                "브랜치가 없는 checkout(detached HEAD)에서는 --base <브랜치>가 필요합니다"
+            )
+    elif _git(root, "rev-parse", base_branch).strip() != base:
+        raise FactoryError(
+            f"HEAD가 {base_branch}의 끝과 다릅니다. 최신 {base_branch}에서 시작하세요"
+        )
     job_id, branch = _create_job_branch(root, state)
     _exclude_factory_files(root)
     _clear_heartbeat(root)
@@ -990,10 +1020,38 @@ def _commit_job(root: Path, job: Job, message: str) -> str | None:
     return _git(root, "rev-parse", "HEAD").strip()
 
 
+def _worktrees(root: Path) -> list[tuple[Path, str | None]]:
+    """(경로, checkout된 브랜치) 목록. 브랜치가 없으면(detached) None."""
+    entries: list[tuple[Path, str | None]] = []
+    for line in _git(root, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            entries.append((Path(line[len("worktree ") :]), None))
+        elif line.startswith("branch ") and entries:
+            entries[-1] = (entries[-1][0], line[len("branch ") :].removeprefix("refs/heads/"))
+    return entries
+
+
+def _base_checkout(root: Path, job: Job) -> Path | None:
+    """base 브랜치가 다른 worktree에 checkout되어 있으면 그 경로 (병렬 실행, Phase 3)."""
+    here = root.resolve()
+    for path, branch in _worktrees(root):
+        if branch == job["base_branch"] and path.resolve() != here:
+            return path
+    return None
+
+
+def _return_to_base(root: Path, job: Job) -> None:
+    """base가 다른 worktree에 있으면 작업 브랜치에 그대로 남는다."""
+    if _base_checkout(root, job) is not None:
+        return
+    if _git(root, "branch", "--show-current").strip() != job["base_branch"]:
+        _git(root, "switch", "-q", job["base_branch"])
+
+
 def _commit_and_return(root: Path, job: Job, message: str) -> str | None:
     """작업 브랜치에 결과를 커밋하고 원래 브랜치로 돌아간다. 사람이 실행한 명령에서만 호출된다."""
     commit = _commit_job(root, job, message)
-    _git(root, "switch", "-q", job["base_branch"])
+    _return_to_base(root, job)
     return commit
 
 
@@ -1022,6 +1080,12 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
     job_id = job["id"]
     if _git(root, "branch", "--show-current").strip() != job["branch"]:
         _git(root, "switch", "-q", job["branch"])
+    target = _base_checkout(root, job)
+    if target is not None and _git(target, "status", "--porcelain", "--untracked-files=no").strip():
+        return 1, (
+            f"{job_id}: {job['base_branch']} checkout({target})에 커밋되지 않은 변경이 있어 "
+            "머지하지 않습니다 (상태 유지). 정리한 뒤 다시 merge"
+        )
     if tree_fingerprint(root, job) != job.get("verified_tree"):
         _block(job, "TREE_CHANGED", "검증·승인 이후 작업 트리가 바뀌었습니다")
         return 1, f"{job_id}: BLOCKED (TREE_CHANGED). 검증한 변경과 머지할 변경이 다릅니다"
@@ -1072,7 +1136,10 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
         job["verified_tree"] = tree_fingerprint(root, job)
         job["commit"] = _git(root, "rev-parse", "HEAD").strip()
 
-    _git(root, "switch", "-q", job["base_branch"])
+    # base가 다른 worktree(기본 checkout)에 있으면 그곳에서 머지한다. 작업 worktree는 그대로 둔다
+    merge_root = target or root
+    if target is None:
+        _git(root, "switch", "-q", job["base_branch"])
     merged = subprocess.run(
         [
             "git",
@@ -1084,7 +1151,7 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
             f"factory {job_id} 머지: {job['requirement']}\n\n{summary}",
             job["branch"],
         ],
-        cwd=root,
+        cwd=merge_root,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1092,8 +1159,9 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
         check=False,
     )
     if merged.returncode != 0 or not _is_merged(root, job):
-        _abort_git_operations(root)
-        _git(root, "switch", "-q", job["branch"])
+        _abort_git_operations(merge_root)
+        if target is None:
+            _git(root, "switch", "-q", job["branch"])
         _block(job, "CONFLICT", f"merge 실패: {merged.stderr.strip()[-300:]}")
         return 1, f"{job_id}: BLOCKED (CONFLICT). merge 실패"
     _mark_merged(root, state, job)
@@ -1110,7 +1178,8 @@ def cmd_merge(root: Path, state: State, job_id: str) -> tuple[int, str]:
     _require(job, "APPROVED")
     if not job.get("approval") or job["approval"].get("decision") != "approved":
         raise FactoryError(f"{job_id}에 승인 기록이 없습니다")
-    holder = _acquire_merge_lock(root, job_id)
+    wait_s = float(os.environ.get("FACTORY_MERGE_WAIT_S", MERGE_WAIT_S))
+    holder = _acquire_merge_lock(root, job_id, wait_s)
     if holder is not None:
         return 1, f"{job_id}: 다른 작업 {holder}가 머지 중입니다 (상태 유지). 끝난 뒤 다시 merge"
     try:
@@ -1165,8 +1234,7 @@ def cmd_recover(root: Path, state: State, job_id: str, force: bool) -> str:
         }
     )
     if job["status"] == "APPROVED" and _is_merged(root, job):
-        if _git(root, "branch", "--show-current").strip() != job["base_branch"]:
-            _git(root, "switch", "-q", job["base_branch"])
+        _return_to_base(root, job)
         _mark_merged(root, state, job)
         return f"{job_id}: 이전 세션이 머지까지 끝냈습니다 → MERGED ({job['merge_commit'][:7]})"
     if _git(root, "branch", "--show-current").strip() != job["branch"]:
@@ -1226,12 +1294,37 @@ def cmd_status(state: State, as_json: bool) -> str:
     return render_summary(state)
 
 
+def cmd_status_all(root: Path) -> str:
+    """모든 worktree의 작업을 한 표로 보여준다 (작업별 상태는 각 worktree에 있다)."""
+    lines = [
+        "# 팩토리 상태 (모든 worktree)",
+        "",
+        "| worktree | ID | 상태 | 위험 | 활성 시간 / 상한 | 요구사항 | 비고 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for path, _ in _worktrees(root):
+        for job in load_state(path)["jobs"].values():
+            cells = [
+                path.as_posix(),
+                job["id"],
+                job["status"],
+                job.get("risk") or job.get("risk_declared") or "-",
+                f"{_fmt_minutes(job['time']['active_s'])} / {_fmt_minutes(job['time']['cap_s'])}",
+                job["requirement"][:50],
+                _job_note(job),
+            ]
+            lines.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
     root = root or Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(prog="factory", description="팩토리 상태 관리")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("new").add_argument("requirement")
+    new = sub.add_parser("new")
+    new.add_argument("requirement")
+    new.add_argument("--base", help="머지 대상 브랜치 (detached worktree에서 필요)")
     for name in ("spec", "red", "verify", "validate", "merge", "drop"):
         sub.add_parser(name).add_argument("job_id")
     block = sub.add_parser("block")
@@ -1239,11 +1332,12 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     block.add_argument(
         "--reason",
         required=True,
-        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "MANUAL"],
+        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "TIMEOUT", "MANUAL"],
     )
     block.add_argument("--detail", required=True)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
+    status.add_argument("--all", action="store_true", help="모든 worktree의 작업")
     approve = sub.add_parser("approve")
     approve.add_argument("job_id")
     approve.add_argument("--reject")
@@ -1259,7 +1353,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     code = 0
     try:
         if args.command == "new":
-            message = cmd_new(root, state, args.requirement)
+            message = cmd_new(root, state, args.requirement, args.base)
         elif args.command == "spec":
             message = cmd_spec(root, state, args.job_id)
         elif args.command == "red":
@@ -1280,6 +1374,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             message = cmd_resume(root, state, args.job_id, args.extend)
         elif args.command == "drop":
             message = cmd_drop(root, state, args.job_id)
+        elif args.all:
+            print(cmd_status_all(root))
+            return 0
         else:
             print(cmd_status(state, args.json))
             return 0

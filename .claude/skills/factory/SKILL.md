@@ -27,6 +27,8 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 ## 시작할 때
 
 - 먼저 `python scripts/factory.py status`를 실행한다. 진행 중이거나 APPROVED인 작업이 있으면 새 작업을 만들지 말고 `python scripts/factory.py recover <ID>`로 이어받는다 (PROCESS.md 0번).
+- 프롬프트가 dispatcher가 배정한 작업 ID를 주고 그 작업이 QUEUED이면, recover 없이 spec 작성부터 진행한다.
+- `scripts/dispatch.py`는 실행하지 않는다 (사람 전용).
 - hook이 "다른 세션이 진행 중"이라며 막으면 우회하지 말고 멈추고 보고한다.
 
 ## 멈춰야 할 때

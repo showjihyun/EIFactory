@@ -338,3 +338,10 @@ def test_same_session_keeps_working(tmp_path: Path) -> None:
     job = make_job("BUILDING")
     assert allowed(call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), job))
     assert heartbeat(tmp_path) == {"session": "s1", "at": NOW}
+
+
+def test_dispatch_is_human_only(tmp_path: Path) -> None:
+    for job in (None, make_job("BUILDING")):
+        proc = call(tmp_path, "Bash", bash("python scripts/dispatch.py 요구사항"), job)
+        assert not allowed(proc)
+        assert "사람" in proc.stderr
