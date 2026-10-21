@@ -178,3 +178,22 @@ def test_api_key_never_appears_in_command_or_report(
     assert os.environ["ANTHROPIC_API_KEY"] not in " ".join(
         dispatch.agent_command(repo, "p", "claude-opus-5-5")
     )
+
+
+def test_setup_runs_in_final_worktree_path(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 의존성 설치(가상환경)는 절대 경로를 품으므로, worktree를 옮긴 뒤에 해야 한다
+    recorder = tmp_path / "record_cwd.py"
+    log = tmp_path / "setup_cwd.txt"
+    recorder.write_text(
+        "import os, sys\nopen(sys.argv[1], 'a', encoding='utf-8').write(os.getcwd())\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "FACTORY_SETUP_CMD", json.dumps([["backend", [sys.executable, str(recorder), str(log)]]])
+    )
+    _, report = run(repo, "--keep-merged", "요구사항")
+    job = report["jobs"][0]
+    recorded = Path(log.read_text(encoding="utf-8").strip())
+    assert recorded == Path(job["worktree"]) / "backend"

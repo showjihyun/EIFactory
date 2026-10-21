@@ -146,13 +146,6 @@ def run_job(
     started = time.time()
     with _git_lock:
         _git(root, "worktree", "add", "-q", "--detach", str(slot), base)
-    for area, cmd in setup_steps():
-        done = _run(cmd, slot / area)
-        if done.returncode != 0:
-            result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
-            result["worktree"] = str(slot)
-            return result
-
     created = _run([sys.executable, "scripts/factory.py", "new", requirement, "--base", base], slot)
     if created.returncode != 0:
         result["error"] = f"new 실패: {created.stdout.strip()[-500:]}"
@@ -164,6 +157,12 @@ def run_job(
     with _git_lock:
         _git(root, "worktree", "move", str(slot), str(worktree))
     result.update(job_id=job_id, worktree=str(worktree))
+    # 가상환경은 절대 경로를 품으므로 worktree를 옮긴 뒤에 설치한다
+    for area, cmd in setup_steps():
+        done = _run(cmd, worktree / area)
+        if done.returncode != 0:
+            result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
+            return result
 
     prompt = PROMPT.format(job_id=job_id, requirement=requirement)
     log_path = logs / f"{job_id}.jsonl"
