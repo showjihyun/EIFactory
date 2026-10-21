@@ -202,3 +202,78 @@ def test_setup_runs_in_final_worktree_path(
     job = report["jobs"][0]
     recorded = Path(log.read_text(encoding="utf-8").strip())
     assert recorded == Path(job["worktree"]) / "backend"
+
+
+# ---------- Phase 3b: 컨테이너 격리 ----------
+
+
+def docker_job(tmp_path: Path) -> "dispatch.DockerJob":
+    worktree = tmp_path / "repo.jobs" / "J001"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(
+        f"gitdir: {(tmp_path / 'repo/.git/worktrees/slot-1').as_posix()}\n", encoding="utf-8"
+    )
+    return dispatch.DockerJob(
+        root=tmp_path / "repo", worktree=worktree, job_id="J001", stamp="s1", image="agent:t"
+    )
+
+
+def mounts(cmd: list[str]) -> list[str]:
+    return [cmd[i + 1] for i, a in enumerate(cmd) if a == "--mount"]
+
+
+def test_gitdir_name_comes_from_worktree_git_file(tmp_path: Path) -> None:
+    assert docker_job(tmp_path).gitdir_name == "slot-1"
+
+
+def test_session_container_is_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy-should-not-leak")
+    job = docker_job(tmp_path)
+    cmd = dispatch.docker_session_command(job, ["claude", "-p", "x"])
+    assert cmd[cmd.index("--network") + 1] == dispatch.INTERNAL_NETWORK
+    assert "HTTPS_PROXY=http://factory-proxy:3128" in cmd
+    assert "FACTORY_MERGE_ON_HOST=1" in cmd
+    # 키는 이름만 넘겨 값이 명령줄에 나타나지 않는다
+    assert cmd[cmd.index("ANTHROPIC_API_KEY") - 1] == "-e"
+    assert "sk-dummy-should-not-leak" not in " ".join(cmd)
+    # 공유 .git은 읽기 전용, worktree의 .git 파일은 컨테이너 경로로 바꿔 끼운다
+    m = mounts(cmd)
+    assert any("target=/repo-git" in x and x.endswith(",readonly") for x in m)
+    assert any("target=/workspaces/bookmark-factory/.git," in x and "readonly" in x for x in m)
+    assert job.dotgit.read_text(encoding="utf-8") == "gitdir: /repo-git/worktrees/slot-1\n"
+    assert cmd[-3:] == ["claude", "-p", "x"]
+
+
+def test_setup_container_has_network_but_no_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    cmd = dispatch.docker_setup_command(docker_job(tmp_path))
+    assert cmd[cmd.index("--network") + 1] == "bridge"
+    assert "ANTHROPIC_API_KEY" not in cmd
+
+
+def test_tool_container_for_host_merge_is_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    cmd = dispatch.docker_tool_command(docker_job(tmp_path), ["python", "scripts/verify.py"])
+    assert cmd[cmd.index("--network") + 1] == dispatch.INTERNAL_NETWORK
+    assert "ANTHROPIC_API_KEY" not in cmd
+    assert not any(a.startswith("HTTPS_PROXY") for a in cmd)
+    assert cmd[-2:] == ["python", "scripts/verify.py"]
+
+
+def test_factory_settings_are_passed_into_container_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FACTORY_VALIDATOR_CMD", '["python", "fake.py"]')
+    cmd = dispatch.docker_session_command(docker_job(tmp_path), ["x"])
+    assert cmd[cmd.index("FACTORY_VALIDATOR_CMD") - 1] == "-e"
+    assert "FACTORY_AGENT_CMD" not in cmd
+
+
+def test_docker_mode_requires_api_key(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    assert dispatch.main(["--isolation", "docker", "요구사항"], root=repo) == 2

@@ -11,6 +11,13 @@ RUN apt-get update \
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.2 /uv /uvx /usr/local/bin/
 
+# backend용 Python을 이미지에 넣는다. 실행 중에 내려받으면 네트워크가 막힌 컨테이너(Phase 3b)에서
+# 쓸 수 없고, 사용자 홈에 받으면 컨테이너가 끝날 때 사라진다. 호스트와 같은 3.12로 고정한다.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_PYTHON=3.12 \
+    UV_PYTHON_DOWNLOADS=never
+RUN UV_PYTHON_DOWNLOADS=automatic uv python install 3.12
+
 RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then npm install -g @anthropic-ai/claude-code; fi
 
 # node_modules는 이름 있는 볼륨으로 마운트한다. 이미지에 경로를 미리 만들어 두면

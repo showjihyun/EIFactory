@@ -70,9 +70,19 @@ LOCK_PATTERNS = [
     "factory/PROCESS.md",
     "factory/prompts/*",
     ".claude/*",
+    # 격리 환경 (Phase 3b): 이미지 정의와 네트워크 허용 목록
+    ".devcontainer/*",
+    "docker/*",
 ]
 # 새로 만들어져도 안 되는 경로 (테스트 추가는 허용)
-NO_NEW_FILE_PATTERNS = ["scripts/*", "factory/prompts/*", ".claude/*", "Makefile"]
+NO_NEW_FILE_PATTERNS = [
+    "scripts/*",
+    "factory/prompts/*",
+    ".claude/*",
+    "Makefile",
+    ".devcontainer/*",
+    "docker/*",
+]
 
 # 위험 등급 계산에서 제외하는 팩토리 산출물
 RISK_EXCLUDE = [STATE_PATH, SUMMARY_PATH, f"{SPECS_DIR}/*", f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
@@ -90,6 +100,7 @@ HIGH_PATHS = [
     ".claude/*",
     ".github/*",
     ".devcontainer/*",
+    "docker/*",
 ]
 MEDIUM_PATHS = [
     "Makefile",
@@ -1178,6 +1189,9 @@ def cmd_merge(root: Path, state: State, job_id: str) -> tuple[int, str]:
     _require(job, "APPROVED")
     if not job.get("approval") or job["approval"].get("decision") != "approved":
         raise FactoryError(f"{job_id}에 승인 기록이 없습니다")
+    if os.environ.get("FACTORY_MERGE_ON_HOST") == "1":
+        # 컨테이너 세션(Phase 3b)은 base 브랜치를 건드리지 않는다. 세션이 끝나면 호스트가 머지한다
+        return 0, f"{job_id}: APPROVED. 컨테이너 세션이라 머지는 호스트가 합니다. 여기서 멈추세요"
     wait_s = float(os.environ.get("FACTORY_MERGE_WAIT_S", MERGE_WAIT_S))
     holder = _acquire_merge_lock(root, job_id, wait_s)
     if holder is not None:
@@ -1319,7 +1333,8 @@ def cmd_status_all(root: Path) -> str:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    # FACTORY_ROOT: 다른 checkout(작업 worktree)을 대상으로 실행할 때 (dispatch.py가 사용)
+    root = root or Path(os.environ.get("FACTORY_ROOT") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="factory", description="팩토리 상태 관리")
     sub = parser.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new")

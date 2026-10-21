@@ -148,6 +148,8 @@ def test_spec_stage_denies_implementation_code(tmp_path: Path) -> None:
         "scripts/verify.py",
         "Makefile",
         "backend/pyproject.toml",
+        "docker/proxy/filter",
+        ".devcontainer/Dockerfile",
     ],
 )
 def test_policy_and_config_files_are_denied_during_a_job(tmp_path: Path, path: str) -> None:

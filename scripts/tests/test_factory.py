@@ -1071,3 +1071,40 @@ def test_merge_never_commits_python_caches(h: Harness) -> None:
     cache.write_bytes(b"\x00cache")
     assert h.run("merge", "J001") == 0
     assert "__pycache__" not in git(h.repo, "ls-files")
+
+
+# ---------- Phase 3b: 컨테이너 실행 ----------
+
+
+def test_merge_is_left_to_host_inside_container(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    to_validated(h)
+    monkeypatch.setenv("FACTORY_MERGE_ON_HOST", "1")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") == 0
+    assert h.job()["status"] == "APPROVED"
+    assert git(h.repo, "rev-parse", "main") == base
+    assert not merge_lock(h).exists()
+
+
+def test_factory_root_can_point_at_another_checkout(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 호스트는 작업 worktree의 factory.py(에이전트가 바꿀 수 있음)가 아니라 기본 checkout의
+    # factory.py를 FACTORY_ROOT로 작업 worktree에 겨눠 실행한다
+    monkeypatch.setenv("FACTORY_ROOT", str(h.repo))
+    assert factory.main(["new", "요구사항"]) == 0
+    assert h.job()["status"] == "QUEUED"
+
+
+def test_network_allowlist_change_blocks_the_job(h: Harness) -> None:
+    # 격리 환경(이미지·네트워크 허용 목록)은 팩토리 작업으로 바꿀 수 없다
+    h.to_building()
+    (h.repo / "docker/proxy").mkdir(parents=True)
+    (h.repo / "docker/proxy/filter").write_text("^.*$\n", encoding="utf-8")
+    h.run("verify", "J001")
+    job = h.job()
+    assert job["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
+    assert "docker/proxy/filter" in job["blocked"]["detail"]
+    assert factory._matches("docker/proxy/filter", factory.HIGH_PATHS)
