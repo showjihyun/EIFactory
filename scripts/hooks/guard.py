@@ -1,10 +1,13 @@
-"""PreToolUse 보호 hook (기획안 6.8, 7.3, 7.6).
+"""PreToolUse 보호 hook (기획안 6.3, 6.8, 7.3, 7.6).
 
 도구 호출 직전에 실행되어, 현재 팩토리 작업 단계에 맞지 않는 수정을 막는다.
 stdin으로 hook 입력 JSON을 받고, 막을 때는 이유를 stderr에 쓰고 종료 코드 2를 낸다.
 
 이 hook은 마크다운 규칙을 대신하는 강제 장치다. 같은 판단을 factory.py verify가
 파일 해시로 한 번 더 확인한다 (이중 방어).
+
+진행 중 작업이 있으면 허용한 호출마다 heartbeat(세션 ID, 시각)를 남긴다. 다른 세션의
+heartbeat가 있으면 그 세션이 살아 있는 동안은 막고, 끊긴 뒤에는 recover로 이어받게 한다.
 """
 
 from __future__ import annotations
@@ -19,26 +22,30 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from factory import (  # noqa: E402
+    HEARTBEAT_PATH,
     LOCK_PATTERNS,
+    LOCK_TTL_S,
     STATE_PATH,
     SUMMARY_PATH,
     _matches,
     active_seconds,
     now,
+    read_heartbeat,
 )
 from proc import use_utf8_output  # noqa: E402
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
-STATE_FILES = {STATE_PATH, SUMMARY_PATH}
+STATE_FILES = {STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH}
 TEST_PATTERNS = ["backend/tests/*", "frontend/src/*.test.ts", "frontend/src/*.test.tsx"]
 POLICY_AND_CONFIG = [p for p in LOCK_PATTERNS if not _matches(p, TEST_PATTERNS)]
 SPEC_STAGE = {"QUEUED", "SPEC_READY"}
 BUILD_STAGE = {"BUILDING", "RETRY_REQUIRED"}
-STOPPED = {"VERIFYING", "APPROVAL_REQUIRED", "BLOCKED"}
-CLOSED = {"APPROVED", "DROPPED"}
+STOPPED = {"VERIFYING", "APPROVAL_REQUIRED", "APPROVED", "BLOCKED"}
+CLOSED = {"MERGED", "DROPPED"}
 
 FACTORY_CMD = re.compile(r"^\s*(uv run (--\S+ \S+ )*)?python3?\s+scripts/factory\.py\b")
-HUMAN_ONLY = re.compile(r"scripts/factory\.py\s+(approve|resume|drop)\b")
+HUMAN_ONLY = re.compile(r"scripts/factory\.py\s+(approve\b|resume\b|drop\b|recover\b.*--force)")
+LOCK_FREE = re.compile(r"scripts/factory\.py\s+(status|recover)\b")
 GIT_PUSH = re.compile(r"\bgit\s+push\b")
 GIT_STATE = re.compile(
     r"\bgit\s+(commit|checkout|switch|reset|rebase|merge|branch|stash|restore|clean|tag|"
@@ -117,9 +124,36 @@ def check_write(path: str, job: dict[str, Any] | None) -> None:
         )
 
 
+def check_session(root: Path, session: str, tool: str, command: str) -> bool:
+    """다른 세션이 작업 중이면 막는다. heartbeat를 갱신해도 되면 True."""
+    lock_free = tool == "Bash" and bool(FACTORY_CMD.match(command) and LOCK_FREE.search(command))
+    beat = read_heartbeat(root)
+    if beat is None or beat.get("session") == session:
+        return not lock_free
+    if lock_free:
+        return False
+    idle = now() - float(beat.get("at", 0))
+    if idle < LOCK_TTL_S:
+        deny(
+            f"다른 세션이 {idle:.0f}초 전까지 이 작업을 진행했습니다. 같은 작업을 두 세션이 "
+            "동시에 진행하지 않습니다. 상태만 확인하고 멈추세요."
+        )
+    deny(
+        "이전 세션이 끊긴 작업입니다. 먼저 python scripts/factory.py recover <작업ID>로 "
+        "이어받으세요."
+    )
+    return False
+
+
+def write_heartbeat(root: Path, session: str) -> None:
+    path = root / HEARTBEAT_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session": session, "at": now()}), encoding="utf-8")
+
+
 def check_bash(command: str, job: dict[str, Any] | None) -> None:
     if HUMAN_ONLY.search(command):
-        deny("approve·resume·drop은 사람 전용 명령입니다.")
+        deny("approve·resume·drop·recover --force는 사람 전용 명령입니다.")
     if GIT_PUSH.search(command):
         deny("git push는 사람만 합니다.")
     is_factory = bool(FACTORY_CMD.match(command))
@@ -147,13 +181,18 @@ def main() -> None:
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
     job = load_active_job(root)
+    session = str(payload.get("session_id") or "unknown")
+    command = tool_input.get("command", "") if tool == "Bash" else ""
+    record = job is not None and check_session(root, session, tool, command)
     if tool in WRITE_TOOLS:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         path = relative(raw, root)
         if path is not None:
             check_write(path, job)
     elif tool == "Bash":
-        check_bash(tool_input.get("command", ""), job)
+        check_bash(command, job)
+    if record:
+        write_heartbeat(root, session)
 
 
 if __name__ == "__main__":

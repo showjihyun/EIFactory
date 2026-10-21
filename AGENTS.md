@@ -3,7 +3,7 @@
 AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(백엔드 FastAPI, 프론트엔드 React)과 검증 도구로 이루어진다.
 기획 문서는 이 레포 밖(`C:\WorkSpace\sw-factory\기획안\ai_sw_factory_기획안.md`)에 있다.
 
-> 현재 Phase 1(단일 작업 성공 경로)이다. 팩토리 절차는 `factory/PROCESS.md`, 정책 요약은 아래 "팩토리 정책"에 있다.
+> 현재 Phase 2(실패 복구와 안전한 머지)다. 팩토리 절차는 `factory/PROCESS.md`, 정책 요약은 아래 "팩토리 정책"에 있다.
 
 ## 구조
 
@@ -17,7 +17,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |
 | `factory/prompts/validator.md` | Validator 지시문 |
-| `factory/state.json`, `factory-state.md` | 작업 상태 (`factory.py`만 씀, Git 추적 제외) |
+| `factory/state.json`, `factory-state.md`, `factory/heartbeat.json` | 작업 상태와 세션 표시 (`factory.py`·hook만 씀, Git 추적 제외) |
 | `factory/evals/tasks.md` | 평가 과제 (요구사항만, 기대 결과는 레포 밖) |
 | `.devcontainer/` | 격리 실행 환경 |
 
@@ -39,7 +39,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 
 ## 팩토리 정책
 
-- **완료의 정의**: 수락 테스트가 구현 전 Red(assertion 실패)였고, 구현 후 Green이며, `verify.py`가 통과하고, Validator가 PASS한 상태. `factory.py`가 이 순서를 직접 확인한다.
+- **완료의 정의**: 수락 테스트가 구현 전 Red(assertion 실패)였고, 구현 후 Green이며, `verify.py`가 통과하고, Validator가 PASS한 상태. `factory.py`가 이 순서를 직접 확인한다. 머지는 그 뒤에 승인이 있을 때만 한다.
 - **상태는 `python scripts/factory.py`만 바꾼다.** 절차와 명령은 `factory/PROCESS.md`를 따른다.
 - **위험 등급**: contract 선언과 `factory.py verify`가 diff로 계산한 등급 중 높은 쪽.
 
@@ -49,7 +49,9 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
   | MEDIUM | refactor, 공개 API·DB 스키마·의존성·검증 설정 변경, 테스트 skip 추가, 400줄 또는 15파일 이상 |
   | HIGH | 인증·인가, 데이터 삭제, 정책·절차 파일, CI 설정 |
 
-- **승인**: Phase 1은 위험 등급과 관계없이 전부 사람이 승인한다. `approve`, `resume`, `drop`은 사람 전용이다.
+- **승인과 머지**: LOW는 Validator PASS 후 자동 승인되고 `factory.py merge`가 머지한다. MEDIUM·HIGH는 사람이 `approve`해야 머지된다. 머지는 한 번에 하나씩, base 브랜치가 앞서 있으면 rebase 후 재검증하고 `--no-ff` 머지 커밋으로 남긴다. push는 사람만 한다.
+- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`.
+- **세션 복구**: 다른 세션이 작업 중이면 hook이 막는다. 이전 세션이 끊긴 지 5분이 지나면 `factory.py recover`로 이어받는다.
 - **시간 상한**: 소형 10분, 중형 30분 (활성 시간). 80%를 넘으면 재시도 대신 중단, 100%를 넘으면 hook이 수정을 막는다.
 - **재시도 상한**: 검증 실패 3회, 같은 실패 2회 연속, 스펙 재작성 1회를 넘으면 BLOCKED.
 

@@ -127,10 +127,10 @@ class Harness:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("def test_new():\n    assert False\n", encoding="utf-8")
 
-    def to_building(self) -> None:
+    def to_building(self, risk: str = "LOW") -> None:
         self.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
         assert self.run("new", "요구사항") == 0
-        self.write_spec()
+        self.write_spec(risk=risk)
         assert self.run("spec", "J001") == 0
         assert self.run("red", "J001") == 0
         assert self.job()["status"] == "BUILDING"
@@ -418,7 +418,7 @@ def test_declared_risk_is_never_lowered(h: Harness) -> None:
 # ---------- validate ----------
 
 
-def test_validate_pass_reaches_approval_required(h: Harness) -> None:
+def test_validate_pass_low_is_auto_approved(h: Harness) -> None:
     h.to_building()
     (h.repo / "backend/src/bookmarks/main.py").write_text("def list_items():\n    return [1]\n")
     h.run("verify", "J001")
@@ -429,7 +429,10 @@ def test_validate_pass_reaches_approval_required(h: Harness) -> None:
         validator='검토 완료\n{"verdict": "PASS", "issues": []}',
     )
     assert h.run("validate", "J001") == 0
-    assert h.job()["status"] == "APPROVAL_REQUIRED"
+    job = h.job()
+    assert job["status"] == "APPROVED"
+    assert job["approval"]["by"] == "auto"
+    assert h.state()["active"] == "J001"
     prompt = h.calls("validator")[0]["stdin"]
     assert "acceptance_tests" in prompt
     assert "return [1]" in prompt
@@ -520,21 +523,22 @@ def test_resume_extend_once(h: Harness) -> None:
 # ---------- human commands ----------
 
 
-def test_approve_records_human_decision_and_releases_job(h: Harness) -> None:
-    h.to_building()
+def test_approve_records_human_decision_and_merges(h: Harness) -> None:
+    h.to_building(risk="MEDIUM")
     h.run("verify", "J001")
     h.configure(
         red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator='{"verdict": "PASS", "issues": []}'
     )
     h.run("validate", "J001")
     assert h.run("approve", "J001") == 0
-    assert h.job()["status"] == "APPROVED"
+    assert h.job()["status"] == "MERGED"
     assert h.job()["approval"]["decision"] == "approved"
+    assert h.job()["approval"]["by"] == "human"
     assert h.state()["active"] is None
 
 
 def test_approve_reject_sends_back_to_retry(h: Harness) -> None:
-    h.to_building()
+    h.to_building(risk="MEDIUM")
     h.run("verify", "J001")
     h.configure(
         red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator='{"verdict": "PASS", "issues": []}'
@@ -575,8 +579,8 @@ def test_status_json(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:
     assert data["jobs"]["J001"]["status"] == "QUEUED"
 
 
-def test_approve_commits_job_branch_and_returns_to_base(h: Harness) -> None:
-    h.to_building()
+def test_approve_merges_job_branch_into_base(h: Harness) -> None:
+    h.to_building(risk="MEDIUM")
     (h.repo / "backend/src/bookmarks/main.py").write_text("def list_items():\n    return [1]\n")
     h.run("verify", "J001")
     h.configure(
@@ -586,16 +590,19 @@ def test_approve_commits_job_branch_and_returns_to_base(h: Harness) -> None:
     h.run("approve", "J001")
     assert git(h.repo, "branch", "--show-current") == "main"
     assert git(h.repo, "status", "--porcelain", "--untracked-files=normal") == ""
-    changed = git(h.repo, "diff", "--name-only", "main", "factory/J001").splitlines()
-    assert "backend/src/bookmarks/main.py" in changed
-    assert "backend/tests/acceptance/test_J001.py" in changed
-    assert "factory/specs/J001.md" in changed
-    assert "factory/state.json" not in changed
-    assert h.job()["commit"]
+    job = h.job()
+    merged = git(h.repo, "diff", "--name-only", job["base_commit"], "main").splitlines()
+    assert "backend/src/bookmarks/main.py" in merged
+    assert "backend/tests/acceptance/test_J001.py" in merged
+    assert "factory/specs/J001.md" in merged
+    assert "factory/state.json" not in merged
+    # 머지 커밋 하나로 남겨 git revert -m 1 한 번으로 되돌릴 수 있다
+    assert git(h.repo, "rev-parse", "main") == job["merge_commit"]
+    assert len(git(h.repo, "rev-list", "--parents", "-n", "1", "main").split()) == 3
 
 
 def test_next_job_starts_from_base_after_approve(h: Harness) -> None:
-    test_approve_commits_job_branch_and_returns_to_base(h)
+    test_approve_merges_job_branch_into_base(h)
     assert h.run("new", "다음 작업") == 0
     assert h.job("J002")["base_commit"] == git(h.repo, "rev-parse", "main")
 
@@ -616,3 +623,246 @@ def test_new_skips_ids_whose_branch_already_exists(h: Harness) -> None:
     assert h.run("new", "요구사항") == 0
     assert h.state()["active"] == "J003"
     assert git(h.repo, "branch", "--show-current") == "factory/J003"
+
+
+# ---------- Phase 2: 자동 승인·머지 ----------
+
+PASS = '{"verdict": "PASS", "issues": []}'
+MAIN_PY = "backend/src/bookmarks/main.py"
+
+
+def to_validated(h: Harness, risk: str = "LOW", path: str = MAIN_PY, text: str = "") -> None:
+    h.to_building(risk=risk)
+    (h.repo / path).write_text(text or "def list_items():\n    return [1]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+
+
+def advance_main(h: Harness, path: str, text: str) -> str:
+    """다른 작업이 먼저 머지된 것처럼 main을 앞으로 보낸다 (작업 브랜치는 그대로)."""
+    other = h.repo.parent / "other"
+    git(h.repo, "worktree", "add", "-q", str(other), "main")
+    (other / path).parent.mkdir(parents=True, exist_ok=True)
+    (other / path).write_text(text, encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "다른 변경")
+    head = git(other, "rev-parse", "HEAD")
+    git(h.repo, "worktree", "remove", "--force", str(other))
+    return head
+
+
+def merge_lock(h: Harness) -> Path:
+    return h.repo / ".git" / "factory-merge.lock"
+
+
+def test_validate_pass_above_low_waits_for_human(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    assert job["risk"] == "HIGH"
+    assert job["approval"] is None
+
+
+def test_merge_auto_approved_low_job(h: Harness) -> None:
+    to_validated(h)
+    verify_calls = len(h.calls("verify"))
+    assert h.run("merge", "J001") == 0
+    job = h.job()
+    assert job["status"] == "MERGED"
+    assert h.state()["active"] is None
+    assert git(h.repo, "branch", "--show-current") == "main"
+    assert "return [1]" in (h.repo / MAIN_PY).read_text(encoding="utf-8")
+    assert git(h.repo, "rev-parse", "main") == job["merge_commit"]
+    # main이 그대로면 검증한 트리와 같으므로 재검증하지 않는다
+    assert len(h.calls("verify")) == verify_calls
+    assert not merge_lock(h).exists()
+
+
+def test_merge_requires_approval(h: Harness) -> None:
+    h.to_building()
+    h.run("verify", "J001")
+    assert h.run("merge", "J001") != 0
+    assert h.job()["status"] == "VERIFYING"
+
+
+def test_merge_rebases_and_reverifies_when_base_moved(h: Harness) -> None:
+    to_validated(h)
+    advance_main(h, "frontend/src/Other.tsx", "export const x = 1;\n")
+    verify_calls = len(h.calls("verify"))
+    assert h.run("merge", "J001") == 0
+    job = h.job()
+    assert job["status"] == "MERGED"
+    assert len(h.calls("verify")) == verify_calls + 1
+    assert (h.repo / "frontend/src/Other.tsx").exists()
+    assert "return [1]" in (h.repo / MAIN_PY).read_text(encoding="utf-8")
+
+
+def test_merge_conflict_blocks_and_leaves_base_untouched(h: Harness) -> None:
+    to_validated(h)
+    main_head = advance_main(h, MAIN_PY, "def list_items():\n    return [9]\n")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"]["reason"] == "CONFLICT"
+    assert git(h.repo, "rev-parse", "main") == main_head
+    assert git(h.repo, "branch", "--show-current") == "factory/J001"
+    assert not (h.repo / ".git" / "rebase-merge").exists()
+    assert not merge_lock(h).exists()
+
+
+def test_merge_reverify_failure_blocks(h: Harness) -> None:
+    to_validated(h)
+    main_head = advance_main(h, "frontend/src/Other.tsx", "export const x = 1;\n")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("test")], validator=PASS)
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"]["reason"] == "MERGE_CHECK_FAILED"
+    assert git(h.repo, "rev-parse", "main") == main_head
+
+
+def test_merge_blocks_when_tree_changed_after_verify(h: Harness) -> None:
+    to_validated(h)
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [666]\n", encoding="utf-8")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "TREE_CHANGED"
+    assert git(h.repo, "rev-parse", "main") == base
+
+
+def test_merge_refuses_auto_approval_if_recomputed_risk_is_not_low(h: Harness) -> None:
+    # 상태 파일이 조작되어 HIGH 작업이 자동 승인으로 둔갑한 경우
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    state = h.state()
+    job = state["jobs"]["J001"]
+    job.update(status="APPROVED", risk="LOW")
+    job["approval"] = {"by": "auto", "decision": "approved", "reason": "", "at": h.now}
+    (h.repo / "factory" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    assert job["risk"] == "HIGH"
+    assert git(h.repo, "rev-parse", "main") == base
+
+
+def test_merge_waits_while_another_job_holds_the_lock(h: Harness) -> None:
+    to_validated(h)
+    merge_lock(h).write_text(json.dumps({"job": "J999", "at": h.now}), encoding="utf-8")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") != 0
+    assert h.job()["status"] == "APPROVED"
+    assert git(h.repo, "rev-parse", "main") == base
+    assert merge_lock(h).exists()
+
+
+def test_approve_blocks_when_tree_changed_after_validation(h: Harness) -> None:
+    to_validated(h, risk="MEDIUM")
+    assert h.job()["status"] == "APPROVAL_REQUIRED"
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [666]\n", encoding="utf-8")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("approve", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "TREE_CHANGED"
+    assert git(h.repo, "rev-parse", "main") == base
+
+
+def test_validate_returns_to_building_when_tree_changed_after_verify(h: Harness) -> None:
+    h.to_building()
+    h.run("verify", "J001")
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [3]\n", encoding="utf-8")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") != 0
+    assert h.job()["status"] == "BUILDING"
+    assert h.calls("validator") == []
+
+
+def test_new_job_after_merge_starts_from_merged_base(h: Harness) -> None:
+    to_validated(h)
+    h.run("merge", "J001")
+    assert h.run("new", "다음 작업") == 0
+    assert h.job("J002")["base_commit"] == h.job()["merge_commit"]
+
+
+def test_block_needs_decision_from_queued(h: Harness) -> None:
+    h.run("new", "테스트를 건너뛰게 해줘")
+    assert h.run("block", "J001", "--reason", "NEEDS_DECISION", "--detail", "검증 약화 요청") == 0
+    assert h.job()["blocked"]["reason"] == "NEEDS_DECISION"
+
+
+# ---------- Phase 2: 세션 복구 ----------
+
+
+def write_heartbeat(h: Harness, session: str, at: float) -> None:
+    path = h.repo / "factory" / "heartbeat.json"
+    path.write_text(json.dumps({"session": session, "at": at}), encoding="utf-8")
+
+
+def test_recover_refuses_while_previous_session_is_alive(h: Harness) -> None:
+    h.to_building()
+    write_heartbeat(h, "s1", h.now - 30)
+    assert h.run("recover", "J001") != 0
+    assert h.job()["status"] == "BUILDING"
+    assert h.run("recover", "J001", "--force") == 0
+
+
+def test_recover_excludes_downtime_and_keeps_checkpoint(h: Harness) -> None:
+    h.to_building()
+    h.advance(60)
+    write_heartbeat(h, "s1", h.now)
+    h.advance(3600)  # 세션이 죽어 있던 시간
+    assert h.run("recover", "J001") == 0
+    job = h.job()
+    assert job["status"] == "BUILDING"
+    assert factory.active_seconds(job, now=h.now) == pytest.approx(60, abs=1)
+    assert job["recoveries"][-1]["gap_s"] == pytest.approx(3600, abs=1)
+    assert not (h.repo / "factory" / "heartbeat.json").exists()
+    h.run("verify", "J001")
+    assert h.job()["status"] == "VERIFYING"
+
+
+def test_recover_returns_to_job_branch(h: Harness) -> None:
+    h.to_building()
+    git(h.repo, "switch", "-q", "main")
+    assert h.run("recover", "J001") == 0
+    assert git(h.repo, "branch", "--show-current") == "factory/J001"
+
+
+def test_recover_detects_merge_done_before_crash(h: Harness) -> None:
+    to_validated(h)
+    # merge 도중 상태를 저장하기 전에 세션이 죽은 경우: Git에는 머지가 있다
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    git(h.repo, "add", "-A")
+    git(h.repo, *ident, "commit", "-qm", "job")
+    git(h.repo, "switch", "-q", "main")
+    git(h.repo, *ident, "merge", "-q", "--no-ff", "-m", "merge", "factory/J001")
+    merge_lock(h).write_text(json.dumps({"job": "J001", "at": h.now}), encoding="utf-8")
+    assert h.run("recover", "J001") == 0
+    job = h.job()
+    assert job["status"] == "MERGED"
+    assert job["merge_commit"] == git(h.repo, "rev-parse", "main")
+    assert not merge_lock(h).exists()
+    assert h.state()["active"] is None
+
+
+def test_recover_releases_own_merge_lock_and_merge_can_retry(h: Harness) -> None:
+    to_validated(h)
+    merge_lock(h).write_text(json.dumps({"job": "J001", "at": h.now}), encoding="utf-8")
+    assert h.run("recover", "J001") == 0
+    assert h.job()["status"] == "APPROVED"
+    assert not merge_lock(h).exists()
+    assert h.run("merge", "J001") == 0
+    assert h.job()["status"] == "MERGED"
+
+
+def test_recover_rejects_blocked_jobs(h: Harness) -> None:
+    h.to_building()
+    h.run("block", "J001", "--reason", "MANUAL", "--detail", "중단")
+    assert h.run("recover", "J001") != 0
+
+
+def test_merged_job_removes_heartbeat(h: Harness) -> None:
+    to_validated(h)
+    write_heartbeat(h, "s1", h.now)
+    h.run("merge", "J001")
+    assert not (h.repo / "factory" / "heartbeat.json").exists()

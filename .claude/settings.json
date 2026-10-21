@@ -6,6 +6,8 @@
       "Bash(python scripts/factory.py red:*)",
       "Bash(python scripts/factory.py verify:*)",
       "Bash(python scripts/factory.py validate:*)",
+      "Bash(python scripts/factory.py merge:*)",
+      "Bash(python scripts/factory.py recover:*)",
       "Bash(python scripts/factory.py block:*)",
       "Bash(python scripts/factory.py status:*)",
       "Bash(python scripts/check_red.py:*)",

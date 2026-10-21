@@ -1,6 +1,6 @@
 ---
 name: factory
-description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 → Red 확인 → Builder 구현 → 검증 → Validator)로 처리해 승인 대기 상태까지 올린다. 사용자가 "factory", "팩토리로 처리", "팩토리 작업"을 말하거나 요구사항을 팩토리에 넣으라고 할 때 사용한다.
+description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 → Red 확인 → Builder 구현 → 검증 → Validator → 위험 기반 승인·머지)로 처리한다. 끊긴 세션의 작업을 이어받을 때도 쓴다. 사용자가 "factory", "팩토리로 처리", "팩토리 작업"을 말하거나 요구사항을 팩토리에 넣으라고 할 때 사용한다.
 ---
 
 # factory (Claude Code 래퍼)
@@ -24,10 +24,16 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 - 레포 루트에서 한 번에 명령 하나만 실행한다. `cd`, `;`, `&&`, `|`를 쓰지 않는다.
 - 상태 확인은 `python scripts/factory.py status`로 한다. `factory/state.json`을 직접 읽어 판단하지 않는다.
 
+## 시작할 때
+
+- 먼저 `python scripts/factory.py status`를 실행한다. 진행 중이거나 APPROVED인 작업이 있으면 새 작업을 만들지 말고 `python scripts/factory.py recover <ID>`로 이어받는다 (PROCESS.md 0번).
+- hook이 "다른 세션이 진행 중"이라며 막으면 우회하지 말고 멈추고 보고한다.
+
 ## 멈춰야 할 때
 
-- 상태가 `APPROVAL_REQUIRED` 또는 `BLOCKED`가 되면 즉시 멈추고, `python scripts/factory.py status` 결과와 함께 요약을 보고한다.
-- `approve`, `resume`, `drop`은 사람 전용이다. 실행하지 말고 사람에게 안내만 한다.
+- 상태가 `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 즉시 멈추고, `python scripts/factory.py status` 결과와 함께 요약을 보고한다.
+- `APPROVED`(자동 승인)는 멈추는 상태가 아니다. `python scripts/factory.py merge <ID>`를 실행한다.
+- `approve`, `resume`, `drop`, `recover --force`는 사람 전용이다. 실행하지 말고 사람에게 안내만 한다.
 - hook이 도구 호출을 막으면 우회하지 말고, 막힌 이유를 보고에 포함한다.
 
 ## 보고 형식
@@ -35,4 +41,6 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 1. 작업 ID, 최종 상태, 위험 등급 (factory.py 출력 그대로)
 2. 바뀐 파일 목록 (`git status --short`)
 3. Red/Green 판정과 검증 결과 (factory.py 출력 인용)
-4. BLOCKED라면 사유 코드와 사람이 할 수 있는 다음 명령 (`resume`, `resume --extend`, `drop`)
+4. MERGED라면 머지 커밋과 되돌리는 명령 (`git revert -m 1 <머지 커밋>`)
+5. APPROVAL_REQUIRED라면 위험 등급 근거와 사람의 다음 명령 (`approve`, `approve --reject`)
+6. BLOCKED라면 사유 코드와 사람이 할 수 있는 다음 명령 (`resume`, `resume --extend`, `drop`)

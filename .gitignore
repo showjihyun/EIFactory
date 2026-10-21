@@ -12,4 +12,5 @@ __pycache__/
 factory/state.json
 factory/state.tmp
 factory-state.md
+factory/heartbeat.json
 factory/reviews/

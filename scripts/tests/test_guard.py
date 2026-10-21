@@ -32,7 +32,11 @@ def make_job(status: str, **overrides: Any) -> dict[str, Any]:
 
 
 def call(
-    root: Path, tool: str, tool_input: dict[str, Any], job: dict[str, Any] | None = None
+    root: Path,
+    tool: str,
+    tool_input: dict[str, Any],
+    job: dict[str, Any] | None = None,
+    session: str = "s1",
 ) -> subprocess.CompletedProcess[str]:
     state_dir = root / "factory"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +48,14 @@ def call(
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     return subprocess.run(
         [sys.executable, str(GUARD)],
-        input=json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": str(root)}),
+        input=json.dumps(
+            {
+                "tool_name": tool,
+                "tool_input": tool_input,
+                "cwd": str(root),
+                "session_id": session,
+            }
+        ),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -212,7 +223,7 @@ def test_factory_stage_commands_are_allowed(tmp_path: Path) -> None:
 # ---------- 검증·승인 대기·중단 ----------
 
 
-@pytest.mark.parametrize("status", ["VERIFYING", "APPROVAL_REQUIRED", "BLOCKED"])
+@pytest.mark.parametrize("status", ["VERIFYING", "APPROVAL_REQUIRED", "APPROVED", "BLOCKED"])
 def test_edits_stop_after_build(tmp_path: Path, status: str) -> None:
     job = make_job(status)
     job["time"]["segments"] = [[NOW - 60, NOW - 10]]
@@ -236,3 +247,94 @@ def test_read_tools_are_never_blocked(tmp_path: Path) -> None:
     job = make_job("BUILDING")
     job["time"]["segments"] = [[NOW - 5000, None]]
     assert allowed(call(tmp_path, "Read", {"file_path": "backend/tests/test_existing.py"}, job))
+
+
+# ---------- Phase 2: 머지·세션 lock ----------
+
+
+def heartbeat(root: Path) -> dict[str, Any] | None:
+    path = root / "factory" / "heartbeat.json"
+    if not path.exists():
+        return None
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def set_heartbeat(root: Path, session: str, at: float) -> None:
+    (root / "factory").mkdir(parents=True, exist_ok=True)
+    (root / "factory" / "heartbeat.json").write_text(
+        json.dumps({"session": session, "at": at}), encoding="utf-8"
+    )
+
+
+def test_merged_job_is_closed(tmp_path: Path) -> None:
+    job = make_job("MERGED")
+    job["time"]["segments"] = [[NOW - 60, NOW - 10]]
+    assert allowed(call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), job))
+
+
+def test_recover_is_allowed_but_force_is_human_only(tmp_path: Path) -> None:
+    job = make_job("BUILDING")
+    assert allowed(call(tmp_path, "Bash", bash("python scripts/factory.py recover J001"), job))
+    proc = call(tmp_path, "Bash", bash("python scripts/factory.py recover J001 --force"), job)
+    assert not allowed(proc)
+    assert "사람" in proc.stderr
+
+
+def test_merge_command_is_allowed_for_agents(tmp_path: Path) -> None:
+    job = make_job("APPROVED")
+    job["time"]["segments"] = [[NOW - 60, NOW - 10]]
+    assert allowed(call(tmp_path, "Bash", bash("python scripts/factory.py merge J001"), job))
+
+
+def test_heartbeat_file_is_never_edited_directly(tmp_path: Path) -> None:
+    proc = call(tmp_path, "Write", {"file_path": "factory/heartbeat.json", "content": "{}"})
+    assert not allowed(proc)
+
+
+def test_allowed_call_records_heartbeat(tmp_path: Path) -> None:
+    assert allowed(
+        call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), make_job("BUILDING"))
+    )
+    assert heartbeat(tmp_path) == {"session": "s1", "at": NOW}
+
+
+def test_no_heartbeat_without_active_job(tmp_path: Path) -> None:
+    assert allowed(call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py")))
+    assert heartbeat(tmp_path) is None
+
+
+def test_other_live_session_is_locked_out(tmp_path: Path) -> None:
+    set_heartbeat(tmp_path, "s1", NOW - 30)
+    job = make_job("BUILDING")
+    proc = call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), job, session="s2")
+    assert not allowed(proc)
+    assert "다른 세션" in proc.stderr
+    assert not allowed(call(tmp_path, "Bash", bash("uv run pytest"), job, session="s2"))
+    assert not allowed(
+        call(tmp_path, "Bash", bash("python scripts/factory.py verify J001"), job, session="s2")
+    )
+    assert allowed(
+        call(tmp_path, "Bash", bash("python scripts/factory.py status"), job, session="s2")
+    )
+    assert heartbeat(tmp_path) == {"session": "s1", "at": NOW - 30}
+
+
+def test_stale_session_must_be_recovered_first(tmp_path: Path) -> None:
+    set_heartbeat(tmp_path, "s1", NOW - 3600)
+    job = make_job("BUILDING")
+    proc = call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), job, session="s2")
+    assert not allowed(proc)
+    assert "recover" in proc.stderr
+    # recover 자체는 통과시키고, heartbeat는 건드리지 않는다 (recover가 지운다)
+    assert allowed(
+        call(tmp_path, "Bash", bash("python scripts/factory.py recover J001"), job, session="s2")
+    )
+    assert heartbeat(tmp_path) == {"session": "s1", "at": NOW - 3600}
+
+
+def test_same_session_keeps_working(tmp_path: Path) -> None:
+    set_heartbeat(tmp_path, "s1", NOW - 3600)
+    job = make_job("BUILDING")
+    assert allowed(call(tmp_path, "Edit", edit("backend/src/bookmarks/main.py"), job))
+    assert heartbeat(tmp_path) == {"session": "s1", "at": NOW}

@@ -1,31 +1,31 @@
 # 팩토리 절차 (도구 공통)
 
-요구사항 한 줄을 받아, 검증 결과로 완료가 증명된 변경을 **승인 대기(APPROVAL_REQUIRED)** 상태로 올리는 절차다.
+요구사항 한 줄을 받아, 검증 결과로 완료가 증명된 변경을 **승인 대기(APPROVAL_REQUIRED)** 상태로 올리고, 위험이 낮은(LOW) 변경은 자동으로 머지하는 절차다.
 Claude Code·Codex 등 도구 전용 파일은 이 문서를 따르는 얇은 래퍼다.
 
 ## 핵심 규칙
 
-- 상태는 `factory/state.json`에만 있고, **`python scripts/factory.py` 명령만** 상태를 바꾼다. 사람이 읽는 요약 `factory-state.md`도 이 명령이 다시 쓴다. 두 파일을 직접 고치지 않는다.
-- 단계를 넘기는 판단(Red 확인, 검증 통과, 잠긴 파일 변경 여부, 시간·재시도 상한)은 `factory.py`가 직접 실행하고 기록한다. 에이전트의 "완료했다"는 말은 근거가 아니다.
-- 한 번에 작업 하나만 진행한다 (Phase 1).
+- 상태는 `factory/state.json`에만 있고, **`python scripts/factory.py` 명령만** 상태를 바꾼다. 사람이 읽는 요약 `factory-state.md`, 세션 표시 `factory/heartbeat.json`도 직접 고치지 않는다.
+- 단계를 넘기는 판단(Red 확인, 검증 통과, 잠긴 파일 변경 여부, 위험 등급, 시간·재시도 상한, 머지 결과)은 `factory.py`가 직접 실행하고 기록한다. 에이전트의 "완료했다"는 말은 근거가 아니다.
+- 한 번에 작업 하나만 진행한다. 머지도 한 번에 하나씩이다 (merge lock).
 
 ## 역할
 
 | 역할 | 하는 일 | 하지 않는 일 |
 |---|---|---|
-| 오케스트레이터 | 작업 생성, spec·contract·수락 테스트 작성, Builder 호출, `factory.py` 단계 명령 실행 | 구현 코드 작성 |
+| 오케스트레이터 | 작업 생성, spec·contract·수락 테스트 작성, Builder 호출, `factory.py` 단계 명령 실행 (`merge`, `recover` 포함) | 구현 코드 작성 |
 | Builder | 잠긴 수락 테스트를 통과시키는 구현 | 테스트·contract·검증 설정·정책 파일 수정, 상태 명령 실행 |
 | Validator | `factory.py validate`가 별도 프로세스로 실행. diff + contract + 검증 로그만 보고 판정 | 코드 수정 |
-| 사람 | 승인·반려, BLOCKED 처리(`resume`, `drop`) | - |
+| 사람 | MEDIUM·HIGH 승인·반려, BLOCKED 처리(`resume`, `drop`), 강제 이어받기(`recover --force`) | - |
 
 Builder는 오케스트레이터의 대화를 넘겨받지 않는다. 호출할 때 job ID, spec 경로, 수락 테스트 경로만 전달한다.
 
 ## 상태 머신
 
 ```
-QUEUED → SPEC_READY → BUILDING → VERIFYING → APPROVAL_REQUIRED → APPROVED
-              ▲  (red 실패, 1회)      ▲            │
-              └──────┘                └─ RETRY_REQUIRED (verify/validate 실패)
+QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ──────────────────────→ APPROVED → MERGED
+              ▲  (red 실패, 1회)      ▲      └─ (MEDIUM·HIGH) → APPROVAL_REQUIRED ─┘ (사람 approve)
+              └──────┘                └─ RETRY_REQUIRED (verify/validate 실패, 사람 반려)
 어느 단계에서든 → BLOCKED (사유 코드) → 사람이 resume 또는 drop
 ```
 
@@ -34,13 +34,16 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING → APPROVAL_REQUIRED → APPRO
 | `new "<요구사항>"` | 진행 중 작업 없음, 작업 트리 깨끗함 | job ID 부여, 브랜치 `factory/<ID>` 생성 | QUEUED | - |
 | `spec <ID>` | QUEUED, SPEC_READY | `factory/specs/<ID>.md`의 contract 형식 검사 | SPEC_READY | 오류 출력, 상태 유지 |
 | `red <ID>` | SPEC_READY | 수락 테스트 Red 확인 (refactor는 Green). 통과하면 파일 잠금 | BUILDING | 1회: SPEC_READY로 되돌림, 2회: BLOCKED(`SPEC_INVALID`) |
-| `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
-| `validate <ID>` | VERIFYING | Validator 프로세스 실행 | APPROVAL_REQUIRED | RETRY_REQUIRED 또는 BLOCKED |
-| `block <ID> --reason <코드> --detail "..."` | 진행 중 | 수동 BLOCKED (예: 수락 테스트가 틀렸다는 보고) | BLOCKED | - |
+| `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 → 검증한 변경의 지문 기록 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
+| `validate <ID>` | VERIFYING | 변경 지문 대조 → Validator 프로세스 실행 | LOW: APPROVED (자동 승인), 그 밖: APPROVAL_REQUIRED | RETRY_REQUIRED 또는 BLOCKED. verify 이후 변경이 있으면 BUILDING |
+| `merge <ID>` | APPROVED | 아래 "머지" 순서대로 base 브랜치에 머지 | MERGED | BLOCKED(`CONFLICT`, `MERGE_CHECK_FAILED`, `TREE_CHANGED`) 또는 상태 유지(lock 사용 중) |
+| `recover <ID>` | 진행 중, APPROVED | 끊긴 세션의 작업을 이어받는다 (아래 "세션 복구") | 같은 상태 (또는 MERGED) | 이전 세션이 5분 안에 활동했으면 거부 |
+| `block <ID> --reason <코드> --detail "..."` | 진행 중 | 수동 BLOCKED (수락 테스트가 틀렸다는 보고, 사람 결정이 필요한 요구사항) | BLOCKED | - |
 | `status [--json]` | 언제나 | 현재 상태 출력 | - | - |
-| `approve <ID>` / `approve <ID> --reject "..."` | APPROVAL_REQUIRED | **사람 전용.** 승인 기록 (Phase 1은 머지하지 않음) | APPROVED / RETRY_REQUIRED | - |
+| `approve <ID>` / `approve <ID> --reject "..."` | APPROVAL_REQUIRED | **사람 전용.** 승인 기록 후 바로 머지 / 반려 | MERGED / RETRY_REQUIRED | 머지 실패는 `merge`와 같음 |
 | `resume <ID> [--extend]` | BLOCKED | **사람 전용.** checkpoint부터 재개, `--extend`는 상한 50% 연장 1회 | checkpoint 상태 | - |
-| `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료 | DROPPED | - |
+| `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
+| `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
 ### BLOCKED 사유 코드
 
@@ -52,7 +55,35 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING → APPROVAL_REQUIRED → APPRO
 | `PROTECTED_FILE_CHANGED` | 잠긴 파일(수락 테스트, contract, 기존 테스트, 검증 설정)이 바뀜 |
 | `TIMEOUT` | 시간 상한 초과, 또는 소프트 상한(80%) 이후 재시도가 필요해짐 |
 | `TEST_INVALID` | Builder가 수락 테스트가 틀렸다고 보고 (`block`으로 기록) |
+| `NEEDS_DECISION` | 요구사항 자체가 사람의 결정을 요구함 (예: 검증 약화·테스트 건너뛰기 요청). `new` 직후 `block`으로 기록 |
+| `TREE_CHANGED` | 검증·승인한 변경과 머지하려는 변경이 다름 |
+| `CONFLICT` | base 브랜치 기준 rebase 또는 merge 충돌 |
+| `MERGE_CHECK_FAILED` | rebase 후 재검증(수락 테스트 Green, 전체 검증) 실패 |
 | `MANUAL` | 그 밖의 수동 중단 |
+
+## 머지 (`merge`, 사람의 `approve` 뒤에도 같은 순서)
+
+1. merge lock을 잡는다. 다른 작업이 잡고 있으면 상태를 바꾸지 않고 끝낸다 (나중에 다시 `merge`).
+2. 작업 트리가 verify 때 기록한 변경 지문과 같은지 확인한다. 다르면 BLOCKED(`TREE_CHANGED`).
+3. 자동 승인이면 위험 등급을 diff로 **다시 계산**한다. LOW가 아니면 머지하지 않고 APPROVAL_REQUIRED로 돌린다 (상태 파일이 조작돼도 HIGH 경로는 자동 머지되지 않는다).
+4. 작업 브랜치에 변경을 커밋한다.
+5. base 브랜치가 앞서 있으면 그 위로 rebase하고 수락 테스트 Green과 전체 검증을 다시 실행한다. 충돌은 BLOCKED(`CONFLICT`), 재검증 실패는 BLOCKED(`MERGE_CHECK_FAILED`). base가 그대로면 검증한 트리와 같으므로 다시 실행하지 않는다.
+6. base 브랜치에 `--no-ff` 머지 커밋을 만든다. 커밋이 실제로 base에 들어간 것을 Git으로 확인한 뒤 MERGED로 바꾼다.
+7. 되돌릴 때는 출력된 머지 커밋으로 `git revert -m 1 <머지 커밋>` 한 번이면 된다 (사람이 실행).
+
+push는 하지 않는다. 원격 반영은 사람이 한다.
+
+## 세션 복구 (`recover`)
+
+- 진행 중 작업이 있으면 보호 hook이 도구 호출마다 `factory/heartbeat.json`에 세션 ID와 시각을 남긴다.
+- 다른 세션의 heartbeat가 남아 있으면 hook이 수정·명령을 막는다. 같은 작업을 두 세션이 동시에 진행하지 않기 위해서다. `status`와 `recover`만 통과한다.
+- 이전 세션의 마지막 활동 후 **5분**이 지나면 `recover <ID>`로 이어받는다. 5분이 안 됐으면 거부된다. 이전 세션이 끝난 것이 확실하면 사람이 `recover <ID> --force`를 실행한다.
+- `recover`가 하는 일:
+  - 끊긴 시간(마지막 활동 ~ 지금)을 활성 시간에서 뺀다.
+  - 이전 세션이 남긴 rebase·merge를 중단하고, 그 작업이 잡은 merge lock을 푼다.
+  - 작업 브랜치로 돌아간다. APPROVED인데 Git에 이미 머지가 있으면 MERGED로 바꾼다.
+  - 상태(checkpoint)는 그대로 둔다. **진행 중이던 단계는 다시 실행한다.** 다음 명령을 출력한다.
+- 단계 명령은 짧고 원자적이다. 상태 파일은 명령이 끝날 때만 쓰이므로, 명령 도중에 끊기면 그 명령은 없었던 것이 되고 다시 실행하면 된다.
 
 ## spec 파일 형식
 
@@ -82,27 +113,34 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING → APPROVAL_REQUIRED → APPRO
 
 ## 오케스트레이터 진행 순서
 
-1. `python scripts/factory.py new "<요구사항>"` → job ID 확인
-2. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. **구현 코드는 쓰지 않는다.**
-3. `python scripts/factory.py spec <ID>` → 형식 오류가 있으면 고친다
-4. `python scripts/factory.py red <ID>`
+0. `python scripts/factory.py status`로 진행 중 작업이 있는지 본다.
+   - 진행 중(또는 APPROVED) 작업이 있으면 새 작업을 만들지 않는다. 이전 세션이 끊긴 것이므로 `recover <ID>`로 이어받고, 출력된 다음 단계부터 아래 순서를 이어 간다.
+   - `recover`가 "5분이 지난 뒤"라며 거부하면 멈추고 보고한다.
+1. 요구사항이 검증을 약하게 하거나(테스트 건너뛰기, 검사 끄기) 그 밖에 사람이 정해야 하는 내용이면, `new` 후 바로 `block <ID> --reason NEEDS_DECISION --detail "<이유>"`로 기록하고 멈춘다.
+2. `python scripts/factory.py new "<요구사항>"` → job ID 확인
+3. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. **구현 코드는 쓰지 않는다.**
+4. `python scripts/factory.py spec <ID>` → 형식 오류가 있으면 고친다
+5. `python scripts/factory.py red <ID>`
    - `BUILDING`이면 다음 단계
-   - `SPEC_READY`로 돌아오면 출력된 이유를 보고 spec·수락 테스트를 **한 번만** 다시 써서 3번부터 반복
+   - `SPEC_READY`로 돌아오면 출력된 이유를 보고 spec·수락 테스트를 **한 번만** 다시 써서 4번부터 반복
    - 이미 구현되어 있어 Red가 안 나는 요구사항이면 억지로 바꾸지 말고 그대로 두어 BLOCKED로 끝낸다
-5. Builder를 호출한다 (job ID, spec 경로, 수락 테스트 경로만 전달)
-6. `python scripts/factory.py verify <ID>`
-   - `RETRY_REQUIRED`면 출력된 실패 내용을 Builder에게 전달해 5번부터 반복
+6. Builder를 호출한다 (job ID, spec 경로, 수락 테스트 경로만 전달)
+7. `python scripts/factory.py verify <ID>`
+   - `RETRY_REQUIRED`면 출력된 실패 내용을 Builder에게 전달해 6번부터 반복
    - Builder가 "수락 테스트가 틀렸다"고 보고하면 `block <ID> --reason TEST_INVALID --detail "..."`
-7. `python scripts/factory.py validate <ID>`
-   - `RETRY_REQUIRED`면 Validator 지적을 Builder에게 전달해 5번부터 반복
-8. `APPROVAL_REQUIRED` 또는 `BLOCKED`가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
+8. `python scripts/factory.py validate <ID>`
+   - `RETRY_REQUIRED`면 Validator 지적을 Builder에게 전달해 6번부터 반복
+   - `BUILDING`으로 돌아오면 7번부터 다시
+9. `APPROVED`(자동 승인)면 `python scripts/factory.py merge <ID>`
+   - 다른 작업이 머지 중이라 상태가 그대로면, 잠시 뒤 한 번 더 `merge`. 그래도 안 되면 멈추고 보고
+10. `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
 
-## 위험 등급 계산 (verify가 diff로 계산)
+## 위험 등급 계산 (verify가 diff로 계산, merge가 자동 승인 작업에 대해 다시 계산)
 
-| 등급 | 조건 |
-|---|---|
-| HIGH | `auth.py`·`settings.py`, 정책·절차 파일, CI 설정 변경 / `DELETE FROM`이 새로 추가됨 |
-| MEDIUM | 의존성·검증 설정 파일 변경 / DB 스키마(`CREATE`·`ALTER TABLE`) 변경 / API 경로 추가·삭제 / 테스트 skip·xfail 추가 / 400줄 또는 15파일 이상 / refactor 유형 |
-| LOW | 그 밖의 경우 |
+| 등급 | 조건 | 승인 |
+|---|---|---|
+| HIGH | `auth.py`·`settings.py`, 정책·절차 파일, CI 설정 변경 / `DELETE FROM`이 새로 추가됨 | 사람 |
+| MEDIUM | 의존성·검증 설정 파일 변경 / DB 스키마(`CREATE`·`ALTER TABLE`) 변경 / API 경로 추가·삭제 / 테스트 skip·xfail 추가 / 400줄 또는 15파일 이상 / refactor 유형 | 사람 |
+| LOW | 그 밖의 경우 | 자동 (Validator PASS 후 자동 머지) |
 
-최종 등급 = max(contract 선언, 계산 결과). Phase 1은 등급과 관계없이 전부 사람이 승인한다.
+최종 등급 = max(contract 선언, 계산 결과).

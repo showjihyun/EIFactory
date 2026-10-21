@@ -4,7 +4,7 @@
 (Red/Green 확인, 전체 검증, 잠긴 파일 대조, 시간·재시도 상한)은 이 명령이 직접 실행한다.
 
 사용법: python scripts/factory.py <명령> ...
-명령: new, spec, red, verify, validate, block, status, approve, resume, drop
+명령: new, spec, red, verify, validate, merge, recover, block, status, approve, resume, drop
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ SUMMARY_PATH = "factory-state.md"
 SPECS_DIR = "factory/specs"
 REVIEWS_DIR = "factory/reviews"
 VALIDATOR_PROMPT = "factory/prompts/validator.md"
+HEARTBEAT_PATH = "factory/heartbeat.json"
+MERGE_LOCK = "factory-merge.lock"  # Git 공통 디렉터리에 둔다 (worktree끼리 공유)
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
 SIZE_CAPS = {"small": 10 * 60, "medium": 30 * 60}
@@ -41,9 +43,12 @@ SOFT_RATIO = 0.8
 MAX_ATTEMPTS = 3
 MAX_SPEC_REVISIONS = 1
 EXTEND_RATIO = 0.5
+LOCK_TTL_S = 300  # 마지막 활동 후 이 시간이 지나야 다른 세션이 작업을 이어받는다
+AUTO_MERGE_RISKS = {"LOW"}
 
 ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING"}
-CLOSED_STATUSES = {"APPROVED", "DROPPED"}
+CLOSED_STATUSES = {"MERGED", "DROPPED"}
+RECOVERABLE_STATUSES = ACTIVE_STATUSES | {"APPROVED"}
 
 # 잠금 대상: 기존 테스트, 검증 설정, 정책·절차 파일
 LOCK_PATTERNS = [
@@ -70,6 +75,8 @@ NO_NEW_FILE_PATTERNS = ["scripts/*", "factory/prompts/*", ".claude/*", "Makefile
 
 # 위험 등급 계산에서 제외하는 팩토리 산출물
 RISK_EXCLUDE = [STATE_PATH, SUMMARY_PATH, f"{SPECS_DIR}/*", f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
+# 검증한 변경과 머지하는 변경이 같은지 대조할 때 제외하는 파일
+TREE_EXCLUDE = [STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH, f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
 SKIP_DIRS = {"__pycache__", "node_modules", ".venv", ".git", ".mypy_cache", ".ruff_cache"}
 
 HIGH_PATHS = [
@@ -187,6 +194,10 @@ def render_summary(state: State) -> str:
         note = ""
         if job["status"] == "BLOCKED" and job.get("blocked"):
             note = f"{job['blocked']['reason']}: {job['blocked']['detail']}"[:80]
+        elif job["status"] in {"APPROVED", "MERGED"} and job.get("approval"):
+            note = f"승인 {job['approval']['by']}"
+            if job.get("merge_commit"):
+                note += f", 머지 커밋 {job['merge_commit'][:7]}"
         cells = [
             job["id"],
             job["status"],
@@ -199,7 +210,13 @@ def render_summary(state: State) -> str:
         ]
         lines.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
     waiting = [j["id"] for j in state["jobs"].values() if j["status"] == "APPROVAL_REQUIRED"]
-    lines += ["", f"- 승인 대기: {', '.join(waiting) if waiting else '없음'}", ""]
+    to_merge = [j["id"] for j in state["jobs"].values() if j["status"] == "APPROVED"]
+    lines += [
+        "",
+        f"- 승인 대기: {', '.join(waiting) if waiting else '없음'}",
+        f"- 머지 대기: {', '.join(to_merge) if to_merge else '없음'}",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -406,6 +423,100 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
     return RISKS[level], reasons
 
 
+def _fork_point(root: Path, job: Job) -> str:
+    """작업 변경의 기준점. rebase 전에는 base_commit, rebase 후에는 새 base 끝."""
+    return _git(root, "merge-base", "HEAD", job["base_branch"]).strip()
+
+
+def tree_fingerprint(root: Path, job: Job) -> str:
+    """기준점 대비 바뀐 파일과 그 내용의 해시. 커밋 여부와 관계없이 같은 변경이면 같은 값."""
+    base = _fork_point(root, job)
+    names = set(_git(root, "diff", "--name-only", base).splitlines())
+    names.update(_git(root, "ls-files", "--others", "--exclude-standard").splitlines())
+    digest = hashlib.sha256()
+    for rel in sorted(n for n in names if n and not _matches(n, TREE_EXCLUDE)):
+        path = root / rel
+        digest.update(f"{rel}\0{_sha(path) if path.is_file() else 'deleted'}\n".encode())
+    return digest.hexdigest()
+
+
+# ---------------------------------------------------------------- Git·lock 보조
+
+
+def _git_ok(root: Path, *args: str) -> bool:
+    return (
+        subprocess.run(["git", *args], cwd=root, capture_output=True, check=False).returncode == 0
+    )
+
+
+def _identity(root: Path) -> list[str]:
+    if _git_ok(root, "config", "user.email"):
+        return []
+    return ["-c", "user.name=factory", "-c", "user.email=factory@localhost"]
+
+
+def _git_path(root: Path, name: str, common: bool = False) -> Path:
+    if common:
+        base = Path(_git(root, "rev-parse", "--git-common-dir").strip())
+        path = base / name
+    else:
+        path = Path(_git(root, "rev-parse", "--git-path", name).strip())
+    return path if path.is_absolute() else root / path
+
+
+def _abort_git_operations(root: Path) -> list[str]:
+    """세션이 죽으면서 남긴 rebase·merge를 되돌린다."""
+    aborted = []
+    if _git_path(root, "rebase-merge").exists() or _git_path(root, "rebase-apply").exists():
+        _git(root, "rebase", "--abort")
+        aborted.append("rebase")
+    if _git_path(root, "MERGE_HEAD").exists():
+        _git(root, "merge", "--abort")
+        aborted.append("merge")
+    return aborted
+
+
+def read_heartbeat(root: Path) -> dict[str, Any] | None:
+    try:
+        loaded: dict[str, Any] = json.loads((root / HEARTBEAT_PATH).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded
+
+
+def _clear_heartbeat(root: Path) -> None:
+    (root / HEARTBEAT_PATH).unlink(missing_ok=True)
+
+
+def _read_merge_lock(path: Path) -> dict[str, Any]:
+    try:
+        loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"job": "?", "at": 0}
+    return loaded
+
+
+def _acquire_merge_lock(root: Path, job_id: str) -> str | None:
+    """lock을 잡으면 None, 다른 작업이 잡고 있으면 그 작업 ID."""
+    path = _git_path(root, MERGE_LOCK, common=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        holder = str(_read_merge_lock(path).get("job"))
+        return None if holder == job_id else holder
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"job": job_id, "at": now()}, handle)
+    return None
+
+
+def _release_merge_lock(root: Path, job_id: str) -> bool:
+    path = _git_path(root, MERGE_LOCK, common=True)
+    if path.exists() and _read_merge_lock(path).get("job") == job_id:
+        path.unlink()
+        return True
+    return False
+
+
 # ---------------------------------------------------------------- 실패 처리
 
 
@@ -491,6 +602,7 @@ def _exclude_factory_files(root: Path) -> None:
         STATE_PATH,
         f"{STATE_PATH[:-5]}.tmp",
         SUMMARY_PATH,
+        HEARTBEAT_PATH,
         f"{REVIEWS_DIR}/",
         ".pytest_tmp*/",
     ]
@@ -534,6 +646,7 @@ def cmd_new(root: Path, state: State, requirement: str) -> str:
     base_branch = _git(root, "branch", "--show-current").strip()
     job_id, branch = _create_job_branch(root, state)
     _exclude_factory_files(root)
+    _clear_heartbeat(root)
     at = now()
     state["jobs"][job_id] = {
         "id": job_id,
@@ -675,6 +788,7 @@ def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
     }
     job["validation"].append(record)
     if green["verdict"] == "GREEN_OK" and verify_exit == 0:
+        job["verified_tree"] = tree_fingerprint(root, job)
         _set_status(job, "VERIFYING")
         return 0, f"{job_id}: 검증 통과 → VERIFYING (위험 {risk}). 다음: validate {job_id}"
 
@@ -746,6 +860,12 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
     _require(job, "VERIFYING")
     if not _check_time(job):
         return 1, f"{job_id}: BLOCKED (TIMEOUT)"
+    if tree_fingerprint(root, job) != job.get("verified_tree"):
+        _set_status(job, "BUILDING")
+        return (
+            1,
+            f"{job_id}: verify 이후 작업 트리가 바뀌었습니다 → BUILDING. 다음: verify {job_id}",
+        )
     prompt = build_validator_prompt(root, job)
     cmd = _command(
         "validator",
@@ -798,8 +918,20 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
         }
     )
     if verdict["verdict"] == "PASS":
-        _set_status(job, "APPROVAL_REQUIRED")
         _stop_clock(job, now())
+        if job["risk"] in AUTO_MERGE_RISKS:
+            job["approval"] = {
+                "by": "auto",
+                "decision": "approved",
+                "reason": f"위험 {job['risk']} 자동 승인 (기획안 8.1)",
+                "at": now(),
+            }
+            _set_status(job, "APPROVED")
+            return 0, (
+                f"{job_id}: Validator PASS → APPROVED (위험 {job['risk']}, 자동 승인). "
+                f"다음: merge {job_id}"
+            )
+        _set_status(job, "APPROVAL_REQUIRED")
         return 0, (
             f"{job_id}: Validator PASS → APPROVAL_REQUIRED (위험 {job['risk']}). "
             "사람의 승인을 기다립니다."
@@ -816,47 +948,213 @@ def cmd_block(state: State, job_id: str, reason: str, detail: str) -> str:
     return f"{job_id}: BLOCKED ({reason})"
 
 
-def _commit_and_return(root: Path, job: Job, message: str) -> str | None:
-    """작업 브랜치에 결과를 커밋하고 원래 브랜치로 돌아간다. 사람이 실행한 명령에서만 호출된다."""
+def _commit_job(root: Path, job: Job, message: str) -> str | None:
+    """작업 브랜치에 남은 변경을 커밋한다. 커밋할 것이 없으면 None."""
     _git(root, "add", "-A")
     staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=root, check=False)
-    commit: str | None = None
-    if staged.returncode == 1:
-        identity: list[str] = []
-        if (
-            subprocess.run(
-                ["git", "config", "user.email"], cwd=root, capture_output=True, check=False
-            ).returncode
-            != 0
-        ):
-            identity = ["-c", "user.name=factory", "-c", "user.email=factory@localhost"]
-        _git(root, *identity, "commit", "-q", "-m", message)
-        commit = _git(root, "rev-parse", "HEAD").strip()
+    if staged.returncode != 1:
+        return None
+    _git(root, *_identity(root), "commit", "-q", "-m", message)
+    return _git(root, "rev-parse", "HEAD").strip()
+
+
+def _commit_and_return(root: Path, job: Job, message: str) -> str | None:
+    """작업 브랜치에 결과를 커밋하고 원래 브랜치로 돌아간다. 사람이 실행한 명령에서만 호출된다."""
+    commit = _commit_job(root, job, message)
     _git(root, "switch", "-q", job["base_branch"])
     return commit
 
 
-def cmd_approve(root: Path, state: State, job_id: str, reject: str | None) -> str:
+def _close_job(root: Path, state: State, job: Job, status: str) -> None:
+    _set_status(job, status)
+    _stop_clock(job, now())
+    _clear_heartbeat(root)
+    if state["active"] == job["id"]:
+        state["active"] = None
+
+
+def _is_merged(root: Path, job: Job) -> bool:
+    """작업 브랜치에 커밋이 있고, 그 끝이 base 브랜치에 들어가 있는가 (Git으로 확인)."""
+    tip = _git(root, "rev-parse", job["branch"]).strip()
+    return tip != job["base_commit"] and _git_ok(
+        root, "merge-base", "--is-ancestor", tip, job["base_branch"]
+    )
+
+
+def _mark_merged(root: Path, state: State, job: Job) -> None:
+    job["merge_commit"] = _git(root, "rev-parse", job["base_branch"]).strip()
+    _close_job(root, state, job, "MERGED")
+
+
+def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
+    job_id = job["id"]
+    if _git(root, "branch", "--show-current").strip() != job["branch"]:
+        _git(root, "switch", "-q", job["branch"])
+    if tree_fingerprint(root, job) != job.get("verified_tree"):
+        _block(job, "TREE_CHANGED", "검증·승인 이후 작업 트리가 바뀌었습니다")
+        return 1, f"{job_id}: BLOCKED (TREE_CHANGED). 검증한 변경과 머지할 변경이 다릅니다"
+    approval = job["approval"]
+    if approval["by"] == "auto":
+        risk, reasons = compute_risk(root, job)
+        if risk not in AUTO_MERGE_RISKS:
+            job["risk"], job["risk_reasons"] = risk, reasons
+            job["approval"] = None
+            _set_status(job, "APPROVAL_REQUIRED")
+            return (
+                1,
+                f"{job_id}: 머지 전 재계산한 위험이 {risk}라 자동 머지하지 않습니다 → 사람 승인",
+            )
+    summary = f"위험 {job['risk']}, 승인 {approval['by']}"
+    job["commit"] = (
+        _commit_job(root, job, f"factory {job_id}: {job['requirement']}\n\n{summary}")
+        or _git(root, "rev-parse", "HEAD").strip()
+    )
+
+    if not _git_ok(root, "merge-base", "--is-ancestor", job["base_branch"], "HEAD"):
+        rebase = subprocess.run(
+            ["git", *_identity(root), "rebase", "-q", job["base_branch"]],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if rebase.returncode != 0:
+            _abort_git_operations(root)
+            _block(job, "CONFLICT", f"{job['base_branch']} 기준 rebase 충돌")
+            return 1, f"{job_id}: BLOCKED (CONFLICT). {rebase.stdout.strip()[-800:]}"
+        green = run_check_red(root, "green", job["acceptance_tests"])
+        verify_exit, verify_output = run_verify(root)
+        job["merge_checks"] = job.get("merge_checks", []) + [
+            {"green_verdict": green["verdict"], "verify_exit": verify_exit, "at": now()}
+        ]
+        if green["verdict"] != "GREEN_OK" or verify_exit != 0:
+            _block(
+                job,
+                "MERGE_CHECK_FAILED",
+                f"rebase 후 재검증 실패 (수락 테스트 {green['verdict']}, "
+                f"verify exit {verify_exit})",
+            )
+            return 1, f"{job_id}: BLOCKED (MERGE_CHECK_FAILED)\n{verify_output.strip()[-1500:]}"
+        job["verified_tree"] = tree_fingerprint(root, job)
+        job["commit"] = _git(root, "rev-parse", "HEAD").strip()
+
+    _git(root, "switch", "-q", job["base_branch"])
+    merged = subprocess.run(
+        [
+            "git",
+            *_identity(root),
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            f"factory {job_id} 머지: {job['requirement']}\n\n{summary}",
+            job["branch"],
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if merged.returncode != 0 or not _is_merged(root, job):
+        _abort_git_operations(root)
+        _git(root, "switch", "-q", job["branch"])
+        _block(job, "CONFLICT", f"merge 실패: {merged.stderr.strip()[-300:]}")
+        return 1, f"{job_id}: BLOCKED (CONFLICT). merge 실패"
+    _mark_merged(root, state, job)
+    return 0, (
+        f"{job_id}: MERGED → {job['base_branch']} "
+        f"(머지 커밋 {job['merge_commit'][:7]}, {summary}). "
+        f"되돌리기: git revert -m 1 {job['merge_commit'][:7]}"
+    )
+
+
+def cmd_merge(root: Path, state: State, job_id: str) -> tuple[int, str]:
+    """승인된 작업을 base 브랜치에 머지한다 (기획안 8.3). 한 번에 하나씩 (merge lock)."""
+    job = _job(state, job_id)
+    _require(job, "APPROVED")
+    if not job.get("approval") or job["approval"].get("decision") != "approved":
+        raise FactoryError(f"{job_id}에 승인 기록이 없습니다")
+    holder = _acquire_merge_lock(root, job_id)
+    if holder is not None:
+        return 1, f"{job_id}: 다른 작업 {holder}가 머지 중입니다 (상태 유지). 끝난 뒤 다시 merge"
+    try:
+        return _merge_steps(root, state, job)
+    finally:
+        _release_merge_lock(root, job_id)
+
+
+def cmd_approve(root: Path, state: State, job_id: str, reject: str | None) -> tuple[int, str]:
     job = _job(state, job_id)
     _require(job, "APPROVAL_REQUIRED")
     if reject:
         job["approval"] = {"by": "human", "decision": "rejected", "reason": reject, "at": now()}
         _set_status(job, "RETRY_REQUIRED")
         _start_clock(job, now())
-        return f"{job_id}: 반려 → RETRY_REQUIRED ({reject})"
+        return 0, f"{job_id}: 반려 → RETRY_REQUIRED ({reject})"
     job["approval"] = {"by": "human", "decision": "approved", "reason": "", "at": now()}
-    job["commit"] = _commit_and_return(
-        root, job, f"factory {job_id}: {job['requirement']}\n\n위험 {job['risk']}, 사람 승인"
-    )
     _set_status(job, "APPROVED")
-    state["active"] = None
-    return (
-        f"{job_id}: APPROVED. 브랜치 {job['branch']}에 커밋 {str(job['commit'])[:7]}, "
-        f"{job['base_branch']}로 돌아왔습니다. 머지는 Phase 2에서 자동화합니다."
+    return cmd_merge(root, state, job_id)
+
+
+def cmd_recover(root: Path, state: State, job_id: str, force: bool) -> str:
+    """끊긴 세션의 작업을 이어받는다 (기획안 6.3). 진행 중이던 단계는 다시 실행한다."""
+    job = _job(state, job_id)
+    _require(job, *sorted(RECOVERABLE_STATUSES))
+    at = now()
+    heartbeat = read_heartbeat(root)
+    if heartbeat and at - float(heartbeat.get("at", 0)) < LOCK_TTL_S and not force:
+        idle = at - float(heartbeat.get("at", 0))
+        raise FactoryError(
+            f"이전 세션이 {idle:.0f}초 전까지 활동했습니다. {LOCK_TTL_S}초가 지난 뒤 다시 recover "
+            "하세요 (그 세션이 끝난 것이 확실하면 사람이 recover --force)"
+        )
+    seen = [float(job["history"][-1]["at"])]
+    if heartbeat:
+        seen.append(float(heartbeat.get("at", 0)))
+    last_seen = min(max(seen), at)
+    if _clock_running(job):
+        segment = job["time"]["segments"][-1]
+        segment[1] = min(max(segment[0], last_seen), at)
+    aborted = _abort_git_operations(root)
+    released = _release_merge_lock(root, job_id)
+    _clear_heartbeat(root)
+    job.setdefault("recoveries", []).append(
+        {
+            "at": at,
+            "from": job["status"],
+            "gap_s": round(at - last_seen, 1),
+            "aborted": aborted,
+            "released_merge_lock": released,
+            "forced": force,
+        }
     )
+    if job["status"] == "APPROVED" and _is_merged(root, job):
+        if _git(root, "branch", "--show-current").strip() != job["base_branch"]:
+            _git(root, "switch", "-q", job["base_branch"])
+        _mark_merged(root, state, job)
+        return f"{job_id}: 이전 세션이 머지까지 끝냈습니다 → MERGED ({job['merge_commit'][:7]})"
+    if _git(root, "branch", "--show-current").strip() != job["branch"]:
+        _git(root, "switch", "-q", job["branch"])
+    if job["status"] in ACTIVE_STATUSES:
+        _start_clock(job, at)
+    next_step = {
+        "QUEUED": f"spec·수락 테스트 작성 후 spec {job_id}",
+        "SPEC_READY": f"spec·수락 테스트 확인 후 red {job_id}",
+        "BUILDING": f"Builder 호출 후 verify {job_id}",
+        "RETRY_REQUIRED": f"Builder 호출 후 verify {job_id}",
+        "VERIFYING": f"validate {job_id}",
+        "APPROVED": f"merge {job_id}",
+    }[job["status"]]
+    done = f", 정리: {', '.join(aborted)} 중단" if aborted else ""
+    gap = _fmt_minutes(at - last_seen)
+    return f"{job_id}: 이어받음 ({job['status']}, 끊긴 시간 {gap}{done}). 다음: {next_step}"
 
 
-def cmd_resume(state: State, job_id: str, extend: bool) -> str:
+def cmd_resume(root: Path, state: State, job_id: str, extend: bool) -> str:
     job = _job(state, job_id)
     _require(job, "BLOCKED")
     if extend:
@@ -869,7 +1167,9 @@ def cmd_resume(state: State, job_id: str, extend: bool) -> str:
     job["blocked"] = None
     job["last_failure"] = None
     _set_status(job, target)
-    _start_clock(job, now())
+    _clear_heartbeat(root)
+    if target in ACTIVE_STATUSES:
+        _start_clock(job, now())
     return f"{job_id}: 재개 → {target} (상한 {_fmt_minutes(job['time']['cap_s'])})"
 
 
@@ -877,13 +1177,14 @@ def cmd_drop(root: Path, state: State, job_id: str) -> str:
     job = _job(state, job_id)
     if job["status"] in CLOSED_STATUSES:
         raise FactoryError(f"{job_id}는 이미 {job['status']}입니다")
+    _abort_git_operations(root)
+    if _git(root, "branch", "--show-current").strip() != job["branch"]:
+        _git(root, "switch", "-q", job["branch"])
     job["commit"] = _commit_and_return(
         root, job, f"factory {job_id} (중단 보관): {job['requirement']}"
     )
-    _set_status(job, "DROPPED")
-    _stop_clock(job, now())
-    if state["active"] == job_id:
-        state["active"] = None
+    _release_merge_lock(root, job_id)
+    _close_job(root, state, job, "DROPPED")
     return f"{job_id}: DROPPED (브랜치 {job['branch']}는 보관)"
 
 
@@ -899,12 +1200,14 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(prog="factory", description="팩토리 상태 관리")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("new").add_argument("requirement")
-    for name in ("spec", "red", "verify", "validate", "drop"):
+    for name in ("spec", "red", "verify", "validate", "merge", "drop"):
         sub.add_parser(name).add_argument("job_id")
     block = sub.add_parser("block")
     block.add_argument("job_id")
     block.add_argument(
-        "--reason", required=True, choices=["TEST_INVALID", "SPEC_INVALID", "MANUAL"]
+        "--reason",
+        required=True,
+        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "MANUAL"],
     )
     block.add_argument("--detail", required=True)
     status = sub.add_parser("status")
@@ -915,6 +1218,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     resume = sub.add_parser("resume")
     resume.add_argument("job_id")
     resume.add_argument("--extend", action="store_true")
+    recover = sub.add_parser("recover")
+    recover.add_argument("job_id")
+    recover.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     state = load_state(root)
@@ -930,12 +1236,16 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             code, message = cmd_verify(root, state, args.job_id)
         elif args.command == "validate":
             code, message = cmd_validate(root, state, args.job_id)
+        elif args.command == "merge":
+            code, message = cmd_merge(root, state, args.job_id)
+        elif args.command == "recover":
+            message = cmd_recover(root, state, args.job_id, args.force)
         elif args.command == "block":
             message = cmd_block(state, args.job_id, args.reason, args.detail)
         elif args.command == "approve":
-            message = cmd_approve(root, state, args.job_id, args.reject)
+            code, message = cmd_approve(root, state, args.job_id, args.reject)
         elif args.command == "resume":
-            message = cmd_resume(state, args.job_id, args.extend)
+            message = cmd_resume(root, state, args.job_id, args.extend)
         elif args.command == "drop":
             message = cmd_drop(root, state, args.job_id)
         else:
@@ -943,7 +1253,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return 0
     except FactoryError as error:
         print(f"오류: {error}")
-        if args.command == "validate":
+        # 외부 프로세스·Git 작업 중 남긴 기록(리뷰 원문, 승인 기록)은 보존한다
+        if args.command in {"validate", "approve", "merge"}:
             save_state(root, state)
         return 2
     save_state(root, state)
