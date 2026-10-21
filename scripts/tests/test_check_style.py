@@ -57,3 +57,24 @@ def test_other_paths_and_empty_input_are_ignored() -> None:
 def test_real_ruff_accepts_a_formatted_file() -> None:
     ok, problems = check(ROOT, ["backend/tests/acceptance/__init__.py"])
     assert ok, problems
+
+
+def test_file_list_follows_end_of_options_marker() -> None:
+    run = FakeRunner()
+    check(ROOT, ["backend/tests/acceptance/test_J001.py"], run=run)
+    for cmd, _ in run.calls:
+        assert cmd[cmd.index("--") + 1 :] == ["tests/acceptance/test_J001.py"]
+
+
+def test_unsafe_paths_are_rejected_without_running_tools() -> None:
+    run = FakeRunner()
+    for bad in [
+        "frontend/--config=evil.js",
+        "frontend/src/../../../etc/passwd",
+        "backend/tests/x.py;rm",
+        "/etc/passwd",
+    ]:
+        ok, problems = check(ROOT, [bad], run=run)
+        assert not ok, bad
+        assert "허용하지 않는 경로" in problems[0]
+    assert run.calls == []

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -28,6 +29,7 @@ BACKEND_STEPS = [
     ("lint", ["uv", "run", "ruff", "check"]),
 ]
 FRONTEND_STEPS = [("lint", ["npx", "eslint"])]
+SAFE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 
 
 def run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -45,8 +47,19 @@ def run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(cmd, 2, "", str(error))
 
 
+def is_safe_path(path: str) -> bool:
+    """레포 안의 평범한 상대 경로만 도구 인자로 넘긴다 (옵션·상위 경로·셸 문자 차단)."""
+    parts = path.split("/")
+    return bool(SAFE_PATH.fullmatch(path)) and not any(
+        p in {"", ".."} or p[0] == "-" for p in parts
+    )
+
+
 def check(root: Path, paths: list[str], run: Runner = run_command) -> tuple[bool, list[str]]:
     files = sorted({p.split("::")[0] for p in paths})
+    unsafe = [f for f in files if not is_safe_path(f)]
+    if unsafe:
+        return False, [f"허용하지 않는 경로: {', '.join(unsafe)}"]
     areas = [
         ("backend", BACKEND_STEPS, [f for f in files if f.startswith("backend/")]),
         ("frontend", FRONTEND_STEPS, [f for f in files if f.startswith("frontend/")]),
@@ -57,7 +70,7 @@ def check(root: Path, paths: list[str], run: Runner = run_command) -> tuple[bool
             continue
         relative = [f.removeprefix(f"{area}/") for f in selected]
         for name, cmd in steps:
-            proc = run([*cmd, *relative], root / area)
+            proc = run([*cmd, "--", *relative], root / area)
             if proc.returncode != 0:
                 output = (proc.stdout + proc.stderr).strip()[-1500:]
                 problems.append(f"{area} {name}: {output}")

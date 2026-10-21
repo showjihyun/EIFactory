@@ -224,6 +224,10 @@ def test_spec_accepts_valid_contract(h: Harness) -> None:
         {"acceptance_tests": []},
         {"acceptance_tests": ["backend/tests/test_bookmarks.py"]},
         {"acceptance_tests": ["frontend/src/List.accept.test.tsx"]},
+        {"changed_tests": ["frontend/--config=evil.js"]},
+        {"changed_tests": ["backend/tests/../../secret.py"]},
+        {"changed_tests": ["backend/src/bookmarks/main.py"]},
+        {"changed_tests": ["backend/tests/test_missing.py"]},
     ],
 )
 def test_spec_rejects_invalid_contract(h: Harness, overrides: dict[str, Any]) -> None:

@@ -115,6 +115,9 @@ MEDIUM_CONTENT = [
 ]
 MAX_LINES = 400
 MAX_FILES = 15
+CHANGED_TEST = re.compile(
+    r"^(backend/tests/(\w+/)*test_\w+\.py|frontend/src/(\w+/)*\w+(\.\w+)*\.test\.tsx?)$"
+)
 
 
 class FactoryError(Exception):
@@ -584,9 +587,9 @@ def parse_contract(text: str, job_id: str) -> dict[str, Any]:
     if not tests:
         errors.append("acceptance_tests가 비어 있음")
     backend = re.compile(rf"^backend/tests/acceptance/test_{job_id}\.py(::\w+)?$")
-    frontend = re.compile(rf"^frontend/src/(.+/)?\w+\.{job_id}\.accept\.test\.tsx$")
+    frontend = re.compile(rf"^frontend/src/(\w+/)*\w+\.{job_id}\.accept\.test\.tsx$")
     for test in tests:
-        if not (backend.match(test) or frontend.match(test)):
+        if not (backend.match(str(test)) or frontend.match(str(test))):
             errors.append(
                 f"수락 테스트 경로 규칙 위반: {test} "
                 f"(backend/tests/acceptance/test_{job_id}.py 또는 "
@@ -595,6 +598,13 @@ def parse_contract(text: str, job_id: str) -> dict[str, Any]:
     for key in ("changed_tests", "allowed_config_changes"):
         if not isinstance(contract.get(key, []), list):
             errors.append(f"{key}는 목록")
+    # changed_tests는 명령 인자(형식·린트 확인)로 넘어가므로 기존 테스트 파일 경로만 받는다
+    for test in contract.get("changed_tests") or []:
+        if not CHANGED_TEST.match(str(test)):
+            errors.append(
+                f"changed_tests 경로 규칙 위반: {test} "
+                "(backend/tests/**/test_*.py 또는 frontend/src/**/*.test.ts(x))"
+            )
     if errors:
         raise FactoryError("contract 형식 오류:\n- " + "\n- ".join(errors))
     contract.setdefault("changed_tests", [])
@@ -710,6 +720,9 @@ def cmd_spec(root: Path, state: State, job_id: str) -> str:
     missing = [t for t in contract["acceptance_tests"] if not (root / t.split("::")[0]).exists()]
     if missing:
         raise FactoryError(f"수락 테스트 파일이 없습니다: {', '.join(missing)}")
+    missing = [t for t in contract["changed_tests"] if not (root / t).is_file()]
+    if missing:
+        raise FactoryError(f"changed_tests 파일이 없습니다: {', '.join(missing)}")
     job.update(
         type=contract["type"],
         size=contract["size"],
