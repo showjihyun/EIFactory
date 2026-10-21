@@ -37,7 +37,7 @@ HEARTBEAT_PATH = "factory/heartbeat.json"
 MERGE_LOCK = "factory-merge.lock"  # Git 공통 디렉터리에 둔다 (worktree끼리 공유)
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
-SIZE_CAPS = {"small": 10 * 60, "medium": 30 * 60}
+SIZE_CAPS = {"small": 15 * 60, "medium": 30 * 60}
 RISKS = ["LOW", "MEDIUM", "HIGH"]
 SOFT_RATIO = 0.8
 MAX_ATTEMPTS = 3

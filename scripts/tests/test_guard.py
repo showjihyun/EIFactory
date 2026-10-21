@@ -25,7 +25,7 @@ def make_job(status: str, **overrides: Any) -> dict[str, Any]:
             "factory/specs/J001.md": "x",
             "Makefile": "x",
         },
-        "time": {"segments": [[NOW - 60, None]], "cap_s": 600, "extended": False, "active_s": 60},
+        "time": {"segments": [[NOW - 60, None]], "cap_s": 900, "extended": False, "active_s": 60},
     }
     job.update(overrides)
     return job

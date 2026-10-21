@@ -505,7 +505,7 @@ def test_validate_requires_verifying(h: Harness) -> None:
 
 def test_verify_after_hard_cap_blocks_with_timeout(h: Harness) -> None:
     h.to_building()
-    h.advance(11 * 60)
+    h.advance(16 * 60)
     assert h.run("verify", "J001") != 0
     job = h.job()
     assert job["status"] == "BLOCKED"
@@ -513,10 +513,25 @@ def test_verify_after_hard_cap_blocks_with_timeout(h: Harness) -> None:
     assert h.calls("verify") == []
 
 
+def test_small_job_runs_until_fifteen_minutes(h: Harness) -> None:
+    h.to_building()
+    h.advance(14 * 60)
+    assert h.run("verify", "J001") == 0
+    assert h.job()["status"] == "VERIFYING"
+
+
+def test_failure_before_soft_cap_still_retries(h: Harness) -> None:
+    h.to_building()
+    h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("lint")], validator="")
+    h.advance(11 * 60)
+    h.run("verify", "J001")
+    assert h.job()["status"] == "RETRY_REQUIRED"
+
+
 def test_failure_after_soft_cap_blocks_instead_of_retry(h: Harness) -> None:
     h.to_building()
     h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("lint")], validator="")
-    h.advance(int(8.5 * 60))
+    h.advance(int(12.5 * 60))
     h.run("verify", "J001")
     job = h.job()
     assert job["status"] == "BLOCKED"
@@ -538,13 +553,13 @@ def test_time_stops_while_waiting_for_approval(h: Harness) -> None:
 
 def test_resume_extend_once(h: Harness) -> None:
     h.to_building()
-    h.advance(11 * 60)
+    h.advance(16 * 60)
     h.run("verify", "J001")
     assert h.run("resume", "J001", "--extend") == 0
     job = h.job()
     assert job["status"] == "BUILDING"
-    assert job["time"]["cap_s"] == 15 * 60
-    h.advance(5 * 60)
+    assert job["time"]["cap_s"] == int(22.5 * 60)
+    h.advance(7 * 60)
     h.run("verify", "J001")
     assert h.job()["blocked"]["reason"] == "TIMEOUT"
     assert h.run("resume", "J001", "--extend") != 0
