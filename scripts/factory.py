@@ -35,7 +35,7 @@ REVIEWS_DIR = "factory/reviews"
 VALIDATOR_PROMPT = "factory/prompts/validator.md"
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
-SIZE_CAPS = {"small": 20 * 60, "medium": 30 * 60}
+SIZE_CAPS = {"small": 10 * 60, "medium": 30 * 60}
 RISKS = ["LOW", "MEDIUM", "HIGH"]
 SOFT_RATIO = 0.8
 MAX_ATTEMPTS = 3

@@ -74,7 +74,7 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING → APPROVAL_REQUIRED → APPRO
 | 필드 | 값 |
 |---|---|
 | `type` | `feature` / `bugfix` / `copy` / `refactor` |
-| `size` | `small` (상한 20분) / `medium` (상한 30분). 중형을 넘으면 작업을 만들지 말고 분할을 제안한다 |
+| `size` | `small` (상한 10분) / `medium` (상한 30분). 중형을 넘으면 작업을 만들지 말고 분할을 제안한다 |
 | `risk` | `LOW` / `MEDIUM` / `HIGH` (최종 등급은 `verify`가 diff로 계산한 등급과 비교해 높은 쪽) |
 | `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx` |
 | `changed_tests` | Spec 단계에서 바꾼 기존 테스트 파일 (없으면 `[]`) |
