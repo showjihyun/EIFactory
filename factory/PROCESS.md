@@ -90,6 +90,19 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 - 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).
 - 인증: `ANTHROPIC_API_KEY` 환경변수가 있으면 API 키, 없으면 로그인 세션(구독). `--require-api-key`로 API 키를 강제할 수 있다. 키 값은 출력·기록하지 않는다.
 
+### 컨테이너 격리 (`--isolation docker`, Phase 3b)
+
+```
+python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" ...
+```
+
+- 세션은 컨테이너(`.devcontainer/Dockerfile` 이미지) 안에서 돈다. 인증은 **API 키만** 쓴다 (`ANTHROPIC_API_KEY`, 컨테이너에는 변수 이름만 넘긴다).
+- 네트워크: 컨테이너는 내부 전용 네트워크(`factory-internal`)에 있고, 프록시(`docker/proxy`, `factory-proxy`)를 거쳐 `docker/proxy/filter`의 도메인(`api.anthropic.com`)에만 HTTPS로 나간다.
+- Git: 공유 `.git`은 읽기 전용으로 마운트한다. 컨테이너는 브랜치·설정·hooks를 바꿀 수 없다. worktree의 `.git` 파일은 컨테이너 경로를 가리키는 파일로 바꿔 끼운다.
+- 의존성: 작업별 볼륨에 컨테이너로 설치한다 (이때만 일반 네트워크, 키 없음). Python은 이미지에 들어 있어 실행 중에 내려받지 않는다.
+- 머지: 컨테이너 안의 `merge`는 아무것도 하지 않고(APPROVED 유지) 세션이 끝나면 호스트가 머지한다. 호스트는 기본 checkout의 `factory.py`를 쓰고, rebase 후 재검증은 오프라인 컨테이너에서 돌린다. **호스트는 에이전트가 쓴 코드를 실행하지 않는다.**
+- `docker/`와 `.devcontainer/`는 잠금 대상이다. 팩토리 작업으로 바꾸면 BLOCKED(`PROTECTED_FILE_CHANGED`).
+
 ## 세션 복구 (`recover`)
 
 - 진행 중 작업이 있으면 보호 hook이 도구 호출마다 `factory/heartbeat.json`에 세션 ID와 시각을 남긴다.

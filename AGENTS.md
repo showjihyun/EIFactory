@@ -21,7 +21,8 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `factory/prompts/validator.md` | Validator 지시문 |
 | `factory/state.json`, `factory-state.md`, `factory/heartbeat.json` | 작업 상태와 세션 표시 (`factory.py`·hook만 씀, Git 추적 제외) |
 | `factory/evals/tasks.md` | 평가 과제 (요구사항만, 기대 결과는 레포 밖) |
-| `.devcontainer/` | 격리 실행 환경 |
+| `.devcontainer/` | 격리 실행 환경 (devcontainer, `dispatch --isolation docker`의 에이전트 이미지) |
+| `docker/proxy/` | 컨테이너 세션의 외부 출구 프록시와 허용 도메인 목록 |
 
 ## 명령
 
