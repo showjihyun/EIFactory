@@ -130,6 +130,11 @@ def test_three_parallel_jobs_all_merge_without_conflict(repo: Path) -> None:
     # 머지된 작업의 worktree는 지운다
     assert git(repo, "worktree", "list").count("\n") == 0
     assert report["max_parallel"] == 3
+    # worktree를 지워도 작업 기록(상태)은 남긴다
+    for job in jobs:
+        record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+        assert record["status"] == "MERGED"
+        assert record["merge_commit"] == job["merge_commit"]
 
 
 def test_wall_clock_timeout_kills_session_and_blocks_job(

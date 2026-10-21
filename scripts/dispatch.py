@@ -208,6 +208,11 @@ def run_job(
         merge_commit=job.get("merge_commit"),
         log=str(log_path),
     )
+    # 작업 상태는 worktree 안에 있으므로, worktree를 지우기 전에 기록으로 남긴다
+    record = jobs_dir / "records" / f"{job_id}.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    result["record"] = str(record)
     if job["status"] == "MERGED" and not args.keep_merged:
         with _git_lock:
             _git(root, "worktree", "remove", "--force", str(worktree))
