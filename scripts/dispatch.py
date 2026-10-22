@@ -174,11 +174,13 @@ def agent_command(
         return [*json.loads(override), prompt]
     if agent == "codex":
         where = workdir or str(root)
-        # 컨테이너는 그 자체가 격리 환경이다. 호스트에서는 Codex 샌드박스(작업 폴더 쓰기)를 쓴다
+        # 컨테이너는 그 자체가 격리 환경이다. 호스트에서는 Codex 샌드박스(작업 폴더 쓰기만)를 쓴다.
+        # 공유 .git(hooks, config 포함)은 쓰기 대상에 넣지 않는다. 쓸 수 있으면 hook을 심어
+        # 호스트에서 코드를 실행할 수 있다. 머지는 세션이 끝난 뒤 호스트가 한다 (merges_on_host)
         sandbox = (
             ["--dangerously-bypass-approvals-and-sandbox"]
             if workdir
-            else ["--sandbox", "workspace-write", "--add-dir", str(_git_common_dir(root))]
+            else ["--sandbox", "workspace-write"]
         )
         return [
             "codex",
@@ -217,10 +219,9 @@ def agent_command(
     ]
 
 
-def _git_common_dir(root: Path) -> Path:
-    """worktree가 공유하는 .git (factory.py의 머지·lock이 쓴다)."""
-    proc = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], root)
-    return Path(proc.stdout.strip()) if proc.returncode == 0 else root / ".git"
+def merges_on_host(agent: str, docker: bool) -> bool:
+    """세션이 공유 .git에 쓸 수 없어 머지를 호스트가 하는가 (컨테이너 세션, Codex 샌드박스 세션)."""
+    return docker or agent == "codex"
 
 
 def setup_steps() -> list[tuple[str, list[str]]]:
@@ -457,7 +458,10 @@ def run_job(
     workdir = CONTAINER_WORKDIR if docker else None
     inner = agent_command(worktree, prompt, args.model, agent=args.agent, workdir=workdir)
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
+    host_merge = merges_on_host(args.agent, docker is not None)
     session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
+    if host_merge:
+        session_env["FACTORY_MERGE_ON_HOST"] = "1"
     log_path = logs / f"{job_id}.jsonl"
     with open(log_path, "wb") as out, open(logs / f"{job_id}.stderr", "wb") as err:
         proc = subprocess.Popen(
@@ -484,15 +488,18 @@ def run_job(
         detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
         _factory(root, worktree, "block", job_id, "--reason", "TIMEOUT", "--detail", detail)
         job = _load_job(worktree, job_id)
-    if docker and job["status"] == "APPROVED":
-        # 컨테이너 세션은 머지하지 않는다. 호스트가 머지하되 재검증은 컨테이너에서 돌린다
-        tools = {
-            "FACTORY_VERIFY_CMD": docker_tool_command(docker, ["python", "scripts/verify.py"]),
-            "FACTORY_CHECK_RED_CMD": docker_tool_command(
-                docker, ["python", "scripts/check_red.py"]
-            ),
-        }
-        env = {k: json.dumps(v) for k, v in tools.items()}
+    if host_merge and job["status"] == "APPROVED":
+        # 세션은 머지하지 않는다. 호스트가 기본 checkout의 factory.py로 머지한다.
+        # 컨테이너 세션이면 재검증도 컨테이너에서 돌려 호스트가 에이전트 코드를 실행하지 않는다
+        env: dict[str, str] = {}
+        if docker:
+            tools = {
+                "FACTORY_VERIFY_CMD": docker_tool_command(docker, ["python", "scripts/verify.py"]),
+                "FACTORY_CHECK_RED_CMD": docker_tool_command(
+                    docker, ["python", "scripts/check_red.py"]
+                ),
+            }
+            env = {k: json.dumps(v) for k, v in tools.items()}
         # 앞 작업의 컨테이너 재검증이 수 분 걸리므로 lock을 세션 상한만큼 기다린다
         env["FACTORY_MERGE_WAIT_S"] = str(int(args.wall_timeout * 60))
         merged = _factory(root, worktree, "merge", job_id, env=env)

@@ -309,6 +309,14 @@ def test_codex_host_command(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert f"projects.'{repo}'.trust_level=\"trusted\"" in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    # 공유 .git(hooks, config 포함)에 쓰기 권한을 주지 않는다. 머지는 세션이 끝난 뒤 호스트가 한다
+    assert "--add-dir" not in cmd
+
+
+def test_host_merges_for_sessions_without_git_write(repo: Path) -> None:
+    assert dispatch.merges_on_host("codex", docker=False)
+    assert dispatch.merges_on_host("claude", docker=True)
+    assert not dispatch.merges_on_host("claude", docker=False)
 
 
 def test_codex_container_command_uses_container_as_sandbox(
