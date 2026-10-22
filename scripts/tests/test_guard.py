@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 import pytest
 
 GUARD = Path(__file__).resolve().parents[1] / "hooks" / "guard.py"
+REPO_CONFIG = Path(__file__).resolve().parents[2] / "factory" / "config.json"
 NOW = 1_000_000.0
 
 
@@ -47,6 +49,8 @@ def call(
         "jobs": {job["id"]: job} if job else {},
     }
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    if not (state_dir / "config.json").exists():
+        shutil.copy(REPO_CONFIG, state_dir / "config.json")
     return subprocess.run(
         [sys.executable, str(GUARD), *args],
         input=json.dumps(

@@ -24,6 +24,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from factory_config import Config, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
 
 Job = dict[str, Any]
@@ -65,78 +66,12 @@ ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFY
 CLOSED_STATUSES = {"MERGED", "DROPPED"}
 RECOVERABLE_STATUSES = ACTIVE_STATUSES | {"APPROVED"}
 
-# 잠금 대상: 기존 테스트, 검증 설정, 정책·절차 파일
-LOCK_PATTERNS = [
-    "Makefile",
-    "scripts/*",
-    "backend/pyproject.toml",
-    "backend/uv.lock",
-    "backend/tests/*.py",
-    "frontend/package.json",
-    "frontend/package-lock.json",
-    "frontend/tsconfig.json",
-    "frontend/vite.config.ts",
-    "frontend/eslint.config.js",
-    "frontend/src/*.test.ts",
-    "frontend/src/*.test.tsx",
-    "frontend/e2e/*.e2e.ts",
-    "frontend/playwright.config.ts",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "factory/PROCESS.md",
-    "factory/prompts/*",
-    ".claude/*",
-    # Codex 전용 구성 (Phase 3c): hook, 스킬
-    ".codex/*",
-    ".agents/*",
-    # 격리 환경 (Phase 3b): 이미지 정의와 네트워크 허용 목록
-    ".devcontainer/*",
-    "docker/*",
-]
-# 새로 만들어져도 안 되는 경로 (테스트 추가는 허용)
-NO_NEW_FILE_PATTERNS = [
-    "scripts/*",
-    "factory/prompts/*",
-    ".claude/*",
-    ".codex/*",
-    ".agents/*",
-    "Makefile",
-    ".devcontainer/*",
-    "docker/*",
-]
-
 # 위험 등급 계산에서 제외하는 팩토리 산출물
 RISK_EXCLUDE = [STATE_PATH, SUMMARY_PATH, f"{SPECS_DIR}/*", f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
 # 검증한 변경과 머지하는 변경이 같은지 대조할 때 제외하는 파일
 TREE_EXCLUDE = [STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH, f"{REVIEWS_DIR}/*", ".pytest_tmp*"]
 SKIP_DIRS = {"__pycache__", "node_modules", ".venv", ".git", ".mypy_cache", ".ruff_cache"}
 
-HIGH_PATHS = [
-    "backend/src/bookmarks/auth.py",
-    "backend/src/bookmarks/settings.py",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "factory/PROCESS.md",
-    "factory/prompts/*",
-    ".claude/*",
-    ".codex/*",
-    ".agents/*",
-    ".github/*",
-    ".devcontainer/*",
-    "docker/*",
-]
-MEDIUM_PATHS = [
-    "Makefile",
-    "scripts/*",
-    "backend/pyproject.toml",
-    "backend/uv.lock",
-    "frontend/package.json",
-    "frontend/package-lock.json",
-    "frontend/tsconfig.json",
-    "frontend/vite.config.ts",
-    "frontend/eslint.config.js",
-    "frontend/playwright.config.ts",
-]
 HIGH_CONTENT = [(re.compile(r"DELETE\s+FROM", re.I), "데이터 삭제 SQL 추가")]
 MEDIUM_CONTENT = [
     (re.compile(r"\b(CREATE|ALTER)\s+TABLE\b", re.I), "DB 스키마 변경"),
@@ -151,14 +86,18 @@ MEDIUM_CONTENT = [
 ]
 MAX_LINES = 400
 MAX_FILES = 15
-CHANGED_TEST = re.compile(
-    r"^(backend/tests/(\w+/)*test_\w+\.py|frontend/src/(\w+/)*\w+(\.\w+)*\.test\.tsx?"
-    r"|frontend/e2e/(\w+/)*\w+(\.\w+)*\.e2e\.ts)$"
-)
 
 
 class FactoryError(Exception):
     """사용법·상태 오류. 상태를 바꾸지 않는다."""
+
+
+def _config(root: Path) -> Config:
+    """레포별 설정 (factory/config.json + 키트 공통 보호)."""
+    try:
+        return load_config(root)
+    except ConfigError as error:
+        raise FactoryError(str(error)) from error
 
 
 # ---------------------------------------------------------------- 시간
@@ -397,7 +336,9 @@ def _sha(path: Path) -> str:
 def _lock_targets(root: Path, job: Job) -> list[str]:
     allowed = set(job["allowed_config_changes"])
     targets = {
-        rel for rel in _repo_files(root) if _matches(rel, LOCK_PATTERNS) and rel not in allowed
+        rel
+        for rel in _repo_files(root)
+        if _matches(rel, _config(root).lock_patterns) and rel not in allowed
     }
     targets.update(t.split("::")[0] for t in job["acceptance_tests"])
     targets.update(job["changed_tests"])
@@ -414,7 +355,7 @@ def _changed_locks(root: Path, job: Job) -> list[str]:
         elif _sha(path) != digest:
             changed.append(rel)
     for rel in _repo_files(root):
-        if rel not in job["locks"] and _matches(rel, NO_NEW_FILE_PATTERNS):
+        if rel not in job["locks"] and _matches(rel, _config(root).no_new_file_patterns):
             changed.append(f"{rel} (새 파일)")
     return changed
 
@@ -456,6 +397,7 @@ def _diff(root: Path, base: str) -> tuple[str, dict[str, tuple[list[str], list[s
 
 
 def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
+    cfg = _config(root)
     _, files = _diff(root, job["base_commit"])
     level = RISKS.index(job["risk_declared"])
     reasons = [f"contract 선언: {job['risk_declared']}"]
@@ -472,9 +414,9 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
     total_lines = 0
     for path, (added, removed) in files.items():
         total_lines += len(added) + len(removed)
-        if _matches(path, HIGH_PATHS):
+        if _matches(path, cfg.high_paths):
             raise_to("HIGH", f"{path} 변경")
-        elif _matches(path, MEDIUM_PATHS):
+        elif _matches(path, cfg.medium_paths):
             raise_to("MEDIUM", f"{path} 변경")
         for pattern, reason in HIGH_CONTENT:
             if any(pattern.search(ln) for ln in added):
@@ -647,7 +589,7 @@ def _check_time(job: Job) -> bool:
 # ---------------------------------------------------------------- spec
 
 
-def parse_contract(text: str, job_id: str) -> dict[str, Any]:
+def parse_contract(text: str, job_id: str, cfg: Config) -> dict[str, Any]:
     blocks = re.findall(r"```json\s*\n(.*?)\n```", text, re.S)
     if len(blocks) != 1:
         raise FactoryError("spec에 ```json contract 블록이 정확히 하나 있어야 합니다")
@@ -667,27 +609,19 @@ def parse_contract(text: str, job_id: str) -> dict[str, Any]:
     tests = contract.get("acceptance_tests") or []
     if not tests:
         errors.append("acceptance_tests가 비어 있음")
-    backend = re.compile(rf"^backend/tests/acceptance/test_{job_id}\.py(::\w+)?$")
-    frontend = re.compile(
-        rf"^frontend/(src/(\w+/)*\w+\.{job_id}\.accept\.test\.tsx"
-        rf"|e2e/(\w+/)*\w+\.{job_id}\.accept\.e2e\.ts)$"
-    )
+    if not cfg.acceptance_tests:
+        errors.append("factory/config.json에 수락 테스트 경로 규칙(acceptance_tests)이 없음")
     for test in tests:
-        if not (backend.match(str(test)) or frontend.match(str(test))):
-            errors.append(
-                f"수락 테스트 경로 규칙 위반: {test} "
-                f"(backend/tests/acceptance/test_{job_id}.py 또는 "
-                f"frontend/src/**/<Name>.{job_id}.accept.test.tsx)"
-            )
+        if cfg.acceptance_tests and not cfg.is_acceptance_test(str(test), job_id):
+            errors.append(f"수락 테스트 경로 규칙 위반: {test} ({cfg.acceptance_examples(job_id)})")
     for key in ("changed_tests", "allowed_config_changes"):
         if not isinstance(contract.get(key, []), list):
             errors.append(f"{key}는 목록")
     # changed_tests는 명령 인자(형식·린트 확인)로 넘어가므로 기존 테스트 파일 경로만 받는다
     for test in contract.get("changed_tests") or []:
-        if not CHANGED_TEST.match(str(test)):
+        if not cfg.changed_test.match(str(test)):
             errors.append(
-                f"changed_tests 경로 규칙 위반: {test} "
-                "(backend/tests/**/test_*.py 또는 frontend/src/**/*.test.ts(x))"
+                f"changed_tests 경로 규칙 위반: {test} (기존 테스트 파일만, config의 changed_test)"
             )
     if errors:
         raise FactoryError("contract 형식 오류:\n- " + "\n- ".join(errors))
@@ -822,7 +756,7 @@ def cmd_spec(root: Path, state: State, job_id: str) -> str:
     spec = root / job["spec_path"]
     if not spec.exists():
         raise FactoryError(f"{job['spec_path']}가 없습니다")
-    contract = parse_contract(spec.read_text(encoding="utf-8"), job_id)
+    contract = parse_contract(spec.read_text(encoding="utf-8"), job_id, _config(root))
     missing = [t for t in contract["acceptance_tests"] if not (root / t.split("::")[0]).exists()]
     if missing:
         raise FactoryError(f"수락 테스트 파일이 없습니다: {', '.join(missing)}")

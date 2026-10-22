@@ -88,8 +88,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     (root / "scripts").mkdir()
-    for name in ("factory.py", "proc.py"):
+    for name in ("factory.py", "factory_config.py", "proc.py"):
         shutil.copy(SCRIPTS / name, root / "scripts" / name)
+    (root / "factory").mkdir()
+    shutil.copy(SCRIPTS.parent / "factory" / "config.json", root / "factory" / "config.json")
     git(root, "init", "-q", "-b", "main")
     git(root, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
     git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")

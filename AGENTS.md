@@ -17,6 +17,9 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/dispatch.py` | 여러 요구사항을 worktree별 headless 세션으로 동시 실행 (사람 전용) |
 | `scripts/issues.py` | GitHub Issues(본인 작성, `factory` 라벨)를 dispatch로 처리하고 결과를 이슈에 남김 (사람 전용) |
 | `scripts/report.py` | 운영 보고서: KPI와 개선 후보 |
+| `scripts/factory_kit.py`, `scripts/factory_config.py` | 팩토리 키트 설치·점검, 레포별 설정 읽기 |
+| `factory/config.json` | 레포별 설정: 잠금·위험 경로, 테스트·수락 테스트 경로 규칙, 설치 명령, 컨테이너 경로 (잠금·HIGH) |
+| `factory/templates/` | 키트 설치용 템플릿 (설정, AGENTS.md, Claude Code 권한·hook) |
 | `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |

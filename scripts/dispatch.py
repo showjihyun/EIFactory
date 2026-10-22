@@ -49,6 +49,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from factory_config import DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
@@ -56,17 +57,18 @@ BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
 API_KEYS = {"claude": ["ANTHROPIC_API_KEY"], "codex": ["CODEX_API_KEY", "OPENAI_API_KEY"]}
 DEFAULT_WALL_TIMEOUT_MIN = 40.0  # 중형 상한 30분 + 정리 여유
-SETUP_STEPS = [
-    ("backend", ["uv", "sync", "-q"]),
-    ("frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]),
-]
 ACTIVE = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING", "APPROVED"}
 
 # 컨테이너 격리 (Phase 3b)
 INTERNAL_NETWORK = "factory-internal"
 PROXY_NAME = "factory-proxy"
 PROXY_URL = f"http://{PROXY_NAME}:3128"
-CONTAINER_WORKDIR = "/workspaces/bookmark-factory"  # 이미지가 node_modules 소유자를 맞춰 둔 경로
+# 컨테이너 안 레포 경로·설치 명령·캐시 볼륨은 factory/config.json의 docker (아래는 설정이 없을 때)
+CONTAINER_WORKDIR = DEFAULT_WORKDIR
+DEFAULT_SETUP_SCRIPT = (
+    "cd backend && uv sync -q && cd ../frontend && npm ci --no-audit --no-fund --loglevel=error"
+)
+DEFAULT_CACHE_VOLUMES = {"frontend/node_modules": "node", "/home/node/.venvs": "venv"}
 CONTAINER_GIT = "/repo-git"
 # 컨테이너에 이름으로 넘기지 않는 dispatcher 전용 설정
 HOST_ONLY_SETTINGS = {
@@ -226,11 +228,12 @@ def merges_on_host(agent: str, docker: bool) -> bool:
     return docker or agent == "codex"
 
 
-def setup_steps() -> list[tuple[str, list[str]]]:
+def setup_steps(root: Path) -> list[tuple[str, list[str]]]:
+    """의존성 설치 단계 (영역 폴더, 명령). factory/config.json의 setup."""
     override = os.environ.get("FACTORY_SETUP_CMD")
     if override is not None:
         return [(str(area), list(cmd)) for area, cmd in json.loads(override)]
-    return SETUP_STEPS
+    return load_config(root).setup
 
 
 # ---------------------------------------------------------------- 컨테이너 (Phase 3b)
@@ -243,6 +246,9 @@ class DockerJob:
     job_id: str
     stamp: str
     image: str
+    workdir: str = CONTAINER_WORKDIR
+    setup_script: str = DEFAULT_SETUP_SCRIPT
+    cache_volumes: tuple[tuple[str, str], ...] = tuple(DEFAULT_CACHE_VOLUMES.items())
 
     @property
     def name(self) -> str:
@@ -257,6 +263,20 @@ class DockerJob:
     @property
     def dotgit(self) -> Path:
         return self.root.parent / f"{self.root.name}.jobs" / "meta" / self.job_id / "dotgit"
+
+
+def _docker_job(root: Path, worktree: Path, job_id: str, stamp: str, image: str) -> DockerJob:
+    cfg = load_config(root)
+    return DockerJob(
+        root,
+        worktree,
+        job_id,
+        stamp,
+        image,
+        workdir=cfg.docker_workdir,
+        setup_script=cfg.docker_setup_script or DEFAULT_SETUP_SCRIPT,
+        cache_volumes=tuple((cfg.docker_cache_volumes or DEFAULT_CACHE_VOLUMES).items()),
+    )
 
 
 def _write_dotgit(job: DockerJob) -> None:
@@ -284,18 +304,23 @@ def _docker_base(job: DockerJob, network: str) -> list[str]:
         "--network",
         network,
         "--mount",
-        f"type=bind,source={job.worktree},target={CONTAINER_WORKDIR}",
+        f"type=bind,source={job.worktree},target={job.workdir}",
         # worktree의 .git 파일은 호스트 경로를 가리키므로 컨테이너 경로로 바꿔 끼운다
         "--mount",
-        f"type=bind,source={job.dotgit},target={CONTAINER_WORKDIR}/.git,readonly",
+        f"type=bind,source={job.dotgit},target={job.workdir}/.git,readonly",
         # 공유 .git(브랜치, 설정, hooks)은 읽기 전용. 커밋·머지는 호스트만 한다
         "--mount",
         f"type=bind,source={common_git},target={CONTAINER_GIT},readonly",
         # 리눅스용 의존성은 작업별 볼륨에 둔다 (호스트의 Windows용 설치와 섞이지 않게)
-        "--mount",
-        f"type=volume,source={job.name}-node,target={CONTAINER_WORKDIR}/frontend/node_modules",
-        "--mount",
-        f"type=volume,source={job.name}-venv,target=/home/node/.venvs",
+        *[
+            arg
+            for target, suffix in job.cache_volumes
+            for arg in (
+                "--mount",
+                f"type=volume,source={job.name}-{suffix},"
+                f"target={target if target.startswith('/') else f'{job.workdir}/{target}'}",
+            )
+        ],
         "-e",
         "GIT_CONFIG_COUNT=1",
         "-e",
@@ -312,10 +337,7 @@ def _extra_no_proxy() -> list[str]:
 
 def docker_setup_command(job: DockerJob) -> list[str]:
     """의존성 설치. 패키지 저장소가 필요하므로 일반 네트워크, 키는 넘기지 않는다."""
-    script = (
-        "cd backend && uv sync -q && cd ../frontend && npm ci --no-audit --no-fund --loglevel=error"
-    )
-    return [*_docker_base(job, "bridge"), job.image, "bash", "-c", script]
+    return [*_docker_base(job, "bridge"), job.image, "bash", "-c", job.setup_script]
 
 
 def docker_session_command(
@@ -440,7 +462,7 @@ def run_job(
     with _git_lock:
         _git(root, "worktree", "move", str(slot), str(worktree))
     result.update(job_id=job_id, worktree=str(worktree))
-    docker = DockerJob(root, worktree, job_id, stamp, image) if image else None
+    docker = _docker_job(root, worktree, job_id, stamp, image) if image else None
 
     # 가상환경은 절대 경로를 품으므로 worktree를 옮긴 뒤에 설치한다
     if docker:
@@ -449,7 +471,7 @@ def run_job(
             result["error"] = f"컨테이너 설치 실패: {(done.stdout + done.stderr)[-500:]}"
             return result
     else:
-        for area, cmd in setup_steps():
+        for area, cmd in setup_steps(root):
             done = _run(cmd, worktree / area)
             if done.returncode != 0:
                 result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
@@ -457,7 +479,7 @@ def run_job(
 
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
-    workdir = CONTAINER_WORKDIR if docker else None
+    workdir = docker.workdir if docker else None
     inner = agent_command(worktree, prompt, args.model, agent=args.agent, workdir=workdir)
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
     host_merge = merges_on_host(args.agent, docker is not None)
@@ -637,6 +659,10 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             # 호스트 실행이면 머지 전 재검증이 에이전트 코드를 샌드박스 밖에서 돌린다. Windows에서는
             # Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치도 못 한다 (codex 0.163 실측)
             raise DispatchError("Codex는 --isolation docker로만 실행합니다")
+        try:
+            load_config(root)
+        except ConfigError as error:
+            raise DispatchError(str(error)) from error
         if args.isolation == "docker":
             image = prepare_docker(root)
     except DispatchError as error:

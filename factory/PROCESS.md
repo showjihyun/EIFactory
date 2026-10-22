@@ -224,6 +224,20 @@ python scripts/report.py [--out 파일]
 - dispatch 작업 기록과 남은 worktree 상태로 KPI(작업 성공률, 사람 개입률, 리드타임, 머지 후 결함, 비용)와 개선 후보(BLOCKED 사유, 리뷰 지적)를 낸다.
 - 오판율은 정답표와 대조해야 하므로 사람이 확인한다. 비용은 Claude 세션·리뷰어의 API 환산 비용이고, Codex는 토큰 수만 센다.
 
+## 키트 (`scripts/factory_kit.py`, Phase 4)
+
+팩토리를 다른 레포에 설치한다. 레포마다 다른 값은 `factory/config.json`에만 둔다.
+
+```
+python scripts/factory_kit.py install <대상 레포> [--force]
+python scripts/factory_kit.py check <대상 레포>
+```
+
+- 키트 공통 보호(정책·절차 파일, 도구 래퍼, `scripts/`, 격리 환경, `factory/config.json`)는 코드에 있어 설정이 없어도 적용된다.
+- `factory/config.json`: 검증 설정 파일(`lock_patterns`, `medium_paths`), 위험 경로(`high_paths`), 기존 테스트 위치(`test_patterns`, `changed_test`), 수락 테스트 경로 규칙(`acceptance_tests`, `{id}` 자리표시), 의존성 설치(`setup`), 컨테이너 경로(`docker`).
+- 대상 레포는 **검증 계약** 세 스크립트(`scripts/verify.py`, `scripts/check_red.py --json`, `scripts/check_style.py`)를 직접 만든다. 형식은 `factory/templates/AGENTS.md`.
+- 컨테이너 격리를 쓰려면 대상 레포에 `.devcontainer/Dockerfile`(Claude Code·Codex CLI 포함 이미지)도 필요하다.
+
 ## 운영 기록 (`factory/learnings.md`)
 
 평가·실전 실행에서 배운 점과 규칙 개선 후보를 적는다. 에이전트는 개선 후보를 보고에 제안만 하고, 이 파일과 정책·절차 파일은 사람이 고친다.

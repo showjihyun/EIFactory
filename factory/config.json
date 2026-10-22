@@ -1,0 +1,64 @@
+{
+  "_설명": "팩토리 키트의 레포별 설정 (scripts/factory_config.py). 키트 공통 보호 경로(scripts/, 정책·절차 파일, .claude/, .codex/, .agents/, docker/ 등)는 코드에 있고 여기 값과 합쳐진다. 이 파일도 잠금·HIGH 대상이다.",
+  "lock_patterns": [
+    "Makefile",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "backend/tests/*.py",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.ts",
+    "frontend/eslint.config.js",
+    "frontend/src/*.test.ts",
+    "frontend/src/*.test.tsx",
+    "frontend/e2e/*.e2e.ts",
+    "frontend/playwright.config.ts"
+  ],
+  "no_new_file_patterns": ["Makefile"],
+  "high_paths": ["backend/src/bookmarks/auth.py", "backend/src/bookmarks/settings.py"],
+  "medium_paths": [
+    "Makefile",
+    "backend/pyproject.toml",
+    "backend/uv.lock",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.ts",
+    "frontend/eslint.config.js",
+    "frontend/playwright.config.ts"
+  ],
+  "test_patterns": [
+    "backend/tests/*",
+    "frontend/src/*.test.ts",
+    "frontend/src/*.test.tsx",
+    "frontend/e2e/*.e2e.ts"
+  ],
+  "changed_test": "^(backend/tests/(\\w+/)*test_\\w+\\.py|frontend/src/(\\w+/)*\\w+(\\.\\w+)*\\.test\\.tsx?|frontend/e2e/(\\w+/)*\\w+(\\.\\w+)*\\.e2e\\.ts)$",
+  "acceptance_tests": [
+    {
+      "pattern": "^backend/tests/acceptance/test_{id}\\.py(::\\w+)?$",
+      "example": "backend/tests/acceptance/test_{id}.py"
+    },
+    {
+      "pattern": "^frontend/src/(\\w+/)*\\w+\\.{id}\\.accept\\.test\\.tsx$",
+      "example": "frontend/src/**/<Name>.{id}.accept.test.tsx"
+    },
+    {
+      "pattern": "^frontend/e2e/(\\w+/)*\\w+\\.{id}\\.accept\\.e2e\\.ts$",
+      "example": "frontend/e2e/<name>.{id}.accept.e2e.ts"
+    }
+  ],
+  "setup": [
+    ["backend", ["uv", "sync", "-q"]],
+    ["frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]]
+  ],
+  "docker": {
+    "workdir": "/workspaces/bookmark-factory",
+    "setup_script": "cd backend && uv sync -q && cd ../frontend && npm ci --no-audit --no-fund --loglevel=error",
+    "cache_volumes": {
+      "frontend/node_modules": "node",
+      "/home/node/.venvs": "venv"
+    }
+  }
+}

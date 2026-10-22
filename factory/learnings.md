@@ -22,6 +22,9 @@
 | Phase 3c | 머지된 worktree를 못 지우면(Windows 경로 길이 제한, 읽기 전용 Git objects) dispatcher가 결과 표 전체를 ERROR로 잃었다 | 긴 경로·읽기 전용 파일까지 지우고, 그래도 실패하면 결과는 두고 사유만 남긴다 |
 | Phase 3c | 테스트에서 `sys.platform`을 바꾸면 리눅스 컨테이너에서 표준 라이브러리가 깨진다 (호스트에서는 통과) | 판정 함수를 따로 두고 그 함수만 바꾼다 |
 
+| Phase 4 | 레포 전용 값(경로 규칙, 위험 경로, 설치 명령)이 코드에 박혀 다른 레포에 쓸 수 없었다 | `factory/config.json`으로 분리, 키트 공통 보호는 코드에 남김 |
+| Phase 4 | 샘플 레포의 Claude hook 명령이 `backend/` 구조를 가정했다 (`uv run --project backend`) | 키트는 구조와 무관한 `python` 명령의 설정 템플릿을 쓴다 |
+
 ## 개선 후보 (미반영)
 
 - 컨테이너 안 `verify`가 Windows 바인드 마운트 때문에 느리다 (scripts 테스트 약 5~6분). 소형 상한 15분에 비해 여유가 적다.

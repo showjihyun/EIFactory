@@ -1,0 +1,16 @@
+{
+  "_설명": "팩토리 키트 레포별 설정. 값을 채운 뒤 `python scripts/factory_kit.py check .`로 확인한다. 이 파일은 잠금·HIGH 대상이라 팩토리 작업이 바꿀 수 없다.",
+  "lock_patterns": [],
+  "no_new_file_patterns": [],
+  "high_paths": [],
+  "medium_paths": [],
+  "test_patterns": [],
+  "changed_test": "(?!)",
+  "acceptance_tests": [],
+  "setup": [],
+  "docker": {
+    "workdir": "/workspaces/project",
+    "setup_script": "",
+    "cache_volumes": {}
+  }
+}

@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from factory import (  # noqa: E402
     HEARTBEAT_PATH,
-    LOCK_PATTERNS,
     LOCK_TTL_S,
     STATE_PATH,
     SUMMARY_PATH,
@@ -37,6 +36,7 @@ from factory import (  # noqa: E402
     now,
     read_heartbeat,
 )
+from factory_config import Config, ConfigError, load_config  # noqa: E402
 from proc import use_utf8_output  # noqa: E402
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -48,13 +48,6 @@ JSON_DENY = "--json-deny" in sys.argv[1:]
 BUILDER_AGENT = ".claude/agents/builder.md"
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
 STATE_FILES = {STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH}
-TEST_PATTERNS = [
-    "backend/tests/*",
-    "frontend/src/*.test.ts",
-    "frontend/src/*.test.tsx",
-    "frontend/e2e/*.e2e.ts",
-]
-POLICY_AND_CONFIG = [p for p in LOCK_PATTERNS if not _matches(p, TEST_PATTERNS)]
 SPEC_STAGE = {"QUEUED", "SPEC_READY"}
 BUILD_STAGE = {"BUILDING", "RETRY_REQUIRED"}
 STOPPED = {"VERIFYING", "APPROVAL_REQUIRED", "APPROVED", "BLOCKED"}
@@ -177,15 +170,7 @@ def over_time_cap(job: dict[str, Any]) -> bool:
     return running and active_seconds(job, now()) > job["time"]["cap_s"]
 
 
-def is_acceptance_test(path: str, job_id: str) -> bool:
-    return bool(
-        re.match(rf"^backend/tests/acceptance/test_{job_id}\.py$", path)
-        or re.match(rf"^frontend/src/(.+/)?\w+\.{job_id}\.accept\.test\.tsx$", path)
-        or re.match(rf"^frontend/e2e/(.+/)?\w+\.{job_id}\.accept\.e2e\.ts$", path)
-    )
-
-
-def check_write(path: str, job: dict[str, Any] | None) -> None:
+def check_write(path: str, job: dict[str, Any] | None, cfg: Config) -> None:
     if path in STATE_FILES:
         deny(f"{path}는 직접 고칠 수 없습니다. python scripts/factory.py 명령만 상태를 바꿉니다.")
     if job is None:
@@ -195,12 +180,14 @@ def check_write(path: str, job: dict[str, Any] | None) -> None:
         deny("시간 상한을 넘었습니다. 수정을 멈추고 python scripts/factory.py verify로 기록하세요.")
     if status in STOPPED:
         deny(f"작업이 {status} 상태입니다. 수정하지 말고 상태를 보고하세요.")
-    if _matches(path, POLICY_AND_CONFIG) and path not in job.get("allowed_config_changes", []):
+    # 정책·검증 설정 = 잠금 대상 중 테스트가 아닌 것 (레포별 설정 + 키트 공통)
+    policy_and_config = [p for p in cfg.lock_patterns if not _matches(p, cfg.test_patterns)]
+    if _matches(path, policy_and_config) and path not in job.get("allowed_config_changes", []):
         deny(f"{path}는 정책·검증 설정 파일이라 팩토리 작업 중에 고칠 수 없습니다.")
     if status in SPEC_STAGE:
-        if path == job["spec_path"] or _matches(path, TEST_PATTERNS):
+        if path == job["spec_path"] or _matches(path, cfg.test_patterns):
             return
-        if is_acceptance_test(path, job["id"]):
+        if cfg.is_acceptance_test(path, job["id"]):
             return
         deny(f"Spec 단계에서는 구현 코드를 쓰지 않습니다 ({path}). spec과 테스트만 작성하세요.")
     if status in BUILD_STAGE and path in job.get("locks", {}):
@@ -274,6 +261,12 @@ def main() -> None:
     if not isinstance(tool_input, dict):
         tool_input = {"command": tool_input}
     job = load_active_job(root)
+    try:
+        cfg = load_config(root)
+    except ConfigError as error:
+        # 설정을 못 읽으면 막는다 (fail closed). 설정 파일 자체는 잠금 대상이라 사람이 고친다
+        deny(f"{error}. 사람이 고칠 때까지 진행할 수 없습니다.")
+        return
     session = str(payload.get("session_id") or "unknown")
     command = shell_command(tool, tool_input)
     record = job is not None and check_session(
@@ -283,7 +276,7 @@ def main() -> None:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         path = relative(raw, root)
         if path is not None:
-            check_write(path, job)
+            check_write(path, job, cfg)
     elif tool in SUBAGENT_TOOLS:
         check_subagent(root, tool, tool_input, job)
     elif command is not None:
@@ -291,7 +284,7 @@ def main() -> None:
     for raw in patch_paths(tool_input):
         path = relative(raw, root)
         if path is not None:
-            check_write(path, job)
+            check_write(path, job, cfg)
     if record:
         write_heartbeat(root, session)
 

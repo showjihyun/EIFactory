@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import factory  # noqa: E402
+
+REPO_CONFIG = Path(__file__).resolve().parents[2] / "factory" / "config.json"
+CFG = factory.load_config(Path(__file__).resolve().parents[2])
 
 FAKE_CMD = r"""
 import json, os, sys
@@ -167,6 +171,8 @@ def h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
         path = repo / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    # 레포별 설정은 샘플 레포의 것을 쓴다 (경로 규칙, 위험 경로, 잠금 대상)
+    shutil.copy(REPO_CONFIG, repo / "factory" / "config.json")
     git(repo, "init", "-q", "-b", "main")
     git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
     git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
@@ -1116,7 +1122,7 @@ def test_network_allowlist_change_blocks_the_job(h: Harness) -> None:
     job = h.job()
     assert job["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
     assert "docker/proxy/filter" in job["blocked"]["detail"]
-    assert factory._matches("docker/proxy/filter", factory.HIGH_PATHS)
+    assert factory._matches("docker/proxy/filter", CFG.high_paths)
 
 
 # ---------- Phase 3c: 리뷰어 분리, Approver, 모델 승격, 에이전트 세션 ----------
@@ -1271,7 +1277,7 @@ def test_codex_config_is_protected(h: Harness, path: str) -> None:
     target.write_text("{}\n", encoding="utf-8")
     h.run("verify", "J001")
     assert h.job()["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
-    assert factory._matches(path, factory.HIGH_PATHS)
+    assert factory._matches(path, CFG.high_paths)
 
 
 def test_codex_extra_args_reach_reviewers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1292,9 +1298,9 @@ def test_playwright_acceptance_test_path_is_accepted(h: Harness) -> None:
 
 def test_existing_user_flow_tests_and_config_are_locked(h: Harness) -> None:
     for rel in ("frontend/e2e/bookmarks.e2e.ts", "frontend/playwright.config.ts"):
-        assert factory._matches(rel, factory.LOCK_PATTERNS)
-    assert factory._matches("frontend/playwright.config.ts", factory.MEDIUM_PATHS)
-    assert factory.CHANGED_TEST.match("frontend/e2e/bookmarks.e2e.ts")
+        assert factory._matches(rel, CFG.lock_patterns)
+    assert factory._matches("frontend/playwright.config.ts", CFG.medium_paths)
+    assert CFG.changed_test.match("frontend/e2e/bookmarks.e2e.ts")
 
 
 # ---------- Phase 4: 운영 기록 (보고서용) ----------
