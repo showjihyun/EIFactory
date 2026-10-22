@@ -455,3 +455,10 @@ def test_codex_builder_spawn_is_checked(
     job = make_job("RETRY_REQUIRED", builder_model="gpt-6-astra", agent="codex")
     tool_input = {"message": "job ID: J001", **tool_input}
     assert codex(tmp_path, "collaborationspawn_agent", tool_input, job) is ok
+
+
+def test_patch_marker_in_shell_command_does_not_skip_checks(tmp_path: Path) -> None:
+    # 셸 명령에 패치 표시 글자를 넣어 검사를 피할 수 없다 (판단은 도구 이름으로 한다)
+    for tool in ("Bash", "exec_command", "unknown_tool"):
+        sneaky = {"command": "git push origin main # *** Begin Patch"}
+        assert not codex(tmp_path, tool, sneaky, make_job("BUILDING"))

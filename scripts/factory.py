@@ -1011,6 +1011,8 @@ def reviewer_command(agent: str, out_file: Path) -> list[str]:
             "never",
             "--output-last-message",
             str(out_file),
+            # dispatch.py와 같은 추가 인자 (예: 모델 제공자 지정)
+            *[str(a) for a in json.loads(os.environ.get("FACTORY_CODEX_ARGS", "[]"))],
             "-",
         ]
     return [

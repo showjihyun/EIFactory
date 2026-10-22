@@ -2,13 +2,15 @@
 
 사용법:
     python scripts/dispatch.py [--max-parallel 3] [--wall-timeout 40] [--model M]
+                               [--agent claude|codex] [--review-agent claude|codex]
                                [--isolation host|docker] [--require-api-key] [--keep-merged]
                                "<요구사항>" ...
 
 요구사항마다:
 1. 기본 checkout의 base 브랜치 끝에서 worktree를 만들고 `factory.py new --base <base>`로
    작업을 만든다 (상태는 worktree마다 따로). worktree를 작업 ID 폴더로 옮긴 뒤 의존성을 설치한다.
-2. headless `claude -p`로 factory 스킬을 실행한다. 실행 래퍼가 벽시계 시간 상한을 건다 (7.6).
+2. headless 세션(`claude -p` 또는 `codex exec`)으로 factory 스킬을 실행한다. 실행 래퍼가 벽시계
+   시간 상한을 건다 (7.6). 세션에는 FACTORY_AGENT_SESSION=1을 넣어 사람 전용 명령을 막는다.
 3. 끝나면 상태를 읽는다. MERGED면 worktree를 지우고, 그 밖의 상태는 사람이 보도록 남긴다.
 
 격리 (`--isolation`):
@@ -18,7 +20,12 @@
   base 브랜치를 건드리지 않고, 세션이 끝나면 호스트가 머지한다. 머지 전 재검증도 컨테이너에서
   돌려, 호스트는 에이전트가 쓴 코드를 실행하지 않는다. 인증은 API 키만 쓴다.
 
-인증은 ANTHROPIC_API_KEY 환경변수가 있으면 API 키, 없으면 로그인 세션(구독)을 쓴다. 키 값은
+에이전트 도구 (`--agent`, Phase 3c): claude는 Claude Code, codex는 Codex CLI. 정책·절차·상태·검증은
+같고 래퍼만 다르다 (Claude Code `.claude/`, Codex `.codex/hooks.json`·`.agents/skills/`).
+리뷰어 도구는 `--review-agent`로 따로 고를 수 있다 (기본: 세션과 같은 도구).
+
+인증: claude는 ANTHROPIC_API_KEY가 있으면 API 키, 없으면 로그인 세션(구독). codex는 CODEX_API_KEY
+또는 OPENAI_API_KEY, 없으면 `codex login` 상태. 컨테이너는 API 키만 쓴다. 키 값은
 어디에도 출력하거나 기록하지 않는다 (컨테이너에는 변수 이름만 넘긴다).
 """
 
@@ -43,7 +50,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from proc import resolve_command, use_utf8_output  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
-DEFAULT_MODEL = "claude-opus-5-5"
+# 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
+DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
+API_KEYS = {"claude": ["ANTHROPIC_API_KEY"], "codex": ["CODEX_API_KEY", "OPENAI_API_KEY"]}
 DEFAULT_WALL_TIMEOUT_MIN = 40.0  # 중형 상한 30분 + 정리 여유
 SETUP_STEPS = [
     ("backend", ["uv", "sync", "-q"]),
@@ -63,10 +72,18 @@ HOST_ONLY_SETTINGS = {
     "FACTORY_SETUP_CMD",
     "FACTORY_DOCKER_MOUNTS",
     "FACTORY_ROOT",
+    "FACTORY_AGENT_SESSION",
+    "FACTORY_DOCKER_NO_PROXY",
 }
 
 PROMPT = (
     "factory 스킬로 배정된 작업 {job_id}를 처리해. 요구사항: {requirement}\n"
+    "작업은 dispatcher가 이미 `new`로 만들어 QUEUED 상태다. recover 없이 "
+    "factory/PROCESS.md 3번(spec·수락 테스트 작성)부터 진행해."
+)
+CODEX_PROMPT = (
+    "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 배정된 작업 {job_id}를 "
+    "처리해. 요구사항: {requirement}\n"
     "작업은 dispatcher가 이미 `new`로 만들어 QUEUED 상태다. recover 없이 "
     "factory/PROCESS.md 3번(spec·수락 테스트 작성)부터 진행해."
 )
@@ -111,8 +128,23 @@ def _factory(
     return _run([sys.executable, str(root / "scripts/factory.py"), *args], worktree, full_env)
 
 
-def auth_mode() -> str:
-    return "API 키 (환경변수)" if os.environ.get("ANTHROPIC_API_KEY") else "로그인 세션 (구독)"
+def auth_mode(agent: str = "claude") -> str:
+    if any(os.environ.get(name) for name in API_KEYS[agent]):
+        return "API 키 (환경변수)"
+    return "로그인 세션 (구독)" if agent == "claude" else "로그인 세션 (codex login)"
+
+
+def api_key_names(agents: list[str]) -> list[str]:
+    """도구마다 설정된 API 키 변수 이름 하나씩. 없으면 DispatchError (값은 읽지 않는다)."""
+    names: list[str] = []
+    for agent in dict.fromkeys(agents):
+        found = next((n for n in API_KEYS[agent] if os.environ.get(n)), None)
+        if found is None:
+            raise DispatchError(
+                f"{agent}용 API 키 환경변수가 없습니다 ({' 또는 '.join(API_KEYS[agent])})"
+            )
+        names.append(found)
+    return names
 
 
 def allowed_tools(root: Path) -> list[str]:
@@ -128,10 +160,47 @@ def allowed_tools(root: Path) -> list[str]:
     return BASE_TOOLS + allow
 
 
-def agent_command(root: Path, prompt: str, model: str) -> list[str]:
+def codex_extra_args() -> list[str]:
+    """codex exec에 덧붙일 인자 (예: 모델 제공자 지정). factory.py의 리뷰어도 같은 값을 쓴다."""
+    return [str(a) for a in json.loads(os.environ.get("FACTORY_CODEX_ARGS", "[]"))]
+
+
+def agent_command(
+    root: Path, prompt: str, model: str, agent: str = "claude", workdir: str | None = None
+) -> list[str]:
+    """오케스트레이터 세션 명령. workdir는 세션이 보는 레포 경로 (컨테이너면 컨테이너 경로)."""
     override = os.environ.get("FACTORY_AGENT_CMD")
     if override:
         return [*json.loads(override), prompt]
+    if agent == "codex":
+        where = workdir or str(root)
+        # 컨테이너는 그 자체가 격리 환경이다. 호스트에서는 Codex 샌드박스(작업 폴더 쓰기)를 쓴다
+        sandbox = (
+            ["--dangerously-bypass-approvals-and-sandbox"]
+            if workdir
+            else ["--sandbox", "workspace-write", "--add-dir", str(_git_common_dir(root))]
+        )
+        return [
+            "codex",
+            "exec",
+            "--model",
+            model,
+            "--json",
+            "--color",
+            "never",
+            "-C",
+            where,
+            *sandbox,
+            # 프로젝트 hook(.codex/hooks.json)은 신뢰된 프로젝트에서만 읽힌다. hook은 잠긴 파일이라
+            # 작업이 바꿀 수 없으므로 hook 신뢰 확인을 건너뛴다 (확인이 없으면 hook 없이 돈다)
+            "-c",
+            f"projects.'{where}'.trust_level=\"trusted\"",
+            "--dangerously-bypass-hook-trust",
+            "-c",
+            "check_for_update_on_startup=false",
+            *codex_extra_args(),
+            prompt,
+        ]
     return [
         "claude",
         "-p",
@@ -146,6 +215,12 @@ def agent_command(root: Path, prompt: str, model: str) -> list[str]:
         "--allowedTools",
         *allowed_tools(root),
     ]
+
+
+def _git_common_dir(root: Path) -> Path:
+    """worktree가 공유하는 .git (factory.py의 머지·lock이 쓴다)."""
+    proc = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], root)
+    return Path(proc.stdout.strip()) if proc.returncode == 0 else root / ".git"
 
 
 def setup_steps() -> list[tuple[str, list[str]]]:
@@ -228,6 +303,10 @@ def _docker_base(job: DockerJob, network: str) -> list[str]:
     ]
 
 
+def _extra_no_proxy() -> list[str]:
+    return [h for h in os.environ.get("FACTORY_DOCKER_NO_PROXY", "").split(",") if h]
+
+
 def docker_setup_command(job: DockerJob) -> list[str]:
     """의존성 설치. 패키지 저장소가 필요하므로 일반 네트워크, 키는 넘기지 않는다."""
     script = (
@@ -236,7 +315,10 @@ def docker_setup_command(job: DockerJob) -> list[str]:
     return [*_docker_base(job, "bridge"), job.image, "bash", "-c", script]
 
 
-def docker_session_command(job: DockerJob, inner: list[str]) -> list[str]:
+def docker_session_command(
+    job: DockerJob, inner: list[str], keys: list[str] | None = None
+) -> list[str]:
+    """에이전트 세션 컨테이너. keys는 넘길 API 키 변수 이름 (값은 넘기지 않는다)."""
     settings = sorted(
         name
         for name in os.environ
@@ -245,11 +327,15 @@ def docker_session_command(job: DockerJob, inner: list[str]) -> list[str]:
     env = [
         f"HTTPS_PROXY={PROXY_URL}",
         f"HTTP_PROXY={PROXY_URL}",
-        "NO_PROXY=localhost,127.0.0.1",
+        # 시험용 내부 서버(가짜 모델 서버 등)는 FACTORY_DOCKER_NO_PROXY로 프록시를 거치지 않게 한다
+        "NO_PROXY=" + ",".join(["localhost", "127.0.0.1", *_extra_no_proxy()]),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
         "FACTORY_MERGE_ON_HOST=1",
+        "FACTORY_AGENT_SESSION=1",
     ]
-    names = (["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else []) + settings
+    if keys is None:
+        keys = ["ANTHROPIC_API_KEY"] if os.environ.get("ANTHROPIC_API_KEY") else []
+    names = keys + settings
     return [
         *_docker_base(job, INTERNAL_NETWORK),
         "--name",
@@ -340,7 +426,7 @@ def run_job(
     started = time.time()
     with _git_lock:
         _git(root, "worktree", "add", "-q", "--detach", str(slot), base)
-    created = _factory(root, slot, "new", requirement, "--base", base)
+    created = _factory(root, slot, "new", requirement, "--base", base, env=_agent_env(args))
     if created.returncode != 0:
         result["error"] = f"new 실패: {created.stdout.strip()[-500:]}"
         result["worktree"] = str(slot)
@@ -366,9 +452,12 @@ def run_job(
                 result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
                 return result
 
-    prompt = PROMPT.format(job_id=job_id, requirement=requirement)
-    inner = agent_command(worktree, prompt, args.model)
-    command = docker_session_command(docker, inner) if docker else inner
+    template = CODEX_PROMPT if args.agent == "codex" else PROMPT
+    prompt = template.format(job_id=job_id, requirement=requirement)
+    workdir = CONTAINER_WORKDIR if docker else None
+    inner = agent_command(worktree, prompt, args.model, agent=args.agent, workdir=workdir)
+    command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
+    session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
     log_path = logs / f"{job_id}.jsonl"
     with open(log_path, "wb") as out, open(logs / f"{job_id}.stderr", "wb") as err:
         proc = subprocess.Popen(
@@ -377,6 +466,7 @@ def run_job(
             stdout=out,
             stderr=err,
             stdin=subprocess.DEVNULL,
+            env=session_env,
             start_new_session=sys.platform != "win32",
         )
         try:
@@ -431,8 +521,14 @@ def run_job(
     return result
 
 
+def _agent_env(args: argparse.Namespace) -> dict[str, str]:
+    """factory.py가 작업에 기록하고 리뷰어를 고를 때 쓰는 도구 설정."""
+    return {"FACTORY_AGENT": args.agent, "FACTORY_REVIEW_AGENT": args.review_agent}
+
+
 def _summary(report: dict[str, Any]) -> str:
     lines = [
+        f"도구: {report['agent']} (리뷰어 {report['review_agent']}), "
         f"인증: {report['auth']}, 격리 {report['isolation']}, "
         f"동시 실행 {report['max_parallel']}개, base {report['base']}",
         "",
@@ -465,27 +561,41 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("requirements", nargs="+")
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--agent", choices=sorted(DEFAULT_MODELS), default="claude")
+    parser.add_argument("--review-agent", choices=sorted(DEFAULT_MODELS), help="기본: --agent")
+    parser.add_argument("--model", help="오케스트레이터 모델 (기본: 도구별 DEFAULT_MODELS)")
     parser.add_argument("--isolation", choices=["host", "docker"], default="host")
     parser.add_argument("--require-api-key", action="store_true")
     parser.add_argument("--keep-merged", action="store_true", help="머지된 worktree도 남김")
     args = parser.parse_args(argv)
+    args.review_agent = args.review_agent or args.agent
+    args.model = args.model or DEFAULT_MODELS[args.agent]
+    args.keys = None
 
     image: str | None = None
     try:
         needs_key = args.require_api_key or (
             args.isolation == "docker" and not os.environ.get("FACTORY_AGENT_CMD")
         )
-        if needs_key and not os.environ.get("ANTHROPIC_API_KEY"):
-            raise DispatchError(
-                "ANTHROPIC_API_KEY 환경변수가 없습니다 (--require-api-key 또는 --isolation docker)"
-            )
+        if needs_key:
+            # 세션 도구와 리뷰어 도구의 키를 모두 확인한다 (리뷰어는 세션 안에서 돈다)
+            args.keys = api_key_names([args.agent, args.review_agent])
         base = _git(root, "branch", "--show-current")
         if not base:
             raise DispatchError("기본 checkout이 브랜치 위에 있어야 합니다 (머지 대상)")
         if _git(root, "status", "--porcelain", "--untracked-files=no"):
             raise DispatchError(
                 "기본 checkout에 커밋되지 않은 변경이 있습니다 (머지가 이곳에서 일어남)"
+            )
+        if (
+            args.agent == "codex"
+            and args.isolation == "host"
+            and sys.platform == "win32"
+            and not os.environ.get("FACTORY_AGENT_CMD")
+        ):
+            raise DispatchError(
+                "Windows 호스트에서는 Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치를 실행하지 "
+                "못합니다 (codex 0.163 실측). --isolation docker를 쓰세요"
             )
         if args.isolation == "docker":
             image = prepare_docker(root)
@@ -495,8 +605,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     print(
-        f"인증: {auth_mode()}, 격리 {args.isolation}, 작업 {len(args.requirements)}개, "
-        f"동시 {args.max_parallel}개"
+        f"도구: {args.agent}, 인증: {auth_mode(args.agent)}, 격리 {args.isolation}, "
+        f"작업 {len(args.requirements)}개, 동시 {args.max_parallel}개"
     )
     with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
         futures = [
@@ -513,7 +623,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
                 )
     report = {
         "started": stamp,
-        "auth": auth_mode(),
+        "agent": args.agent,
+        "review_agent": args.review_agent,
+        "auth": auth_mode(args.agent),
         "isolation": args.isolation,
         "image": image,
         "base": base,

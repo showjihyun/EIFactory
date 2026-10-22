@@ -41,6 +41,9 @@ from proc import use_utf8_output  # noqa: E402
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SUBAGENT_TOOLS = {"Agent", "Task", "collaborationspawn_agent", "spawn_agent"}
+PATCH_TOOLS = {
+    "apply_patch"
+}  # 입력이 패치 본문인 도구. 그 밖의 도구의 command는 모두 셸 명령으로 본다
 JSON_DENY = "--json-deny" in sys.argv[1:]
 BUILDER_AGENT = ".claude/agents/builder.md"
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
@@ -80,15 +83,19 @@ def is_patch(text: str) -> bool:
     return "*** Begin Patch" in text
 
 
-def shell_command(tool_input: dict[str, Any]) -> str | None:
-    """셸 명령 문자열. 목록 형태(["bash", "-lc", "<명령>"])도 받는다. 패치 본문은 명령이 아니다."""
+def shell_command(tool: str, tool_input: dict[str, Any]) -> str | None:
+    """셸 명령 문자열. 목록 형태(["bash", "-lc", "<명령>"])도 받는다.
+
+    패치 도구인지는 도구 이름으로만 판단한다. 내용(패치 표시 글자)으로 판단하면 셸 명령에 그 글자를
+    넣어 검사를 피할 수 있다.
+    """
+    if tool in WRITE_TOOLS | SUBAGENT_TOOLS | PATCH_TOOLS:
+        return None
     raw = tool_input.get("command", tool_input.get("cmd"))
     if isinstance(raw, list):
         parts = [str(x) for x in raw]
         raw = parts[2] if len(parts) >= 3 and parts[1] in {"-c", "-lc"} else " ".join(parts)
-    if not isinstance(raw, str) or is_patch(raw):
-        return None
-    return raw
+    return raw if isinstance(raw, str) else None
 
 
 def patch_paths(tool_input: dict[str, Any]) -> list[str]:
@@ -259,7 +266,7 @@ def main() -> None:
         tool_input = {"command": tool_input}
     job = load_active_job(root)
     session = str(payload.get("session_id") or "unknown")
-    command = shell_command(tool_input) if tool not in WRITE_TOOLS | SUBAGENT_TOOLS else None
+    command = shell_command(tool, tool_input)
     record = job is not None and check_session(
         root, session, "Bash" if command is not None else tool, command or ""
     )

@@ -10,14 +10,14 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 ## Claude Code에서의 역할 배치
 
 - 너(메인 세션)가 **오케스트레이터**다. spec·contract·수락 테스트를 쓰고 `python scripts/factory.py` 단계 명령을 실행한다. 구현 코드는 쓰지 않는다 (Spec 단계에서는 hook이 막는다).
-- 구현은 **`builder` 서브에이전트**에게 맡긴다. 프롬프트에는 아래만 넣는다. 너의 분석이나 구현 방향을 넣지 않는다.
+- 구현은 **`builder` 서브에이전트**에게 맡긴다. 모델은 `red`·`verify`·`validate`·`status` 출력의 **Builder 모델**(`sonnet` 또는 `opus`)을 그대로 `model`에 넣는다 (실패 2회 뒤 factory.py가 승격하고, hook이 다른 모델 호출을 막는다). 프롬프트에는 아래만 넣는다. 너의 분석이나 구현 방향을 넣지 않는다.
   ```
   job ID: <ID>
   spec: factory/specs/<ID>.md
   수락 테스트: <acceptance_tests 목록>
   (재시도라면) factory.py가 출력한 실패 내용: <원문 그대로>
   ```
-- Validator는 `python scripts/factory.py validate <ID>`가 별도 프로세스로 실행한다. 직접 리뷰하지 않는다.
+- 리뷰어(code / security / test 3명)는 `python scripts/factory.py validate <ID>`가 별도 프로세스로 실행한다. 직접 리뷰하지 않는다.
 
 ## 명령 실행 형태
 

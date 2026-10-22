@@ -20,6 +20,10 @@ RUN UV_PYTHON_DOWNLOADS=automatic uv python install 3.12
 
 RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then npm install -g @anthropic-ai/claude-code; fi
 
+# Codex CLI (Phase 3c, `dispatch.py --agent codex`). hook 동작(.codex/hooks.json)을 이 버전으로 확인했다
+ARG CODEX_VERSION=0.163.0
+RUN npm install -g @openai/codex@${CODEX_VERSION}
+
 # node_modules는 이름 있는 볼륨으로 마운트한다. 이미지에 경로를 미리 만들어 두면
 # 처음 마운트할 때 소유자(node)가 볼륨으로 복사된다.
 RUN mkdir -p /workspaces/bookmark-factory/frontend/node_modules /home/node/.venvs \

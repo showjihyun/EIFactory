@@ -39,6 +39,7 @@ from pathlib import Path
 if os.environ.get("FAKE_AGENT_MODE") == "sleep":
     time.sleep(120)
 root = Path.cwd()
+print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FACTORY_AGENT"))
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
 job_id = state["active"]
 contract = {
@@ -277,3 +278,127 @@ def test_docker_mode_requires_api_key(repo: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("FACTORY_AGENT_CMD")
     assert dispatch.main(["--isolation", "docker", "요구사항"], root=repo) == 2
+
+
+# ---------- Phase 3c: Codex ----------
+
+REPO_ROOT = SCRIPTS.parent
+
+
+def test_sessions_run_as_agent_sessions_with_chosen_tool(repo: Path) -> None:
+    code, report = run(repo, "--agent", "codex", "요구사항")
+    job = report["jobs"][0]
+    assert job["status"] == "MERGED"
+    assert report["agent"] == "codex"
+    record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    assert record["agent"] == "codex"
+    assert record["builder_model"] == "gpt-6.1-sol"
+    # 사람 전용 명령은 factory.py가 거부하도록 세션에 표시를 남긴다
+    log = Path(job["log"]).read_bytes().decode("utf-8", errors="replace")
+    assert "session-env 1 codex" in log
+
+
+def test_codex_host_command(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    cmd = dispatch.agent_command(repo, "프롬프트", "gpt-6-astra", agent="codex")
+    assert cmd[:4] == ["codex", "exec", "--model", "gpt-6-astra"]
+    assert cmd[-1] == "프롬프트"
+    assert "--json" in cmd
+    # 프로젝트 hook(.codex/hooks.json)은 신뢰된 프로젝트에서만 읽힌다. 없으면 hook 없이 돈다
+    assert "--dangerously-bypass-hook-trust" in cmd
+    assert f"projects.'{repo}'.trust_level=\"trusted\"" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_codex_container_command_uses_container_as_sandbox(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    cmd = dispatch.agent_command(
+        repo, "p", "gpt-6-astra", agent="codex", workdir=dispatch.CONTAINER_WORKDIR
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--sandbox" not in cmd
+    assert f"projects.'{dispatch.CONTAINER_WORKDIR}'.trust_level=\"trusted\"" in cmd
+
+
+def test_codex_extra_args_are_appended(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    monkeypatch.setenv("FACTORY_CODEX_ARGS", json.dumps(["-c", "model_provider=x"]))
+    cmd = dispatch.agent_command(repo, "p", "m", agent="codex")
+    assert cmd[-3:] == ["-c", "model_provider=x", "p"]
+
+
+def test_codex_container_gets_codex_key_by_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-dummy")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy")
+    cmd = dispatch.docker_session_command(docker_job(tmp_path), ["x"], keys=["CODEX_API_KEY"])
+    assert cmd[cmd.index("CODEX_API_KEY") - 1] == "-e"
+    assert "ANTHROPIC_API_KEY" not in cmd
+    assert "sk-codex-dummy" not in " ".join(cmd)
+    assert "FACTORY_AGENT_SESSION=1" in cmd
+
+
+@pytest.mark.parametrize(
+    ("env", "agents", "expected"),
+    [
+        ({"ANTHROPIC_API_KEY": "a"}, ["claude"], ["ANTHROPIC_API_KEY"]),
+        ({"CODEX_API_KEY": "c", "OPENAI_API_KEY": "o"}, ["codex"], ["CODEX_API_KEY"]),
+        ({"OPENAI_API_KEY": "o"}, ["codex"], ["OPENAI_API_KEY"]),
+        ({"ANTHROPIC_API_KEY": "a"}, ["codex"], None),
+        (
+            {"ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"},
+            ["codex", "claude"],
+            ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        ),
+    ],
+)
+def test_api_key_names_per_agent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    agents: list[str],
+    expected: list[str] | None,
+) -> None:
+    for name in ("ANTHROPIC_API_KEY", "CODEX_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if expected is None:
+        with pytest.raises(dispatch.DispatchError):
+            dispatch.api_key_names(agents)
+    else:
+        assert dispatch.api_key_names(agents) == expected
+
+
+def test_codex_docker_mode_requires_codex_key(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("CODEX_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    assert dispatch.main(["--agent", "codex", "--isolation", "docker", "x"], root=repo) == 2
+
+
+def test_proxy_allows_codex_api_and_image_has_codex() -> None:
+    allowed = (REPO_ROOT / "docker/proxy/filter").read_text(encoding="utf-8").split()
+    assert allowed == [r"^api\.anthropic\.com$", r"^api\.openai\.com$"]
+    dockerfile = (REPO_ROOT / ".devcontainer/Dockerfile").read_text(encoding="utf-8")
+    assert "@openai/codex@" in dockerfile
+
+
+def test_codex_on_windows_host_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # codex 0.163은 Windows 호스트에서 샌드박스가 읽기 전용으로 떨어져 명령·패치를 거부한다 (실측)
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    monkeypatch.setattr(dispatch.sys, "platform", "win32")
+    assert dispatch.main(["--agent", "codex", "x"], root=repo) == 2
+
+
+def test_extra_no_proxy_hosts_for_internal_test_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FACTORY_DOCKER_NO_PROXY", "fake-openai")
+    cmd = dispatch.docker_session_command(docker_job(tmp_path), ["x"], keys=[])
+    assert "NO_PROXY=localhost,127.0.0.1,fake-openai" in cmd
+    assert "FACTORY_DOCKER_NO_PROXY" not in cmd

@@ -1270,3 +1270,10 @@ def test_codex_config_is_protected(h: Harness, path: str) -> None:
     h.run("verify", "J001")
     assert h.job()["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
     assert factory._matches(path, factory.HIGH_PATHS)
+
+
+def test_codex_extra_args_reach_reviewers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # dispatch와 같은 설정(FACTORY_CODEX_ARGS)을 리뷰어 프로세스도 쓴다 (모델 제공자 지정 등)
+    monkeypatch.setenv("FACTORY_CODEX_ARGS", json.dumps(["-c", "model_provider=x"]))
+    cmd = factory.reviewer_command("codex", Path("out.txt"))
+    assert cmd[-3:] == ["-c", "model_provider=x", "-"]
