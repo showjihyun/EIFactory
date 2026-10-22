@@ -343,9 +343,10 @@ def test_same_session_keeps_working(tmp_path: Path) -> None:
     assert heartbeat(tmp_path) == {"session": "s1", "at": NOW}
 
 
-def test_dispatch_is_human_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize("script", ["dispatch.py 요구사항", "issues.py --limit 3"])
+def test_dispatch_and_issue_runner_are_human_only(tmp_path: Path, script: str) -> None:
     for job in (None, make_job("BUILDING")):
-        proc = call(tmp_path, "Bash", bash("python scripts/dispatch.py 요구사항"), job)
+        proc = call(tmp_path, "Bash", bash(f"python scripts/{script}"), job)
         assert not allowed(proc)
         assert "사람" in proc.stderr
 
