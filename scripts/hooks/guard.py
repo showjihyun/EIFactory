@@ -8,6 +8,11 @@ stdin으로 hook 입력 JSON을 받고, 막을 때는 이유를 stderr에 쓰고
 
 진행 중 작업이 있으면 허용한 호출마다 heartbeat(세션 ID, 시각)를 남긴다. 다른 세션의
 heartbeat가 있으면 그 세션이 살아 있는 동안은 막고, 끊긴 뒤에는 recover로 이어받게 한다.
+
+Claude Code와 Codex가 같은 hook을 쓴다 (기획안 6.7). Codex의 `apply_patch`(본문의 파일 경로)와
+하위 에이전트 생성(`collaborationspawn_agent`)도 같은 규칙으로 검사한다.
+막는 방법은 도구마다 다르다. Claude Code는 종료 코드 2 + stderr. Codex는 종료 코드 2를 hook 실패로
+보고 호출을 그대로 실행하므로, `--json-deny`(Codex용)일 때는 종료 코드 0 + 판정 JSON으로 막는다.
 """
 
 from __future__ import annotations
@@ -35,6 +40,10 @@ from factory import (  # noqa: E402
 from proc import use_utf8_output  # noqa: E402
 
 WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+SUBAGENT_TOOLS = {"Agent", "Task", "collaborationspawn_agent", "spawn_agent"}
+JSON_DENY = "--json-deny" in sys.argv[1:]
+BUILDER_AGENT = ".claude/agents/builder.md"
+PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
 STATE_FILES = {STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH}
 TEST_PATTERNS = ["backend/tests/*", "frontend/src/*.test.ts", "frontend/src/*.test.tsx"]
 POLICY_AND_CONFIG = [p for p in LOCK_PATTERNS if not _matches(p, TEST_PATTERNS)]
@@ -56,8 +65,71 @@ WRITE_HINT = re.compile(r">|\bsed\s+-i|\brm\b|\bmv\b|\bcp\b|\btee\b|\btruncate\b
 
 
 def deny(reason: str) -> None:
-    sys.stderr.write(f"[factory guard] {reason}\n")
-    sys.exit(2)
+    message = f"[factory guard] {reason}"
+    decision = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": message,
+    }
+    sys.stdout.write(json.dumps({"hookSpecificOutput": decision}, ensure_ascii=False) + "\n")
+    sys.stderr.write(message + "\n")
+    sys.exit(0 if JSON_DENY else 2)
+
+
+def is_patch(text: str) -> bool:
+    return "*** Begin Patch" in text
+
+
+def shell_command(tool_input: dict[str, Any]) -> str | None:
+    """셸 명령 문자열. 목록 형태(["bash", "-lc", "<명령>"])도 받는다. 패치 본문은 명령이 아니다."""
+    raw = tool_input.get("command", tool_input.get("cmd"))
+    if isinstance(raw, list):
+        parts = [str(x) for x in raw]
+        raw = parts[2] if len(parts) >= 3 and parts[1] in {"-c", "-lc"} else " ".join(parts)
+    if not isinstance(raw, str) or is_patch(raw):
+        return None
+    return raw
+
+
+def patch_paths(tool_input: dict[str, Any]) -> list[str]:
+    """apply_patch 본문에서 바뀌는 파일 경로를 뽑는다."""
+    paths: list[str] = []
+    for value in tool_input.values():
+        if isinstance(value, str) and is_patch(value):
+            paths += [m.strip() for m in PATCH_PATH.findall(value)]
+    return paths
+
+
+def _frontmatter_model(root: Path) -> str | None:
+    try:
+        text = (root / BUILDER_AGENT).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^model:\s*(\S+)", text, re.M)
+    return match.group(1) if match else None
+
+
+def check_subagent(
+    root: Path, tool: str, tool_input: dict[str, Any], job: dict[str, Any] | None
+) -> None:
+    """Builder는 factory.py가 정한 모델로만 띄운다 (실패 누적 시 승격, 기획안 6.6)."""
+    required = job.get("builder_model") if job else None
+    if not required:
+        return
+    if tool in {"Agent", "Task"}:  # Claude Code: builder 서브에이전트 (모델 생략 시 frontmatter)
+        if tool_input.get("subagent_type") != "builder":
+            return
+        requested = tool_input.get("model") or _frontmatter_model(root) or "sonnet"
+        how = f"builder를 model: {required}로 호출하세요."
+    else:  # Codex: spawn_agent(task_name="builder...", model=..., fork_turns="none")
+        if not str(tool_input.get("task_name", "")).startswith("builder"):
+            return
+        requested = tool_input.get("model")
+        how = f'spawn_agent에 model: "{required}", fork_turns: "none"을 넣으세요.'
+        if tool_input.get("fork_turns") != "none":
+            deny("Builder는 오케스트레이터의 대화를 넘겨받지 않습니다 (fork_turns: none). " + how)
+    if requested != required:
+        deny(f"이 작업의 Builder 모델은 {required}입니다 (factory.py가 정함). {how}")
 
 
 def relative(raw: str, root: Path) -> str | None:
@@ -183,17 +255,27 @@ def main() -> None:
         return
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        tool_input = {"command": tool_input}
     job = load_active_job(root)
     session = str(payload.get("session_id") or "unknown")
-    command = tool_input.get("command", "") if tool == "Bash" else ""
-    record = job is not None and check_session(root, session, tool, command)
+    command = shell_command(tool_input) if tool not in WRITE_TOOLS | SUBAGENT_TOOLS else None
+    record = job is not None and check_session(
+        root, session, "Bash" if command is not None else tool, command or ""
+    )
     if tool in WRITE_TOOLS:
         raw = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         path = relative(raw, root)
         if path is not None:
             check_write(path, job)
-    elif tool == "Bash":
+    elif tool in SUBAGENT_TOOLS:
+        check_subagent(root, tool, tool_input, job)
+    elif command is not None:
         check_bash(command, job)
+    for raw in patch_paths(tool_input):
+        path = relative(raw, root)
+        if path is not None:
+            check_write(path, job)
     if record:
         write_heartbeat(root, session)
 

@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,8 @@ STATE_PATH = "factory/state.json"
 SUMMARY_PATH = "factory-state.md"
 SPECS_DIR = "factory/specs"
 REVIEWS_DIR = "factory/reviews"
-VALIDATOR_PROMPT = "factory/prompts/validator.md"
+VALIDATOR_PROMPT = "factory/prompts/validator.md"  # 리뷰어 공통 지시
+REVIEWER_PROMPT = "factory/prompts/review-{name}.md"  # 리뷰어별 관점
 HEARTBEAT_PATH = "factory/heartbeat.json"
 MERGE_LOCK = "factory-merge.lock"  # Git 공통 디렉터리에 둔다 (worktree끼리 공유)
 
@@ -46,6 +48,18 @@ EXTEND_RATIO = 0.5
 LOCK_TTL_S = 300  # 마지막 활동 후 이 시간이 지나야 다른 세션이 작업을 이어받는다
 MERGE_WAIT_S = 180  # 다른 작업이 머지 중이면 lock을 이만큼 기다린다 (병렬 실행)
 AUTO_MERGE_RISKS = {"LOW"}
+
+# 리뷰어 분리 (Phase 3c): 모두 PASS여야 통과. 승인 결정(Approver)은 모델이 아니라 규칙이 한다
+REVIEWERS = ["code", "security", "test"]
+# 에이전트 도구별 모델 (기획안 6.6). Builder는 경량 모델로 시작하고 실패 PROMOTE_AFTER회 뒤 승격
+AGENTS = ["claude", "codex"]
+MODELS = {
+    "claude": {"builder": "sonnet", "builder_strong": "opus", "reviewer": "claude-sonnet-5-5"},
+    "codex": {"builder": "gpt-6.1-sol", "builder_strong": "gpt-6-astra", "reviewer": "gpt-6.1-sol"},
+}
+PROMOTE_AFTER = 2
+# 에이전트 세션(FACTORY_AGENT_SESSION=1)에서는 factory.py가 직접 거부한다 (도구 hook과 별개)
+HUMAN_ONLY = {"approve", "resume", "drop"}
 
 ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING"}
 CLOSED_STATUSES = {"MERGED", "DROPPED"}
@@ -70,6 +84,9 @@ LOCK_PATTERNS = [
     "factory/PROCESS.md",
     "factory/prompts/*",
     ".claude/*",
+    # Codex 전용 구성 (Phase 3c): hook, 스킬
+    ".codex/*",
+    ".agents/*",
     # 격리 환경 (Phase 3b): 이미지 정의와 네트워크 허용 목록
     ".devcontainer/*",
     "docker/*",
@@ -79,6 +96,8 @@ NO_NEW_FILE_PATTERNS = [
     "scripts/*",
     "factory/prompts/*",
     ".claude/*",
+    ".codex/*",
+    ".agents/*",
     "Makefile",
     ".devcontainer/*",
     "docker/*",
@@ -98,6 +117,8 @@ HIGH_PATHS = [
     "factory/PROCESS.md",
     "factory/prompts/*",
     ".claude/*",
+    ".codex/*",
+    ".agents/*",
     ".github/*",
     ".devcontainer/*",
     "docker/*",
@@ -202,6 +223,8 @@ def _job_note(job: Job) -> str:
         if job.get("merge_commit"):
             note += f", 머지 커밋 {job['merge_commit'][:7]}"
         return note
+    if job["status"] in ACTIVE_STATUSES and job.get("builder_model"):
+        return f"Builder 모델 {job['builder_model']}"
     return ""
 
 
@@ -291,11 +314,14 @@ def _command(kind: str, default: list[str]) -> list[str]:
     return list(json.loads(override)) if override else default
 
 
-def _run(cmd: list[str], root: Path, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], root: Path, stdin: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         resolve_command(cmd),
         cwd=root,
         input=stdin,
+        env={**os.environ, **env} if env else None,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -571,7 +597,32 @@ def _record_failure(job: Job, signature: str, detail: str) -> str:
         _block(job, "TIMEOUT", f"소프트 상한 이후 재시도 필요: {detail}")
     else:
         _set_status(job, "RETRY_REQUIRED")
+        _maybe_promote(job)
     return str(job["status"])
+
+
+def _agent(name: str = "FACTORY_AGENT", default: str = "claude") -> str:
+    agent = os.environ.get(name) or default
+    if agent not in AGENTS:
+        raise FactoryError(f"{name}={agent}: 지원하는 에이전트 도구는 {', '.join(AGENTS)}")
+    return agent
+
+
+def _maybe_promote(job: Job) -> None:
+    """실패가 PROMOTE_AFTER회 쌓이면 다음 Builder를 상위 모델로 올린다 (기획안 6.6)."""
+    strong = MODELS[job.get("agent", "claude")]["builder_strong"]
+    if job["attempts"] >= PROMOTE_AFTER and job.get("builder_model") != strong:
+        job["builder_model"] = strong
+        job.setdefault("model_changes", []).append(
+            {"attempt": job["attempts"], "model": strong, "reason": "실패 누적", "at": now()}
+        )
+
+
+def _builder_note(job: Job) -> str:
+    if job["status"] != "RETRY_REQUIRED" or not job.get("builder_model"):
+        return ""
+    promoted = " (승격)" if job.get("model_changes") else ""
+    return f" 다음 Builder 모델: {job['builder_model']}{promoted}."
 
 
 def _check_time(job: Job) -> bool:
@@ -707,6 +758,7 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         raise FactoryError(
             f"HEAD가 {base_branch}의 끝과 다릅니다. 최신 {base_branch}에서 시작하세요"
         )
+    agent = _agent()
     job_id, branch = _create_job_branch(root, state)
     _exclude_factory_files(root)
     _clear_heartbeat(root)
@@ -738,6 +790,10 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "spec_revisions": 0,
         "last_failure": None,
         "approval": None,
+        "approval_brief": None,
+        "agent": agent,
+        "builder_model": MODELS[agent]["builder"],
+        "model_changes": [],
         "blocked": None,
         "time": {
             "segments": [[at, None]],
@@ -809,7 +865,7 @@ def cmd_red(root: Path, state: State, job_id: str) -> tuple[int, str]:
         _set_status(job, "BUILDING")
         return 0, (
             f"{job_id}: {wanted} → BUILDING. 파일 {len(job['locks'])}개 잠금. "
-            f"다음: Builder 호출 후 verify {job_id}"
+            f"다음: Builder 호출 (Builder 모델 {job.get('builder_model')}) 후 verify {job_id}"
         )
     job["spec_revisions"] += 1
     detail = f"{result['verdict']}: " + ", ".join(
@@ -873,27 +929,36 @@ def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
         problems.append("verify 실패: " + "; ".join(_failed_lines(verify_output)))
     signature = " | ".join(problems)
     status = _record_failure(job, signature, signature)
-    return 1, f"{job_id}: {status}. {signature}\n{verify_output.strip()[-2500:]}"
+    note = _builder_note(job)
+    return 1, f"{job_id}: {status}.{note} {signature}\n{verify_output.strip()[-2500:]}"
 
 
-DEFAULT_VALIDATOR_INSTRUCTIONS = """너는 AI SW Factory의 Validator다.
+DEFAULT_VALIDATOR_INSTRUCTIONS = """너는 AI SW Factory의 리뷰어다.
 구현자의 대화는 보지 못하고 아래 자료만 본다.
-판정 기준:
-1. diff가 contract의 acceptance_criteria를 실제로 충족하는가
-2. 요구사항 범위 밖 변경이 없는가
-3. 테스트 skip·assertion 약화·검증 설정 변경 같은 우회가 없는가
-4. 명백한 버그·보안 문제가 없는가
 필요하면 Read/Glob/Grep으로 레포 파일을 확인한다. 파일을 고치지 않는다.
+아래 '리뷰어' 절의 관점에서만 판정한다. 그 관점의 문제가 아니면 FAIL로 하지 않는다.
 마지막 줄에 JSON 한 줄로만 판정한다: {"verdict": "PASS" 또는 "FAIL", "issues": ["..."]}
 """
 
+DEFAULT_REVIEWER_FOCUS = {
+    "code": "diff가 contract의 acceptance_criteria를 실제로 충족하는가, 범위 밖 변경이 없는가, "
+    "명백한 버그가 없는가.",
+    "security": "인증·인가 우회, 입력 검증 누락, 비밀정보 노출, 위험한 명령·쿼리가 없는가. "
+    "선언된 위험 등급이 실제 변경보다 낮지 않은가.",
+    "test": "수락 테스트가 기준을 제대로 확인하는가, skip·xfail·assertion 약화·하드코딩 같은 "
+    "우회가 없는가.",
+}
 
-def build_validator_prompt(root: Path, job: Job) -> str:
-    instructions_path = root / VALIDATOR_PROMPT
-    instructions = (
-        instructions_path.read_text(encoding="utf-8")
-        if instructions_path.exists()
-        else DEFAULT_VALIDATOR_INSTRUCTIONS
+
+def _instructions(root: Path, rel: str, default: str) -> str:
+    path = root / rel
+    return path.read_text(encoding="utf-8") if path.exists() else default
+
+
+def build_validator_prompt(root: Path, job: Job, reviewer: str = "code") -> str:
+    instructions = _instructions(root, VALIDATOR_PROMPT, DEFAULT_VALIDATOR_INSTRUCTIONS)
+    focus = _instructions(
+        root, REVIEWER_PROMPT.format(name=reviewer), DEFAULT_REVIEWER_FOCUS[reviewer]
     )
     diff_text, _ = _diff(root, job["base_commit"])
     last = job["validation"][-1] if job["validation"] else {}
@@ -901,6 +966,7 @@ def build_validator_prompt(root: Path, job: Job) -> str:
     return "\n\n".join(
         [
             instructions,
+            f"## 리뷰어: {reviewer}\n{focus}",
             f"## 요구사항\n{job['requirement']}",
             "## contract\n```json\n"
             + json.dumps(job.get("contract", {}), ensure_ascii=False, indent=2)
@@ -928,6 +994,92 @@ def _parse_verdict(text: str) -> dict[str, Any] | None:
     return None
 
 
+def reviewer_command(agent: str, out_file: Path) -> list[str]:
+    """읽기 전용 리뷰어 프로세스. 프롬프트는 stdin으로 넘긴다."""
+    model = MODELS[agent]["reviewer"]
+    if agent == "codex":
+        return [
+            "codex",
+            "exec",
+            "--model",
+            model,
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--color",
+            "never",
+            "--output-last-message",
+            str(out_file),
+            "-",
+        ]
+    return [
+        "claude",
+        "-p",
+        "--model",
+        model,
+        "--output-format",
+        "json",
+        "--allowedTools",
+        "Read",
+        "Glob",
+        "Grep",
+    ]
+
+
+def _run_reviewer(root: Path, job: Job, reviewer: str, path: Path) -> tuple[str, str]:
+    """리뷰어 하나를 실행하고 (최종 응답, stderr)를 돌려준다."""
+    agent = _agent("FACTORY_REVIEW_AGENT", job.get("agent", "claude"))
+    last_message = path.with_suffix(".last")
+    cmd = _command("validator", reviewer_command(agent, last_message))
+    proc = _run(
+        cmd,
+        root,
+        stdin=build_validator_prompt(root, job, reviewer),
+        env={"FACTORY_REVIEWER": reviewer},
+    )
+    text = proc.stdout
+    if last_message.exists():  # codex exec --output-last-message
+        text = last_message.read_text(encoding="utf-8")
+        last_message.unlink()
+    else:
+        try:
+            envelope = json.loads(proc.stdout)
+            if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+                text = envelope["result"]  # claude -p --output-format json
+        except json.JSONDecodeError:
+            pass
+    return text, proc.stderr
+
+
+def write_approval_brief(root: Path, job: Job) -> str:
+    """사람 승인용 요약 (Approver). 승인 여부는 사람이 정한다."""
+    _, files = _diff(root, job["base_commit"])
+    reviews = [r for r in job["reviews"] if r.get("round") == job["reviews"][-1].get("round")]
+    lines = [
+        f"# {job['id']} 승인 요청",
+        "",
+        f"- 요구사항: {job['requirement']}",
+        f"- 위험 등급: **{job['risk']}** (선언 {job.get('risk_declared')})",
+        *[f"  - {reason}" for reason in job["risk_reasons"]],
+        f"- 활성 시간: {_fmt_minutes(active_seconds(job, now()))}, 재시도 {job['attempts']}회",
+        "",
+        "## 리뷰 결과",
+        *[f"- {r['reviewer']}: {r['verdict']} ({r['path']})" for r in reviews],
+        "",
+        "## 바뀐 파일",
+        *[f"- {path} (+{len(a)} -{len(d)})" for path, (a, d) in sorted(files.items())],
+        "",
+        "## 사람의 다음 명령",
+        f"- 승인하고 머지: `python scripts/factory.py approve {job['id']}`",
+        f'- 반려: `python scripts/factory.py approve {job["id"]} --reject "<이유>"`',
+        f"- 중단: `python scripts/factory.py drop {job['id']}`",
+    ]
+    rel = f"{REVIEWS_DIR}/{job['id']}-approval.md"
+    (root / rel).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return rel
+
+
 def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
     job = _job(state, job_id)
     _require(job, "VERIFYING")
@@ -939,79 +1091,80 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
             1,
             f"{job_id}: verify 이후 작업 트리가 바뀌었습니다 → BUILDING. 다음: verify {job_id}",
         )
-    prompt = build_validator_prompt(root, job)
-    cmd = _command(
-        "validator",
-        [
-            "claude",
-            "-p",
-            "--model",
-            "claude-sonnet-5-5",
-            "--output-format",
-            "json",
-            "--allowedTools",
-            "Read",
-            "Glob",
-            "Grep",
-        ],
-    )
-    proc = _run(cmd, root, stdin=prompt)
-    text = proc.stdout
-    try:
-        envelope = json.loads(proc.stdout)
-        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
-            text = envelope["result"]
-    except json.JSONDecodeError:
-        pass
-    review_no = len(job["reviews"]) + 1
-    review_path = f"{REVIEWS_DIR}/{job_id}-{review_no}.txt"
     (root / REVIEWS_DIR).mkdir(parents=True, exist_ok=True)
-    (root / review_path).write_text(text + "\n\n[stderr]\n" + proc.stderr, encoding="utf-8")
-    verdict = _parse_verdict(text)
-    if verdict is None:
-        job["reviews"].append({"path": review_path, "verdict": None, "at": now()})
-        raise FactoryError(
-            f"Validator 출력에서 판정 JSON을 찾지 못했습니다 (상태 유지). 원문: {review_path}"
+    round_no = 1 + max((int(r.get("round", 0)) for r in job["reviews"]), default=0)
+    paths = {name: root / REVIEWS_DIR / f"{job_id}-{round_no}-{name}.txt" for name in REVIEWERS}
+    with ThreadPoolExecutor(max_workers=len(REVIEWERS)) as pool:
+        outputs = dict(
+            zip(
+                REVIEWERS,
+                pool.map(lambda name: _run_reviewer(root, job, name, paths[name]), REVIEWERS),
+                strict=True,
+            )
         )
-    job["reviews"].append(
-        {
-            "path": review_path,
-            "verdict": verdict["verdict"],
-            "issues": verdict.get("issues", []),
-            "at": now(),
-        }
-    )
+    verdicts: dict[str, dict[str, Any] | None] = {}
+    for name in REVIEWERS:
+        text, stderr = outputs[name]
+        paths[name].write_text(text + "\n\n[stderr]\n" + stderr, encoding="utf-8")
+        verdict = _parse_verdict(text)
+        verdicts[name] = verdict
+        job["reviews"].append(
+            {
+                "round": round_no,
+                "reviewer": name,
+                "path": paths[name].relative_to(root).as_posix(),
+                "verdict": verdict["verdict"] if verdict else None,
+                "issues": verdict.get("issues", []) if verdict else [],
+                "at": now(),
+            }
+        )
+    unreadable = [name for name, v in verdicts.items() if v is None]
+    if unreadable:
+        raise FactoryError(
+            f"리뷰어 {', '.join(unreadable)}의 출력에서 판정 JSON을 찾지 못했습니다 (상태 유지). "
+            f"원문: {REVIEWS_DIR}/{job_id}-{round_no}-*.txt"
+        )
+    issues = [
+        f"[{name}] {issue}"
+        for name, verdict in verdicts.items()
+        if verdict and verdict["verdict"] == "FAIL"
+        for issue in (verdict.get("issues") or ["사유 없음"])
+    ]
+    passed = not issues
     job["validation"].append(
         {
             "kind": "validator",
             "attempt": job["attempts"] + 1,
-            "verdict": verdict["verdict"],
-            "issues": verdict.get("issues", []),
+            "verdict": "PASS" if passed else "FAIL",
+            "reviewers": {name: v["verdict"] for name, v in verdicts.items() if v},
+            "issues": issues,
             "at": now(),
         }
     )
-    if verdict["verdict"] == "PASS":
+    if passed:
+        # Approver: 승인 결정은 규칙으로 한다. 모델은 안전 판정을 뒤집을 수 없다 (기획안 8.2)
         _stop_clock(job, now())
         if job["risk"] in AUTO_MERGE_RISKS:
             job["approval"] = {
                 "by": "auto",
                 "decision": "approved",
-                "reason": f"위험 {job['risk']} 자동 승인 (기획안 8.1)",
+                "reason": f"위험 {job['risk']} 자동 승인, 리뷰어 전원 PASS (기획안 8.1)",
                 "at": now(),
             }
             _set_status(job, "APPROVED")
             return 0, (
-                f"{job_id}: Validator PASS → APPROVED (위험 {job['risk']}, 자동 승인). "
-                f"다음: merge {job_id}"
+                f"{job_id}: 리뷰어 {len(REVIEWERS)}명 PASS → APPROVED (위험 {job['risk']}, "
+                f"자동 승인). 다음: merge {job_id}"
             )
+        job["approval_brief"] = write_approval_brief(root, job)
         _set_status(job, "APPROVAL_REQUIRED")
         return 0, (
-            f"{job_id}: Validator PASS → APPROVAL_REQUIRED (위험 {job['risk']}). "
-            "사람의 승인을 기다립니다."
+            f"{job_id}: 리뷰어 {len(REVIEWERS)}명 PASS → APPROVAL_REQUIRED (위험 {job['risk']}). "
+            f"사람의 승인을 기다립니다. 승인 요약: {job['approval_brief']}"
         )
-    issues = "; ".join(map(str, verdict.get("issues", []))) or "사유 없음"
-    status = _record_failure(job, f"validator: {issues}", f"Validator FAIL: {issues}")
-    return 1, f"{job_id}: Validator FAIL → {status}. {issues}"
+    summary = "; ".join(issues)
+    status = _record_failure(job, f"validator: {summary}", f"리뷰 FAIL: {summary}")
+    return 1, f"{job_id}: 리뷰 FAIL → {status}.{_builder_note(job)} {summary}"
 
 
 def cmd_block(state: State, job_id: str, reason: str, detail: str) -> str:
@@ -1363,6 +1516,13 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     recover.add_argument("job_id")
     recover.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
+    human_only = args.command in HUMAN_ONLY or (args.command == "recover" and args.force)
+    if human_only and os.environ.get("FACTORY_AGENT_SESSION") == "1":
+        print(
+            "오류: approve·resume·drop·recover --force는 사람 전용입니다. "
+            "에이전트 세션에서는 실행할 수 없습니다 (사람에게 안내만 하세요)."
+        )
+        return 2
 
     state = load_state(root)
     code = 0

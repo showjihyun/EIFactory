@@ -15,12 +15,20 @@ import json, os, sys
 control_path = os.environ["FAKE_CONTROL"]
 control = json.load(open(control_path, encoding="utf-8"))
 kind = sys.argv[1]
+sys.stdin.reconfigure(encoding="utf-8")  # factory.py는 UTF-8로 넘긴다
 stdin = sys.stdin.read() if kind == "validator" else ""
-with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps({"kind": kind, "args": sys.argv[2:], "stdin": stdin}) + "\n")
+row = {"kind": kind, "args": sys.argv[2:], "stdin": stdin}
+row["reviewer"] = os.environ.get("FACTORY_REVIEWER")
+# 호출마다 파일 하나 (리뷰어는 병렬로 돌아 한 파일에 쓰면 줄이 섞인다)
+import time
+name = f"{time.time_ns():020d}-{os.getpid()}.json"
+with open(os.path.join(os.environ["FAKE_LOG"], name), "w", encoding="utf-8") as log:
+    json.dump(row, log)
 
 def take(key):
     value = control[key]
+    if key == "validator" and isinstance(value, dict):  # 리뷰어별 응답 (병렬로 돈다)
+        value = value[os.environ["FACTORY_REVIEWER"]]
     if isinstance(value, list):
         item = value.pop(0)
         json.dump(control, open(control_path, "w", encoding="utf-8"))
@@ -103,9 +111,7 @@ class Harness:
         return loaded
 
     def calls(self, kind: str) -> list[dict[str, Any]]:
-        if not self.log.exists():
-            return []
-        rows = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(self.log.glob("*.json"))]
         return [r for r in rows if r["kind"] == kind]
 
     def write_spec(self, job_id: str = "J001", **overrides: Any) -> None:
@@ -166,7 +172,8 @@ def h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     fake = tmp_path / "fake_cmd.py"
     fake.write_text(FAKE_CMD, encoding="utf-8")
     control = tmp_path / "control.json"
-    log = tmp_path / "calls.log"
+    log = tmp_path / "calls"
+    log.mkdir()
     monkeypatch.setenv("FAKE_CONTROL", str(control))
     monkeypatch.setenv("FAKE_LOG", str(log))
     monkeypatch.setenv("FACTORY_MERGE_WAIT_S", "0")
@@ -1108,3 +1115,158 @@ def test_network_allowlist_change_blocks_the_job(h: Harness) -> None:
     assert job["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
     assert "docker/proxy/filter" in job["blocked"]["detail"]
     assert factory._matches("docker/proxy/filter", factory.HIGH_PATHS)
+
+
+# ---------- Phase 3c: 리뷰어 분리, Approver, 모델 승격, 에이전트 세션 ----------
+
+PASS = '{"verdict": "PASS", "issues": []}'
+
+
+def to_verifying(h: Harness) -> None:
+    h.to_building()
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+
+
+def test_validate_runs_code_security_and_test_reviewers(h: Harness) -> None:
+    to_verifying(h)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+    calls = h.calls("validator")
+    assert sorted(c["reviewer"] for c in calls) == ["code", "security", "test"]
+    for call in calls:
+        # 리뷰어마다 자기 관점의 지시를 받고, 자료(diff 등)는 같다
+        assert f"리뷰어: {call['reviewer']}" in call["stdin"]
+        assert "return [1]" in call["stdin"]
+    job = h.job()
+    assert job["status"] == "APPROVED"
+    assert sorted(r["reviewer"] for r in job["reviews"]) == ["code", "security", "test"]
+    assert all((h.repo / r["path"]).exists() for r in job["reviews"])
+
+
+def test_any_reviewer_fail_sends_job_back(h: Harness) -> None:
+    to_verifying(h)
+    fail = '{"verdict": "FAIL", "issues": ["입력 검증 누락"]}'
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": fail, "test": PASS},
+    )
+    assert h.run("validate", "J001") != 0
+    job = h.job()
+    assert job["status"] == "RETRY_REQUIRED"
+    assert job["validation"][-1]["issues"] == ["[security] 입력 검증 누락"]
+
+
+def test_one_unreadable_reviewer_keeps_state(h: Harness) -> None:
+    to_verifying(h)
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": PASS, "test": "모르겠음"},
+    )
+    assert h.run("validate", "J001") != 0
+    assert h.job()["status"] == "VERIFYING"
+    assert h.job()["attempts"] == 0
+
+
+def test_approver_writes_brief_for_human_approval(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    brief = (h.repo / job["approval_brief"]).read_text(encoding="utf-8")
+    assert "HIGH" in brief
+    assert "auth.py" in brief
+    for reviewer in ("code", "security", "test"):
+        assert f"{reviewer}: PASS" in brief
+    assert "approve J001" in brief
+
+
+def test_builder_model_is_promoted_after_two_failures(
+    h: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    h.to_building()
+    assert h.job()["builder_model"] == "sonnet"
+    h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("a"), verify_fail("b")])
+    h.run("verify", "J001")
+    assert h.job()["builder_model"] == "sonnet"
+    capsys.readouterr()
+    h.run("verify", "J001")
+    job = h.job()
+    assert job["status"] == "RETRY_REQUIRED"
+    assert job["builder_model"] == "opus"
+    assert "Builder 모델: opus" in capsys.readouterr().out
+    assert {"attempt": 2, "model": "opus"} in [
+        {k: m[k] for k in ("attempt", "model")} for m in job["model_changes"]
+    ]
+
+
+def test_builder_model_names_follow_agent_tool(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FACTORY_AGENT", "codex")
+    h.to_building()
+    assert h.job()["builder_model"] == factory.MODELS["codex"]["builder"]
+    assert h.job()["agent"] == "codex"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["approve", "J001"],
+        ["approve", "J001", "--reject", "x"],
+        ["resume", "J001"],
+        ["drop", "J001"],
+        ["recover", "J001", "--force"],
+    ],
+)
+def test_human_only_commands_refuse_agent_sessions(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    # 도구의 hook과 별개로 factory.py 자체가 막는다 (도구 공통 강제 장치)
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    before = h.job()["status"]
+    monkeypatch.setenv("FACTORY_AGENT_SESSION", "1")
+    capsys.readouterr()
+    assert h.run(*argv) == 2
+    assert "사람 전용" in capsys.readouterr().out
+    assert h.job()["status"] == before
+
+
+@pytest.mark.parametrize(
+    ("agent", "expected"),
+    [
+        ("claude", ["claude", "-p", "--model", "claude-sonnet-5-5"]),
+        ("codex", ["codex", "exec", "--model", "gpt-6.1-sol", "--sandbox", "read-only"]),
+    ],
+)
+def test_reviewer_command_per_agent_tool(agent: str, expected: list[str]) -> None:
+    cmd = factory.reviewer_command(agent, Path("out.txt"))
+    assert cmd[: len(expected)] == expected
+    if agent == "codex":
+        assert cmd[cmd.index("--output-last-message") + 1] == "out.txt"
+        assert cmd[-1] == "-"
+
+
+def test_red_output_names_builder_model(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    h.to_building()
+    assert "Builder 모델 sonnet" in capsys.readouterr().out
+
+
+def test_status_shows_builder_model(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    h.to_building()
+    capsys.readouterr()
+    h.run("status")
+    assert "sonnet" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("path", [".codex/hooks.json", ".agents/skills/factory/SKILL.md"])
+def test_codex_config_is_protected(h: Harness, path: str) -> None:
+    # Codex 전용 구성(hook, 스킬)도 Claude Code의 .claude/처럼 잠금·HIGH 대상이다
+    h.to_building()
+    target = h.repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}\n", encoding="utf-8")
+    h.run("verify", "J001")
+    assert h.job()["blocked"]["reason"] == "PROTECTED_FILE_CHANGED"
+    assert factory._matches(path, factory.HIGH_PATHS)

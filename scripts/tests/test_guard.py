@@ -37,6 +37,7 @@ def call(
     tool_input: dict[str, Any],
     job: dict[str, Any] | None = None,
     session: str = "s1",
+    args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     state_dir = root / "factory"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -47,7 +48,7 @@ def call(
     }
     (state_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
     return subprocess.run(
-        [sys.executable, str(GUARD)],
+        [sys.executable, str(GUARD), *args],
         input=json.dumps(
             {
                 "tool_name": tool,
@@ -347,3 +348,110 @@ def test_dispatch_is_human_only(tmp_path: Path) -> None:
         proc = call(tmp_path, "Bash", bash("python scripts/dispatch.py 요구사항"), job)
         assert not allowed(proc)
         assert "사람" in proc.stderr
+
+
+# ---------- Phase 3c: Codex 도구 호출, Builder 모델 ----------
+# Codex(0.163)의 hook 입력은 가짜 모델 서버로 실제 실행해 확인한 형태다:
+# 셸은 tool_name "Bash" + {"command": "<문자열>"}, 파일 수정은 "apply_patch" + {"command": 패치},
+# 하위 에이전트는 "collaborationspawn_agent". Codex는 종료 코드 2를 hook 실패로 보고 호출을
+# 그대로 실행하므로, `--json-deny`일 때는 종료 코드 0 + 판정 JSON으로 막는다.
+
+
+def patch(*paths: str) -> dict[str, Any]:
+    body = "".join(f"*** Update File: {p}\n@@\n-a\n+b\n" for p in paths)
+    return {"command": f"*** Begin Patch\n{body}*** End Patch\n"}
+
+
+def codex(root: Path, tool: str, tool_input: dict[str, Any], job: dict[str, Any]) -> bool:
+    """Codex 방식으로 hook을 불러 허용 여부를 돌려준다."""
+    proc = call(root, tool, tool_input, job, args=("--json-deny",))
+    assert proc.returncode == 0, proc.stderr
+    if not proc.stdout.strip():
+        return True
+    decision = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    return False
+
+
+def test_codex_denial_exits_zero_with_decision_json(tmp_path: Path) -> None:
+    proc = call(tmp_path, "Bash", bash("git push"), make_job("BUILDING"), args=("--json-deny",))
+    assert proc.returncode == 0
+    decision = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert decision["hookEventName"] == "PreToolUse"
+    assert decision["permissionDecision"] == "deny"
+    assert "push" in decision["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin main",
+        "python scripts/factory.py approve J001",
+        "python scripts/dispatch.py x",
+        "git commit -am x",
+    ],
+)
+def test_codex_shell_calls_are_checked(tmp_path: Path, command: str) -> None:
+    assert not codex(tmp_path, "Bash", bash(command), make_job("BUILDING"))
+
+
+def test_codex_factory_commands_are_allowed(tmp_path: Path) -> None:
+    assert codex(
+        tmp_path, "Bash", bash("python scripts/factory.py verify J001"), make_job("BUILDING")
+    )
+
+
+def test_codex_apply_patch_paths_are_checked(tmp_path: Path) -> None:
+    job = make_job("BUILDING")
+    assert not codex(tmp_path, "apply_patch", patch("Makefile"), job)
+    assert not codex(tmp_path, "apply_patch", patch("backend/src/bookmarks/x.py", "Makefile"), job)
+    assert codex(tmp_path, "apply_patch", patch("backend/src/bookmarks/x.py"), job)
+    assert not codex(
+        tmp_path, "apply_patch", patch("backend/src/bookmarks/x.py"), make_job("SPEC_READY")
+    )
+
+
+def test_patch_text_is_not_treated_as_a_shell_command(tmp_path: Path) -> None:
+    # 패치 본문에 "git push" 같은 글자가 있어도 셸 명령으로 보지 않는다
+    text = patch("backend/src/bookmarks/x.py")["command"].replace("+b", "+# git push 금지")
+    assert codex(tmp_path, "apply_patch", {"command": text}, make_job("BUILDING"))
+
+
+@pytest.mark.parametrize(
+    ("builder_model", "requested", "ok"),
+    [
+        ("sonnet", None, True),
+        ("sonnet", "sonnet", True),
+        ("opus", None, False),
+        ("opus", "sonnet", False),
+        ("opus", "opus", True),
+    ],
+)
+def test_claude_builder_must_run_on_the_model_factory_chose(
+    tmp_path: Path, builder_model: str, requested: str | None, ok: bool
+) -> None:
+    job = make_job("RETRY_REQUIRED", builder_model=builder_model, agent="claude")
+    tool_input: dict[str, Any] = {"subagent_type": "builder", "prompt": "job ID: J001"}
+    if requested:
+        tool_input["model"] = requested
+    for tool in ("Agent", "Task"):
+        assert allowed(call(tmp_path, tool, tool_input, job)) is ok
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "ok"),
+    [
+        ({"task_name": "builder", "model": "gpt-6-astra", "fork_turns": "none"}, True),
+        ({"task_name": "builder", "model": "gpt-6.1-sol", "fork_turns": "none"}, False),
+        ({"task_name": "builder", "fork_turns": "none"}, False),  # 모델 생략 = 부모 모델 상속
+        ({"task_name": "builder", "model": "gpt-6-astra"}, False),  # 대화 상속 (기본 all)
+        ({"task_name": "builder_retry", "model": "gpt-6-astra", "fork_turns": "all"}, False),
+        ({"task_name": "explorer", "fork_turns": "all"}, True),  # Builder가 아닌 하위 에이전트
+    ],
+)
+def test_codex_builder_spawn_is_checked(
+    tmp_path: Path, tool_input: dict[str, Any], ok: bool
+) -> None:
+    job = make_job("RETRY_REQUIRED", builder_model="gpt-6-astra", agent="codex")
+    tool_input = {"message": "job ID: J001", **tool_input}
+    assert codex(tmp_path, "collaborationspawn_agent", tool_input, job) is ok
