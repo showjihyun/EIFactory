@@ -563,10 +563,6 @@ def _remove_worktree(root: Path, worktree: Path, result: dict[str, Any]) -> bool
             return False
 
 
-def _windows_host() -> bool:
-    return sys.platform == "win32"
-
-
 def _agent_env(args: argparse.Namespace) -> dict[str, str]:
     """factory.py가 작업에 기록하고 리뷰어를 고를 때 쓰는 도구 설정."""
     return {"FACTORY_AGENT": args.agent, "FACTORY_REVIEW_AGENT": args.review_agent}
@@ -636,13 +632,11 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         if (
             args.agent == "codex"
             and args.isolation == "host"
-            and _windows_host()
             and not os.environ.get("FACTORY_AGENT_CMD")
         ):
-            raise DispatchError(
-                "Windows 호스트에서는 Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치를 실행하지 "
-                "못합니다 (codex 0.163 실측). --isolation docker를 쓰세요"
-            )
+            # 호스트 실행이면 머지 전 재검증이 에이전트 코드를 샌드박스 밖에서 돌린다. Windows에서는
+            # Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치도 못 한다 (codex 0.163 실측)
+            raise DispatchError("Codex는 --isolation docker로만 실행합니다")
         if args.isolation == "docker":
             image = prepare_docker(root)
     except DispatchError as error:

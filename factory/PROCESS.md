@@ -113,7 +113,7 @@ python scripts/dispatch.py --agent claude --review-agent codex "<요구사항>" 
   | 인증 | `ANTHROPIC_API_KEY` 또는 로그인 | `CODEX_API_KEY`/`OPENAI_API_KEY` 또는 `codex login` |
 
 - **Codex는 hook이 실패하면(종료 코드 0이 아닌 경우 포함) 도구 호출을 그대로 실행한다.** 그래서 Codex용 hook은 막을 때도 종료 코드 0으로 판정 JSON을 낸다. 프로젝트가 신뢰되지 않았거나 hook 신뢰 확인을 통과하지 못하면 `.codex/hooks.json` 자체를 읽지 않는다. dispatcher가 둘 다 처리하지만, Codex를 대화형으로 쓸 때는 사람이 프로젝트를 신뢰하고 hook을 승인해야 한다.
-- Windows 호스트에서는 Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치를 실행하지 못한다 (codex 0.163 실측). `--agent codex`는 `--isolation docker`로 쓴다.
+- **`--agent codex`는 `--isolation docker`로만 실행한다** (dispatcher가 호스트 실행을 거부). 호스트 실행이면 머지 전 재검증이 에이전트가 쓴 코드를 샌드박스 밖에서 돌리고, Windows에서는 Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치도 못 한다 (codex 0.163 실측).
 - 시험용 설정: `FACTORY_CODEX_ARGS`(모든 `codex exec`에 덧붙일 인자, JSON 목록), `FACTORY_DOCKER_NO_PROXY`(프록시를 거치지 않을 내부 호스트).
 
 ### 컨테이너 격리 (`--isolation docker`, Phase 3b)

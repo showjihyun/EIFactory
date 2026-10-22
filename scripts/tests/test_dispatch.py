@@ -396,12 +396,13 @@ def test_proxy_allows_codex_api_and_image_has_codex() -> None:
     assert "@openai/codex@" in dockerfile
 
 
-def test_codex_on_windows_host_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # codex 0.163은 Windows 호스트에서 샌드박스가 읽기 전용으로 떨어져 명령·패치를 거부한다 (실측)
+def test_codex_requires_docker_isolation(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 호스트 실행이면 rebase 후 재검증이 에이전트가 쓴 코드를 샌드박스 밖(호스트)에서 돌린다
+    # (보안 리뷰 지적). Windows에서는 Codex 샌드박스가 읽기 전용으로 떨어지기도 한다 (실측)
     monkeypatch.delenv("FACTORY_AGENT_CMD")
-    # sys.platform 자체를 바꾸면 리눅스(컨테이너)에서 표준 라이브러리가 깨진다
-    monkeypatch.setattr(dispatch, "_windows_host", lambda: True)
+    monkeypatch.setenv("CODEX_API_KEY", "dummy")
     assert dispatch.main(["--agent", "codex", "x"], root=repo) == 2
+    assert dispatch.main(["--agent", "codex", "--isolation", "host", "x"], root=repo) == 2
 
 
 def test_extra_no_proxy_hosts_for_internal_test_servers(
