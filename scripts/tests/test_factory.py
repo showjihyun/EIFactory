@@ -50,7 +50,9 @@ if kind == "verify":
     print(result["output"])
     sys.exit(result["exit"])
 if kind == "validator":
-    print(json.dumps({"type": "result", "result": take("validator")}))
+    usage = {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 20}
+    envelope = {"type": "result", "result": take("validator"), "total_cost_usd": 0.01}
+    print(json.dumps({**envelope, "usage": usage}))
 """
 
 RED_OK = {
@@ -1293,3 +1295,23 @@ def test_existing_user_flow_tests_and_config_are_locked(h: Harness) -> None:
         assert factory._matches(rel, factory.LOCK_PATTERNS)
     assert factory._matches("frontend/playwright.config.ts", factory.MEDIUM_PATHS)
     assert factory.CHANGED_TEST.match("frontend/e2e/bookmarks.e2e.ts")
+
+
+# ---------- Phase 4: 운영 기록 (보고서용) ----------
+
+
+def test_blocked_reasons_are_kept_after_resume(h: Harness) -> None:
+    h.to_building()
+    h.run("block", "J001", "--reason", "TEST_INVALID", "--detail", "x")
+    h.run("resume", "J001")
+    assert h.job()["blocked"] is None
+    assert [b["reason"] for b in h.job()["blocks"]] == ["TEST_INVALID"]
+
+
+def test_reviewer_cost_and_tokens_are_recorded(h: Harness) -> None:
+    to_verifying(h)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    h.run("validate", "J001")
+    reviews = h.job()["reviews"]
+    assert [r["cost_usd"] for r in reviews] == [0.01, 0.01, 0.01]
+    assert [r["tokens"] for r in reviews] == [170, 170, 170]

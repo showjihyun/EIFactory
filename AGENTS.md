@@ -15,6 +15,8 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/check_red.py` | 수락 테스트 Red/Green 판정 |
 | `scripts/check_style.py` | 테스트 파일 형식·린트 확인 (잠그기 전) |
 | `scripts/dispatch.py` | 여러 요구사항을 worktree별 headless 세션으로 동시 실행 (사람 전용) |
+| `scripts/issues.py` | GitHub Issues(본인 작성, `factory` 라벨)를 dispatch로 처리하고 결과를 이슈에 남김 (사람 전용) |
+| `scripts/report.py` | 운영 보고서: KPI와 개선 후보 |
 | `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |
@@ -56,7 +58,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
   | HIGH | 인증·인가, 데이터 삭제, 정책·절차 파일, CI 설정 |
 
 - **승인과 머지**: 승인 결정(Approver)은 모델이 아니라 규칙이 한다. LOW는 리뷰어 전원 PASS 후 자동 승인되고 `factory.py merge`가 머지한다. MEDIUM·HIGH는 `factory/reviews/<ID>-approval.md`(승인 요약)를 보고 사람이 `approve`해야 머지된다. 머지는 한 번에 하나씩, base 브랜치가 앞서 있으면 rebase 후 재검증하고 `--no-ff` 머지 커밋으로 남긴다. push는 사람만 한다.
-- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`. hook이 막고, 에이전트 세션(`FACTORY_AGENT_SESSION=1`)에서는 `factory.py`도 직접 거부한다.
+- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`, `scripts/issues.py`. hook이 막고, 에이전트 세션(`FACTORY_AGENT_SESSION=1`)에서는 `factory.py`도 직접 거부한다.
 - **모델 승격**: Builder는 경량 모델로 시작하고, 검증·리뷰 실패가 2회 쌓이면 `factory.py`가 상위 모델로 올린다. 오케스트레이터는 출력된 "Builder 모델"로 Builder를 부르고, hook이 다른 모델을 막는다.
 - **에이전트 도구**: Claude Code와 Codex가 같은 정책·절차·상태·검증·hook(`guard.py`)을 쓴다. 래퍼만 다르다 (`.claude/`, `.codex/`·`.agents/`). 둘 다 잠금·HIGH 대상이다.
 - **병렬 실행**: 작업마다 worktree 하나, 상태도 worktree마다 따로. 머지는 merge lock으로 한 번에 하나씩 기본 checkout에 한다. 전체 상태는 `factory.py status --all`.

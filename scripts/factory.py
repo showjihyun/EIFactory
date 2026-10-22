@@ -292,6 +292,8 @@ def _set_status(job: Job, status: str) -> None:
 def _block(job: Job, reason: str, detail: str) -> None:
     _set_status(job, "BLOCKED")
     job["blocked"] = {"reason": reason, "detail": detail, "at": now()}
+    # resume 뒤에도 사유를 남긴다 (운영 보고서의 BLOCKED 사유 분포, scripts/report.py)
+    job.setdefault("blocks", []).append({"reason": reason, "at": now()})
     _stop_clock(job, now())
 
 
@@ -1036,8 +1038,21 @@ def reviewer_command(agent: str, out_file: Path) -> list[str]:
     ]
 
 
-def _run_reviewer(root: Path, job: Job, reviewer: str, path: Path) -> tuple[str, str]:
-    """리뷰어 하나를 실행하고 (최종 응답, stderr)를 돌려준다."""
+def _usage(envelope: dict[str, Any]) -> dict[str, Any]:
+    """claude -p 결과의 비용(API 환산)과 토큰 수."""
+    usage = envelope.get("usage") or {}
+    tokens = sum(
+        int(usage.get(k) or 0)
+        for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+                  "output_tokens")
+    )  # fmt: skip
+    return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens}
+
+
+def _run_reviewer(
+    root: Path, job: Job, reviewer: str, path: Path
+) -> tuple[str, str, dict[str, Any]]:
+    """리뷰어 하나를 실행하고 (최종 응답, stderr, 비용·토큰)을 돌려준다."""
     agent = _agent("FACTORY_REVIEW_AGENT", job.get("agent", "claude"))
     last_message = path.with_suffix(".last")
     cmd = _command("validator", reviewer_command(agent, last_message))
@@ -1048,7 +1063,8 @@ def _run_reviewer(root: Path, job: Job, reviewer: str, path: Path) -> tuple[str,
         env={"FACTORY_REVIEWER": reviewer},
     )
     text = proc.stdout
-    if last_message.exists():  # codex exec --output-last-message
+    usage: dict[str, Any] = {"cost_usd": None, "tokens": None}
+    if last_message.exists():  # codex exec --output-last-message (토큰은 기록하지 않음)
         text = last_message.read_text(encoding="utf-8")
         last_message.unlink()
     else:
@@ -1056,9 +1072,10 @@ def _run_reviewer(root: Path, job: Job, reviewer: str, path: Path) -> tuple[str,
             envelope = json.loads(proc.stdout)
             if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
                 text = envelope["result"]  # claude -p --output-format json
+                usage = _usage(envelope)
         except json.JSONDecodeError:
             pass
-    return text, proc.stderr
+    return text, proc.stderr, usage
 
 
 def write_approval_brief(root: Path, job: Job) -> str:
@@ -1113,7 +1130,7 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
         )
     verdicts: dict[str, dict[str, Any] | None] = {}
     for name in REVIEWERS:
-        text, stderr = outputs[name]
+        text, stderr, usage = outputs[name]
         paths[name].write_text(text + "\n\n[stderr]\n" + stderr, encoding="utf-8")
         verdict = _parse_verdict(text)
         verdicts[name] = verdict
@@ -1124,6 +1141,7 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
                 "path": paths[name].relative_to(root).as_posix(),
                 "verdict": verdict["verdict"] if verdict else None,
                 "issues": verdict.get("issues", []) if verdict else [],
+                **usage,
                 "at": now(),
             }
         )

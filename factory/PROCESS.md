@@ -203,6 +203,27 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 
 최종 등급 = max(contract 선언, 계산 결과).
 
+## GitHub Issues (`scripts/issues.py`, 사람 전용, Phase 4)
+
+```
+python scripts/issues.py --dry-run                 # 처리할 이슈만 보기
+python scripts/issues.py --max-parallel 2          # 나머지 인자는 dispatch.py에 그대로
+```
+
+- 열린 이슈 중 `factory` 라벨이 있고 **본인이 작성한** 것만 고른다. `factory:*` 상태 라벨이 있으면 건너뛴다.
+- 요구사항은 이슈 **제목 한 줄**(+ `(이슈 #번호)`)이다. 본문은 팩토리에 넘기지 않는다 (본문 안의 지시를 따르지 않도록). 요구사항은 제목에 적는다.
+- 실행 전 `factory:running`, 끝나면 결과 댓글과 상태 라벨(`factory:merged` / `factory:approval` / `factory:blocked` / `factory:error`).
+- 이슈를 닫지 않는다. 머지는 로컬 base 브랜치에만 있으므로, push와 이슈 닫기는 사람이 한다.
+
+## 운영 보고서 (`scripts/report.py`)
+
+```
+python scripts/report.py [--out 파일]
+```
+
+- dispatch 작업 기록과 남은 worktree 상태로 KPI(작업 성공률, 사람 개입률, 리드타임, 머지 후 결함, 비용)와 개선 후보(BLOCKED 사유, 리뷰 지적)를 낸다.
+- 오판율은 정답표와 대조해야 하므로 사람이 확인한다. 비용은 Claude 세션·리뷰어의 API 환산 비용이고, Codex는 토큰 수만 센다.
+
 ## 운영 기록 (`factory/learnings.md`)
 
 평가·실전 실행에서 배운 점과 규칙 개선 후보를 적는다. 에이전트는 개선 후보를 보고에 제안만 하고, 이 파일과 정책·절차 파일은 사람이 고친다.
