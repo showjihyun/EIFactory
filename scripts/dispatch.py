@@ -521,6 +521,10 @@ def run_job(
     return result
 
 
+def _windows_host() -> bool:
+    return sys.platform == "win32"
+
+
 def _agent_env(args: argparse.Namespace) -> dict[str, str]:
     """factory.py가 작업에 기록하고 리뷰어를 고를 때 쓰는 도구 설정."""
     return {"FACTORY_AGENT": args.agent, "FACTORY_REVIEW_AGENT": args.review_agent}
@@ -590,7 +594,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         if (
             args.agent == "codex"
             and args.isolation == "host"
-            and sys.platform == "win32"
+            and _windows_host()
             and not os.environ.get("FACTORY_AGENT_CMD")
         ):
             raise DispatchError(

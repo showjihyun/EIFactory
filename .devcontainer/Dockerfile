@@ -24,6 +24,13 @@ RUN if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then npm install -g @anthropic-ai/cl
 ARG CODEX_VERSION=0.163.0
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
+# 사용자 흐름 테스트(Playwright)용 브라우저. 검증 컨테이너는 오프라인이라 이미지에 넣는다.
+# 버전은 frontend/package.json의 @playwright/test와 같아야 한다 (scripts 테스트가 확인)
+ARG PLAYWRIGHT_VERSION=1.64.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npx -y playwright@${PLAYWRIGHT_VERSION} install --with-deps --only-shell chromium \
+    && chmod -R a+rX /opt/ms-playwright
+
 # node_modules는 이름 있는 볼륨으로 마운트한다. 이미지에 경로를 미리 만들어 두면
 # 처음 마운트할 때 소유자(node)가 볼륨으로 복사된다.
 RUN mkdir -p /workspaces/bookmark-factory/frontend/node_modules /home/node/.venvs \

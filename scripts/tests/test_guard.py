@@ -462,3 +462,11 @@ def test_patch_marker_in_shell_command_does_not_skip_checks(tmp_path: Path) -> N
     for tool in ("Bash", "exec_command", "unknown_tool"):
         sneaky = {"command": "git push origin main # *** Begin Patch"}
         assert not codex(tmp_path, tool, sneaky, make_job("BUILDING"))
+
+
+def test_spec_stage_allows_playwright_acceptance_test(tmp_path: Path) -> None:
+    path = "frontend/e2e/login.J001.accept.e2e.ts"
+    assert allowed(call(tmp_path, "Write", edit(path), make_job("SPEC_READY")))
+    assert not allowed(
+        call(tmp_path, "Write", edit("frontend/playwright.config.ts"), make_job("BUILDING"))
+    )

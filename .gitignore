@@ -14,3 +14,7 @@ factory/state.tmp
 factory-state.md
 factory/heartbeat.json
 factory/reviews/
+
+# Playwright 결과물
+frontend/test-results/
+frontend/playwright-report/

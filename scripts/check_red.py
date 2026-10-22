@@ -3,8 +3,9 @@
 사용법:
     python scripts/check_red.py [--expect red|green] [--json] TEST [TEST ...]
 
-TEST는 레포 루트 기준 경로다. `backend/`로 시작하면 pytest, `frontend/`로 시작하면
-Vitest로 실행한다. pytest는 노드 ID(`backend/tests/test_x.py::test_y`)도 받는다.
+TEST는 레포 루트 기준 경로다. `backend/`로 시작하면 pytest, `frontend/e2e/`로 시작하면
+Playwright(사용자 흐름), 그 밖의 `frontend/`는 Vitest로 실행한다. pytest는 노드
+ID(`backend/tests/test_x.py::test_y`)도 받는다.
 
 Red로 인정하는 실패는 assertion 실패(화면 요소 없음 포함)뿐이다. import 오류, 문법 오류,
 수집 실패, 그 밖의 예외, skip은 Red로 인정하지 않는다.
@@ -21,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -45,7 +48,10 @@ ASSERTION_PREFIXES = (
     "AssertionError",
     "TestingLibraryElementError",
     "Error: expect(",
+    # Playwright: 화면 요소가 없어 동작(click 등)이 시간 초과 (Testing Library의 요소 없음과 같게)
+    "TimeoutError: locator.",
 )
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class Outcome(Enum):
@@ -121,6 +127,37 @@ def parse_vitest(report: dict[str, Any]) -> list[TestResult]:
     return found
 
 
+def parse_playwright(report: dict[str, Any]) -> list[TestResult]:
+    """Playwright JSON 리포트. 테스트는 파일 > describe > 테스트 순으로 중첩된다."""
+    found: list[TestResult] = []
+
+    def walk(suite: dict[str, Any], path: list[str]) -> None:
+        here = [*path, suite.get("title", "")]
+        for spec in suite.get("specs", []):
+            test_id = " > ".join([*here, spec.get("title", "")])
+            for test in spec.get("tests", []):
+                results = test.get("results") or [{"status": "skipped"}]
+                last = results[-1]
+                status = last.get("status")
+                message = ANSI.sub("", (last.get("error") or {}).get("message", ""))
+                if status == "passed":
+                    found.append(TestResult(test_id, Outcome.PASSED, ""))
+                elif status == "failed" and classify_message(message):
+                    found.append(TestResult(test_id, Outcome.ASSERTION_FAILED, message))
+                else:
+                    detail = message.splitlines()[0] if message else f"status: {status}"
+                    found.append(TestResult(test_id, Outcome.ERROR, detail))
+        for child in suite.get("suites", []):
+            walk(child, here)
+
+    for suite in report.get("suites", []):
+        walk(suite, [])
+    for error in report.get("errors", []):
+        message = ANSI.sub("", error.get("message", ""))
+        found.append(TestResult("playwright", Outcome.ERROR, message.splitlines()[0][:300]))
+    return found
+
+
 def decide(results: list[TestResult], expect: str) -> tuple[int, str]:
     if not results:
         return EXIT_NO_TESTS, "NO_TESTS"
@@ -184,6 +221,29 @@ def run_vitest(targets: list[str], cwd: Path) -> list[TestResult]:
         return parse_vitest(data)
 
 
+def run_playwright(targets: list[str], cwd: Path) -> list[TestResult]:
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "playwright.json"
+        env = {**os.environ, "PLAYWRIGHT_JSON_OUTPUT_FILE": str(report)}
+        cmd = ["npx", "playwright", "test", *targets, "--reporter=json"]
+        subprocess.run(
+            resolve_command(cmd),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            env=env,
+        )
+        if not report.exists():
+            return [
+                TestResult(" ".join(targets), Outcome.ERROR, "playwright가 리포트를 만들지 못함")
+            ]
+        data: dict[str, Any] = json.loads(report.read_text(encoding="utf-8"))
+        return parse_playwright(data)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tests", nargs="+")
@@ -200,10 +260,13 @@ def main(argv: list[str] | None = None) -> int:
 
     backend: list[str] = []
     frontend: list[str] = []
+    e2e: list[str] = []
     for target in args.tests:
         normalized = target.replace("\\", "/")
         if normalized.startswith("backend/"):
             backend.append(normalized.removeprefix("backend/"))
+        elif normalized.startswith("frontend/e2e/"):
+            e2e.append(normalized.removeprefix("frontend/"))
         elif normalized.startswith("frontend/"):
             frontend.append(normalized.removeprefix("frontend/"))
         else:
@@ -216,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
         results += run_pytest(backend, cwd=args.root / "backend", base=base)
     if frontend:
         results += run_vitest(frontend, cwd=args.root / "frontend")
+    if e2e:
+        results += run_playwright(e2e, cwd=args.root / "frontend")
 
     code, verdict = decide(results, args.expect)
     for r in results:

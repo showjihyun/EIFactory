@@ -48,7 +48,12 @@ JSON_DENY = "--json-deny" in sys.argv[1:]
 BUILDER_AGENT = ".claude/agents/builder.md"
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.M)
 STATE_FILES = {STATE_PATH, SUMMARY_PATH, HEARTBEAT_PATH}
-TEST_PATTERNS = ["backend/tests/*", "frontend/src/*.test.ts", "frontend/src/*.test.tsx"]
+TEST_PATTERNS = [
+    "backend/tests/*",
+    "frontend/src/*.test.ts",
+    "frontend/src/*.test.tsx",
+    "frontend/e2e/*.e2e.ts",
+]
 POLICY_AND_CONFIG = [p for p in LOCK_PATTERNS if not _matches(p, TEST_PATTERNS)]
 SPEC_STAGE = {"QUEUED", "SPEC_READY"}
 BUILD_STAGE = {"BUILDING", "RETRY_REQUIRED"}
@@ -176,6 +181,7 @@ def is_acceptance_test(path: str, job_id: str) -> bool:
     return bool(
         re.match(rf"^backend/tests/acceptance/test_{job_id}\.py$", path)
         or re.match(rf"^frontend/src/(.+/)?\w+\.{job_id}\.accept\.test\.tsx$", path)
+        or re.match(rf"^frontend/e2e/(.+/)?\w+\.{job_id}\.accept\.e2e\.ts$", path)
     )
 
 

@@ -10,7 +10,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | 경로 | 내용 |
 |---|---|
 | `backend/` | FastAPI 앱 (`src/bookmarks/`), pytest 테스트 (`tests/`). uv로 관리 |
-| `frontend/` | React + Vite 앱 (`src/`), Vitest 테스트 (`*.test.tsx`). npm으로 관리 |
+| `frontend/` | React + Vite 앱 (`src/`), Vitest 테스트 (`*.test.tsx`), Playwright 사용자 흐름 테스트 (`e2e/*.e2e.ts`). npm으로 관리 |
 | `scripts/verify.py` | 전체 검증 (린트·포맷·타입체크·테스트) |
 | `scripts/check_red.py` | 수락 테스트 Red/Green 판정 |
 | `scripts/check_style.py` | 테스트 파일 형식·린트 확인 (잠그기 전) |
@@ -18,7 +18,9 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/factory.py` | 팩토리 상태 관리 CLI (단계 전이를 코드로 강제) |
 | `scripts/hooks/guard.py` | 도구 호출 보호 hook (단계별 수정 제한, 시간 상한) |
 | `factory/PROCESS.md` | 팩토리 절차 (도구 공통) |
-| `factory/prompts/validator.md` | Validator 지시문 |
+| `factory/prompts/` | 도구 공통 지시문: 리뷰어 공통(`validator.md`)과 관점별(`review-code/security/test.md`), Builder(`builder.md`) |
+| `.claude/` | Claude Code 래퍼 (스킬, builder 서브에이전트, hook·권한 설정) |
+| `.codex/hooks.json`, `.agents/skills/factory/` | Codex 래퍼 (같은 `guard.py`를 `--json-deny`로 쓰는 hook, factory 스킬) |
 | `factory/state.json`, `factory-state.md`, `factory/heartbeat.json` | 작업 상태와 세션 표시 (`factory.py`·hook만 씀, Git 추적 제외) |
 | `factory/evals/tasks.md` | 평가 과제 (요구사항만, 기대 결과는 레포 밖) |
 | `.devcontainer/` | 격리 실행 환경 (devcontainer, `dispatch --isolation docker`의 에이전트 이미지) |
@@ -35,14 +37,15 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | Green 확인 | `make test-green TESTS="..."` | `python scripts/check_red.py --expect green ...` |
 | 개발 서버 | `make dev-backend`, `make dev-frontend` | 위 Makefile의 명령 참조 |
 
-- `TESTS`는 레포 루트 기준 경로다. 예: `backend/tests/test_bookmarks.py::test_search_matches_title`, `frontend/src/components/BookmarkList.test.tsx`
+- `TESTS`는 레포 루트 기준 경로다. 예: `backend/tests/test_bookmarks.py::test_search_matches_title`, `frontend/src/components/BookmarkList.test.tsx`, `frontend/e2e/bookmarks.e2e.ts`
+- `verify.py`의 `frontend e2e` 단계는 백엔드와 화면을 실제로 띄워 Playwright(chromium)로 사용자 흐름을 확인한다. 호스트에서 처음 쓸 때 `cd frontend && npx playwright install --only-shell chromium`이 필요하다 (컨테이너 이미지에는 들어 있다).
 - `check_red.py`는 assertion 실패(화면 요소 없음 포함)만 Red로 인정한다. import 오류, 문법 오류, 수집 실패, skip은 Red가 아니다.
 - 판정 결과는 `verdict:` 줄(`RED_OK`, `PASSING_BEFORE_IMPL`, `INVALID_RED`, `NO_TESTS`, `GREEN_OK`, `NOT_GREEN`)로 읽는다. 기계 판독용은 `--json`(마지막 줄 JSON)을 쓴다.
 - 종료 코드(0 기대 상태 / 1 통과·실패 불일치 / 2 오류 / 3 테스트 없음 / 4 사용법 오류)는 **스크립트를 직접 실행할 때만** 구분된다. `make test-red`를 거치면 실패는 모두 make의 종료 코드 2가 된다.
 
 ## 팩토리 정책
 
-- **완료의 정의**: 수락 테스트가 구현 전 Red(assertion 실패)였고, 구현 후 Green이며, `verify.py`가 통과하고, Validator가 PASS한 상태. `factory.py`가 이 순서를 직접 확인한다. 머지는 그 뒤에 승인이 있을 때만 한다.
+- **완료의 정의**: 수락 테스트가 구현 전 Red(assertion 실패)였고, 구현 후 Green이며, `verify.py`가 통과하고, 리뷰어 3명(code / security / test)이 모두 PASS한 상태. `factory.py`가 이 순서를 직접 확인한다. 머지는 그 뒤에 승인이 있을 때만 한다.
 - **상태는 `python scripts/factory.py`만 바꾼다.** 절차와 명령은 `factory/PROCESS.md`를 따른다.
 - **위험 등급**: contract 선언과 `factory.py verify`가 diff로 계산한 등급 중 높은 쪽.
 
@@ -52,8 +55,10 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
   | MEDIUM | refactor, 공개 API·DB 스키마·의존성·검증 설정 변경, 테스트 skip 추가, 400줄 또는 15파일 이상 |
   | HIGH | 인증·인가, 데이터 삭제, 정책·절차 파일, CI 설정 |
 
-- **승인과 머지**: LOW는 Validator PASS 후 자동 승인되고 `factory.py merge`가 머지한다. MEDIUM·HIGH는 사람이 `approve`해야 머지된다. 머지는 한 번에 하나씩, base 브랜치가 앞서 있으면 rebase 후 재검증하고 `--no-ff` 머지 커밋으로 남긴다. push는 사람만 한다.
-- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`.
+- **승인과 머지**: 승인 결정(Approver)은 모델이 아니라 규칙이 한다. LOW는 리뷰어 전원 PASS 후 자동 승인되고 `factory.py merge`가 머지한다. MEDIUM·HIGH는 `factory/reviews/<ID>-approval.md`(승인 요약)를 보고 사람이 `approve`해야 머지된다. 머지는 한 번에 하나씩, base 브랜치가 앞서 있으면 rebase 후 재검증하고 `--no-ff` 머지 커밋으로 남긴다. push는 사람만 한다.
+- **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`. hook이 막고, 에이전트 세션(`FACTORY_AGENT_SESSION=1`)에서는 `factory.py`도 직접 거부한다.
+- **모델 승격**: Builder는 경량 모델로 시작하고, 검증·리뷰 실패가 2회 쌓이면 `factory.py`가 상위 모델로 올린다. 오케스트레이터는 출력된 "Builder 모델"로 Builder를 부르고, hook이 다른 모델을 막는다.
+- **에이전트 도구**: Claude Code와 Codex가 같은 정책·절차·상태·검증·hook(`guard.py`)을 쓴다. 래퍼만 다르다 (`.claude/`, `.codex/`·`.agents/`). 둘 다 잠금·HIGH 대상이다.
 - **병렬 실행**: 작업마다 worktree 하나, 상태도 worktree마다 따로. 머지는 merge lock으로 한 번에 하나씩 기본 checkout에 한다. 전체 상태는 `factory.py status --all`.
 - **세션 복구**: 다른 세션이 작업 중이면 hook이 막는다. 이전 세션이 끊긴 지 5분이 지나면 `factory.py recover`로 이어받는다.
 - **시간 상한**: 소형 15분, 중형 30분 (활성 시간). 80%를 넘으면 재시도 대신 중단, 100%를 넘으면 hook이 수정을 막는다.
@@ -67,6 +72,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 |---|---|
 | 백엔드 | `backend/tests/acceptance/test_<job_id>.py` (예: `test_E03.py`) |
 | 프론트엔드 | 대상 컴포넌트 옆 `<Name>.<job_id>.accept.test.tsx` (예: `BookmarkList.E01.accept.test.tsx`) |
+| 사용자 흐름 | `frontend/e2e/<name>.<job_id>.accept.e2e.ts` (Playwright. 여러 화면을 거치는 동작일 때) |
 
 - Red/Green 판정은 이 파일들만 대상으로 한다.
 - 기존 테스트를 바꿔야 하면 Spec 단계에서 바꾸고, 그 목록을 spec에 적는다.
@@ -90,4 +96,4 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 7. 시크릿(`.env`, 키 파일)은 읽거나 출력하지 않는다. 로그인 정보는 더미 값(`demo`/`demo`)만 쓴다.
 8. push·머지·삭제 등 되돌리기 어려운 작업은 사람 승인 후에만 한다. 작업 브랜치 커밋은 허용한다.
 9. 작업 상태 기록은 오케스트레이터만 갱신한다. 하위 에이전트는 결과를 반환한다.
-10. 규칙을 바꾸고 싶으면 개선 후보로 제안만 한다. 정책·절차 파일(`AGENTS.md`, `CLAUDE.md`, `factory/PROCESS.md`, `.claude/`)은 사람이 요청한 경우에만 수정한다.
+10. 규칙을 바꾸고 싶으면 개선 후보로 제안만 한다 (`factory/learnings.md`에 후보로 적는 것은 사람이 한다). 정책·절차 파일(`AGENTS.md`, `CLAUDE.md`, `factory/PROCESS.md`, `.claude/`, `.codex/`, `.agents/`)은 사람이 요청한 경우에만 수정한다.

@@ -51,6 +51,8 @@ STEPS: list[Step] = [
     Step("frontend", "lint", ["npm", "run", "-s", "lint"], "frontend"),
     Step("frontend", "typecheck", ["npm", "run", "-s", "typecheck"], "frontend"),
     Step("frontend", "test", ["npm", "run", "-s", "test"], "frontend"),
+    # 사용자 흐름 (Playwright): 백엔드·화면을 실제로 띄워 브라우저로 확인한다
+    Step("frontend", "e2e", ["npm", "run", "-s", "e2e"], "frontend"),
     Step(
         "scripts",
         "lint",

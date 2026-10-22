@@ -79,6 +79,8 @@ LOCK_PATTERNS = [
     "frontend/eslint.config.js",
     "frontend/src/*.test.ts",
     "frontend/src/*.test.tsx",
+    "frontend/e2e/*.e2e.ts",
+    "frontend/playwright.config.ts",
     "AGENTS.md",
     "CLAUDE.md",
     "factory/PROCESS.md",
@@ -133,6 +135,7 @@ MEDIUM_PATHS = [
     "frontend/tsconfig.json",
     "frontend/vite.config.ts",
     "frontend/eslint.config.js",
+    "frontend/playwright.config.ts",
 ]
 HIGH_CONTENT = [(re.compile(r"DELETE\s+FROM", re.I), "데이터 삭제 SQL 추가")]
 MEDIUM_CONTENT = [
@@ -149,7 +152,8 @@ MEDIUM_CONTENT = [
 MAX_LINES = 400
 MAX_FILES = 15
 CHANGED_TEST = re.compile(
-    r"^(backend/tests/(\w+/)*test_\w+\.py|frontend/src/(\w+/)*\w+(\.\w+)*\.test\.tsx?)$"
+    r"^(backend/tests/(\w+/)*test_\w+\.py|frontend/src/(\w+/)*\w+(\.\w+)*\.test\.tsx?"
+    r"|frontend/e2e/(\w+/)*\w+(\.\w+)*\.e2e\.ts)$"
 )
 
 
@@ -662,7 +666,10 @@ def parse_contract(text: str, job_id: str) -> dict[str, Any]:
     if not tests:
         errors.append("acceptance_tests가 비어 있음")
     backend = re.compile(rf"^backend/tests/acceptance/test_{job_id}\.py(::\w+)?$")
-    frontend = re.compile(rf"^frontend/src/(\w+/)*\w+\.{job_id}\.accept\.test\.tsx$")
+    frontend = re.compile(
+        rf"^frontend/(src/(\w+/)*\w+\.{job_id}\.accept\.test\.tsx"
+        rf"|e2e/(\w+/)*\w+\.{job_id}\.accept\.e2e\.ts)$"
+    )
     for test in tests:
         if not (backend.match(str(test)) or frontend.match(str(test))):
             errors.append(

@@ -14,11 +14,14 @@ Claude Code·Codex 등 도구 전용 파일은 이 문서를 따르는 얇은 �
 | 역할 | 하는 일 | 하지 않는 일 |
 |---|---|---|
 | 오케스트레이터 | 작업 생성, spec·contract·수락 테스트 작성, Builder 호출, `factory.py` 단계 명령 실행 (`merge`, `recover` 포함) | 구현 코드 작성 |
-| Builder | 잠긴 수락 테스트를 통과시키는 구현 | 테스트·contract·검증 설정·정책 파일 수정, 상태 명령 실행 |
-| Validator | `factory.py validate`가 별도 프로세스로 실행. diff + contract + 검증 로그만 보고 판정 | 코드 수정 |
+| Builder | 잠긴 수락 테스트를 통과시키는 구현 (`factory/prompts/builder.md`) | 테스트·contract·검증 설정·정책 파일 수정, 상태 명령 실행 |
+| 리뷰어 3명 | `factory.py validate`가 별도 프로세스로 동시에 실행. diff + contract + 검증 로그만 보고 각자 관점으로 판정 (code: 요구사항·범위·버그, security: 보안·위험 등급, test: 테스트 신뢰성) | 코드 수정, 승인 결정 |
+| Approver | 모델이 아니라 `factory.py`의 규칙. 리뷰어 전원 PASS + 위험 LOW면 자동 승인, 그 밖에는 승인 요약(`factory/reviews/<ID>-approval.md`)을 쓰고 사람을 기다린다 | - |
 | 사람 | MEDIUM·HIGH 승인·반려, BLOCKED 처리(`resume`, `drop`), 강제 이어받기(`recover --force`) | - |
 
 Builder는 오케스트레이터의 대화를 넘겨받지 않는다. 호출할 때 job ID, spec 경로, 수락 테스트 경로만 전달한다.
+
+**Builder 모델 (승격)**: Builder는 경량 모델로 시작한다. 검증·리뷰 실패가 2회 쌓이면 `factory.py`가 상위 모델로 올린다 (Claude Code: sonnet → opus, Codex: gpt-6.1-sol → gpt-6-astra). `red`·`verify`·`validate`·`status`가 "Builder 모델"을 출력하고, 오케스트레이터는 그 모델로 Builder를 부른다. 다른 모델로 부르면 hook이 막는다.
 
 ## 상태 머신
 
@@ -35,7 +38,7 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `spec <ID>` | QUEUED, SPEC_READY | `factory/specs/<ID>.md`의 contract 형식 검사 | SPEC_READY | 오류 출력, 상태 유지 |
 | `red <ID>` | SPEC_READY | 수락 테스트·바꾼 기존 테스트의 형식·린트 확인 → 수락 테스트 Red 확인 (refactor는 Green). 통과하면 파일 잠금 | BUILDING | 형식·린트 문제: SPEC_READY 유지 (재작성 횟수 안 씀). Red 실패 1회: SPEC_READY로 되돌림, 2회: BLOCKED(`SPEC_INVALID`) |
 | `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 → 검증한 변경의 지문 기록 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
-| `validate <ID>` | VERIFYING | 변경 지문 대조 → Validator 프로세스 실행 | LOW: APPROVED (자동 승인), 그 밖: APPROVAL_REQUIRED | RETRY_REQUIRED 또는 BLOCKED. verify 이후 변경이 있으면 BUILDING |
+| `validate <ID>` | VERIFYING | 변경 지문 대조 → 리뷰어 3명 동시 실행 (하나라도 FAIL이면 FAIL, 판정을 못 읽으면 상태 유지) | LOW: APPROVED (자동 승인), 그 밖: APPROVAL_REQUIRED + 승인 요약 | RETRY_REQUIRED 또는 BLOCKED. verify 이후 변경이 있으면 BUILDING |
 | `merge <ID>` | APPROVED | 아래 "머지" 순서대로 base 브랜치에 머지 | MERGED | BLOCKED(`CONFLICT`, `MERGE_CHECK_FAILED`, `TREE_CHANGED`) 또는 상태 유지(lock 사용 중) |
 | `recover <ID>` | 진행 중, APPROVED | 끊긴 세션의 작업을 이어받는다 (아래 "세션 복구") | 같은 상태 (또는 MERGED) | 이전 세션이 5분 안에 활동했으면 거부 |
 | `block <ID> --reason <코드> --detail "..."` | 진행 중 | 수동 BLOCKED (수락 테스트가 틀렸다는 보고, 사람 결정이 필요한 요구사항) | BLOCKED | - |
@@ -89,6 +92,29 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 6. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
 - 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).
 - 인증: `ANTHROPIC_API_KEY` 환경변수가 있으면 API 키, 없으면 로그인 세션(구독). `--require-api-key`로 API 키를 강제할 수 있다. 키 값은 출력·기록하지 않는다.
+- 세션에는 `FACTORY_AGENT_SESSION=1`이 들어가고, 그 세션 안에서는 `factory.py`가 사람 전용 명령을 거부한다 (hook과 별개).
+
+### 에이전트 도구 (`--agent claude|codex`, Phase 3c)
+
+```
+python scripts/dispatch.py --agent codex --isolation docker "<요구사항>" ...
+python scripts/dispatch.py --agent claude --review-agent codex "<요구사항>"   # 리뷰어만 다른 도구
+```
+
+- 절차·상태·검증·hook(`scripts/hooks/guard.py`)은 같다. 래퍼만 다르다.
+
+  | | Claude Code | Codex |
+  |---|---|---|
+  | 스킬 | `.claude/skills/factory/SKILL.md` | `.agents/skills/factory/SKILL.md` |
+  | Builder | `builder` 서브에이전트 (`model`) | `spawn_agent` (`task_name: builder`, `model`, `fork_turns: none`) |
+  | hook | `.claude/settings.json` (막으면 종료 코드 2) | `.codex/hooks.json` (`--json-deny`: 종료 코드 0 + 판정 JSON) |
+  | 세션 | `claude -p` | `codex exec --json` (프로젝트 신뢰 설정 + hook 신뢰 확인 생략을 dispatcher가 넘긴다) |
+  | 리뷰어 | `claude -p` (읽기 도구만) | `codex exec --sandbox read-only` |
+  | 인증 | `ANTHROPIC_API_KEY` 또는 로그인 | `CODEX_API_KEY`/`OPENAI_API_KEY` 또는 `codex login` |
+
+- **Codex는 hook이 실패하면(종료 코드 0이 아닌 경우 포함) 도구 호출을 그대로 실행한다.** 그래서 Codex용 hook은 막을 때도 종료 코드 0으로 판정 JSON을 낸다. 프로젝트가 신뢰되지 않았거나 hook 신뢰 확인을 통과하지 못하면 `.codex/hooks.json` 자체를 읽지 않는다. dispatcher가 둘 다 처리하지만, Codex를 대화형으로 쓸 때는 사람이 프로젝트를 신뢰하고 hook을 승인해야 한다.
+- Windows 호스트에서는 Codex 샌드박스가 읽기 전용으로 떨어져 명령·패치를 실행하지 못한다 (codex 0.163 실측). `--agent codex`는 `--isolation docker`로 쓴다.
+- 시험용 설정: `FACTORY_CODEX_ARGS`(모든 `codex exec`에 덧붙일 인자, JSON 목록), `FACTORY_DOCKER_NO_PROXY`(프록시를 거치지 않을 내부 호스트).
 
 ### 컨테이너 격리 (`--isolation docker`, Phase 3b)
 
@@ -96,8 +122,8 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" ...
 ```
 
-- 세션은 컨테이너(`.devcontainer/Dockerfile` 이미지) 안에서 돈다. 인증은 **API 키만** 쓴다 (`ANTHROPIC_API_KEY`, 컨테이너에는 변수 이름만 넘긴다).
-- 네트워크: 컨테이너는 내부 전용 네트워크(`factory-internal`)에 있고, 프록시(`docker/proxy`, `factory-proxy`)를 거쳐 `docker/proxy/filter`의 도메인(`api.anthropic.com`)에만 HTTPS로 나간다.
+- 세션은 컨테이너(`.devcontainer/Dockerfile` 이미지) 안에서 돈다. 인증은 **API 키만** 쓴다 (세션·리뷰어 도구의 키 변수, 컨테이너에는 변수 이름만 넘긴다). 이미지에는 Claude Code, Codex CLI, Playwright 브라우저가 들어 있다.
+- 네트워크: 컨테이너는 내부 전용 네트워크(`factory-internal`)에 있고, 프록시(`docker/proxy`, `factory-proxy`)를 거쳐 `docker/proxy/filter`의 도메인(`api.anthropic.com`, `api.openai.com`)에만 HTTPS로 나간다.
 - Git: 공유 `.git`은 읽기 전용으로 마운트한다. 컨테이너는 브랜치·설정·hooks를 바꿀 수 없다. worktree의 `.git` 파일은 컨테이너 경로를 가리키는 파일로 바꿔 끼운다.
 - 의존성: 작업별 볼륨에 컨테이너로 설치한다 (이때만 일반 네트워크, 키 없음). Python은 이미지에 들어 있어 실행 중에 내려받지 않는다.
 - 머지: 컨테이너 안의 `merge`는 아무것도 하지 않고(APPROVED 유지) 세션이 끝나면 호스트가 머지한다. 호스트는 기본 checkout의 `factory.py`를 쓰고, rebase 후 재검증은 오프라인 컨테이너에서 돌린다. **호스트는 에이전트가 쓴 코드를 실행하지 않는다.**
@@ -137,7 +163,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 | `type` | `feature` / `bugfix` / `copy` / `refactor` |
 | `size` | `small` (상한 15분) / `medium` (상한 30분). 중형을 넘으면 작업을 만들지 말고 분할을 제안한다 |
 | `risk` | `LOW` / `MEDIUM` / `HIGH` (최종 등급은 `verify`가 diff로 계산한 등급과 비교해 높은 쪽) |
-| `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx` |
+| `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx`, 사용자 흐름 `frontend/e2e/<name>.<ID>.accept.e2e.ts` (Playwright) |
 | `changed_tests` | Spec 단계에서 바꾼 기존 테스트 파일 (없으면 `[]`) |
 | `allowed_config_changes` | 바꿔도 되는 설정 파일 (예: 의존성 추가 시 `backend/pyproject.toml`). 있으면 위험 등급 MEDIUM 이상 |
 
@@ -176,3 +202,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 | LOW | 그 밖의 경우 | 자동 (Validator PASS 후 자동 머지) |
 
 최종 등급 = max(contract 선언, 계산 결과).
+
+## 운영 기록 (`factory/learnings.md`)
+
+평가·실전 실행에서 배운 점과 규칙 개선 후보를 적는다. 에이전트는 개선 후보를 보고에 제안만 하고, 이 파일과 정책·절차 파일은 사람이 고친다.

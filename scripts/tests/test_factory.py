@@ -1277,3 +1277,19 @@ def test_codex_extra_args_reach_reviewers(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("FACTORY_CODEX_ARGS", json.dumps(["-c", "model_provider=x"]))
     cmd = factory.reviewer_command("codex", Path("out.txt"))
     assert cmd[-3:] == ["-c", "model_provider=x", "-"]
+
+
+def test_playwright_acceptance_test_path_is_accepted(h: Harness) -> None:
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
+    h.run("new", "요구사항")
+    h.write_spec(acceptance_tests=["frontend/e2e/login.J001.accept.e2e.ts"])
+    assert h.run("spec", "J001") == 0
+    assert h.run("red", "J001") == 0
+    assert "frontend/e2e/login.J001.accept.e2e.ts" in h.job()["locks"]
+
+
+def test_existing_user_flow_tests_and_config_are_locked(h: Harness) -> None:
+    for rel in ("frontend/e2e/bookmarks.e2e.ts", "frontend/playwright.config.ts"):
+        assert factory._matches(rel, factory.LOCK_PATTERNS)
+    assert factory._matches("frontend/playwright.config.ts", factory.MEDIUM_PATHS)
+    assert factory.CHANGED_TEST.match("frontend/e2e/bookmarks.e2e.ts")

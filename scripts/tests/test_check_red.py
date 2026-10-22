@@ -17,6 +17,7 @@ from check_red import (  # noqa: E402
     classify_message,
     decide,
     parse_junit,
+    parse_playwright,
     parse_vitest,
     run_pytest,
 )
@@ -202,3 +203,64 @@ def test_run_pytest_uses_a_checkout_local_basetemp(tmp_path: Path) -> None:
     )
     found = by_name(run_pytest(["test_tmp.py"], cwd=tmp_path, base=[sys.executable, "-m"]))
     assert found == {"test_where": Outcome.PASSED}
+
+
+# ---------- Playwright (Phase 3c) ----------
+
+ESC = "\u001b"
+
+
+def pw_test(title: str, status: str, message: str = "") -> dict[str, object]:
+    result: dict[str, object] = {"status": status}
+    if message:
+        result["error"] = {"message": message}
+    return {"title": title, "tests": [{"projectName": "chromium", "results": [result]}]}
+
+
+PLAYWRIGHT = {
+    "suites": [
+        {
+            "title": "e2e/list.J001.accept.e2e.ts",
+            "file": "e2e/list.J001.accept.e2e.ts",
+            "specs": [
+                pw_test("passes", "passed"),
+                # Playwright 메시지에는 색 코드가 섞여 있다
+                pw_test(
+                    "expect_fails",
+                    "failed",
+                    f"Error: {ESC}[2mexpect({ESC}[22mlocator).toBeVisible() failed",
+                ),
+                pw_test("element_missing", "failed", "TimeoutError: locator.click: Timeout 5000ms"),
+                pw_test("crash", "failed", "TypeError: Cannot read properties of undefined"),
+                pw_test("skipped", "skipped"),
+                pw_test("timed_out", "timedOut", "Test timeout of 30000ms exceeded."),
+            ],
+            "suites": [{"title": "묶음", "specs": [pw_test("nested", "passed")], "suites": []}],
+        }
+    ],
+    "errors": [],
+}
+
+
+def test_parse_playwright_classifies_each_case() -> None:
+    outcomes = {r.test_id.split(" > ")[-1]: r.outcome for r in parse_playwright(PLAYWRIGHT)}
+    assert outcomes == {
+        "passes": Outcome.PASSED,
+        "expect_fails": Outcome.ASSERTION_FAILED,
+        "element_missing": Outcome.ASSERTION_FAILED,  # 화면 요소 없음 (Testing Library와 같게)
+        "crash": Outcome.ERROR,
+        "skipped": Outcome.ERROR,
+        "timed_out": Outcome.ERROR,
+        "nested": Outcome.PASSED,
+    }
+
+
+def test_parse_playwright_global_error_is_an_error() -> None:
+    # 웹 서버가 안 뜨거나 테스트 파일을 읽지 못하면 테스트 결과 없이 전역 오류만 있다
+    report = {
+        "suites": [],
+        "errors": [{"message": "Error: Timed out waiting 60000ms from config.webServer."}],
+    }
+    results = parse_playwright(report)
+    assert [r.outcome for r in results] == [Outcome.ERROR]
+    assert "webServer" in results[0].detail

@@ -66,3 +66,8 @@ def test_every_pytest_step_uses_a_checkout_local_basetemp() -> None:
         basetemp = [a for a in step.cmd if a.startswith("--basetemp=")]
         assert basetemp, f"{step.area}/{step.name}"
         assert not Path(basetemp[0].removeprefix("--basetemp=")).is_absolute()
+
+
+def test_frontend_runs_user_flow_tests() -> None:
+    e2e = [s for s in STEPS if s.area == "frontend" and s.name == "e2e"]
+    assert [s.cmd for s in e2e] == [["npm", "run", "-s", "e2e"]]

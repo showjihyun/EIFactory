@@ -391,7 +391,8 @@ def test_proxy_allows_codex_api_and_image_has_codex() -> None:
 def test_codex_on_windows_host_is_refused(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # codex 0.163은 Windows 호스트에서 샌드박스가 읽기 전용으로 떨어져 명령·패치를 거부한다 (실측)
     monkeypatch.delenv("FACTORY_AGENT_CMD")
-    monkeypatch.setattr(dispatch.sys, "platform", "win32")
+    # sys.platform 자체를 바꾸면 리눅스(컨테이너)에서 표준 라이브러리가 깨진다
+    monkeypatch.setattr(dispatch, "_windows_host", lambda: True)
     assert dispatch.main(["--agent", "codex", "x"], root=repo) == 2
 
 
@@ -402,3 +403,12 @@ def test_extra_no_proxy_hosts_for_internal_test_servers(
     cmd = dispatch.docker_session_command(docker_job(tmp_path), ["x"], keys=[])
     assert "NO_PROXY=localhost,127.0.0.1,fake-openai" in cmd
     assert "FACTORY_DOCKER_NO_PROXY" not in cmd
+
+
+def test_image_playwright_matches_frontend_version() -> None:
+    # 검증 컨테이너는 오프라인이므로 브라우저를 이미지에 넣는다. 버전이 다르면 브라우저를 못 찾는다
+    package = json.loads((REPO_ROOT / "frontend/package.json").read_text(encoding="utf-8"))
+    version = package["devDependencies"]["@playwright/test"]
+    dockerfile = (REPO_ROOT / ".devcontainer/Dockerfile").read_text(encoding="utf-8")
+    assert f"ARG PLAYWRIGHT_VERSION={version}\n" in dockerfile
+    assert "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in dockerfile
