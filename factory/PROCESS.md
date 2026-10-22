@@ -57,6 +57,7 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `REPEATED_FAILURE` | 같은 실패가 2회 연속 |
 | `PROTECTED_FILE_CHANGED` | 잠긴 파일(수락 테스트, contract, 기존 테스트, 검증 설정)이 바뀜 |
 | `TIMEOUT` | 시간 상한 초과, 또는 소프트 상한(80%) 이후 재시도가 필요해짐 |
+| `BUDGET` | 세션 비용이 상한에 닿아 세션이 멈춤 (dispatch가 기록) |
 | `TEST_INVALID` | Builder가 수락 테스트가 틀렸다고 보고 (`block`으로 기록) |
 | `NEEDS_DECISION` | 요구사항 자체가 사람의 결정을 요구함 (예: 검증 약화·테스트 건너뛰기 요청). `new` 직후 `block`으로 기록 |
 | `TREE_CHANGED` | 검증·승인한 변경과 머지하려는 변경이 다름 |
@@ -88,6 +89,8 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 2. 요구사항마다 `../<레포>.jobs/<작업 ID>/`에 worktree를 만들고 의존성을 설치한 뒤 `factory.py new --base <base>`로 작업을 만든다. 작업 상태는 worktree마다 따로 있다.
 3. 작업마다 headless `claude -p` 세션을 띄운다. 권한은 `.claude/settings.json`의 allow 목록을 그대로 넘긴다 (새 worktree는 신뢰 승인 전이라 프로젝트 설정의 allow가 무시된다. hook은 동작한다).
 4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
+   - 비용 상한 (`--budget-usd`, 기본 $5, API 환산 임시값): Claude 세션에 `--max-budget-usd`로 건다. 상한에 닿아 세션이 작업 도중 멈추면 BLOCKED(`BUDGET`). 리뷰어 호출은 하나당 $1 (`FACTORY_REVIEW_BUDGET_USD`). Codex CLI에는 같은 옵션이 없어 벽시계 상한만 적용되고, 토큰 수는 기록한다.
+   - 세션 비용·토큰은 결과 표와 `dispatch-<시각>.json`에 남는다.
 5. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다. 사람은 그 worktree에서 `approve`·`resume`·`drop`을 실행한다.
 6. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
 - 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).

@@ -51,12 +51,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factory_config import DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
+from report import session_usage  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 # 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
 API_KEYS = {"claude": ["ANTHROPIC_API_KEY"], "codex": ["CODEX_API_KEY", "OPENAI_API_KEY"]}
 DEFAULT_WALL_TIMEOUT_MIN = 40.0  # 중형 상한 30분 + 정리 여유
+# 세션 하나의 비용 상한 (API 환산, 임시값). 규모는 spec에서 정해지므로 중형 기준 하나로 건다.
+# Phase 1~3 실제 세션 31개의 최대 $1.21 (리뷰어 제외)의 약 4배. Claude만 적용 (`--max-budget-usd`)
+DEFAULT_BUDGET_USD = 5.0
 ACTIVE = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING", "APPROVED"}
 
 # 컨테이너 격리 (Phase 3b)
@@ -170,9 +174,17 @@ def codex_extra_args() -> list[str]:
 
 
 def agent_command(
-    root: Path, prompt: str, model: str, agent: str = "claude", workdir: str | None = None
+    root: Path,
+    prompt: str,
+    model: str,
+    agent: str = "claude",
+    workdir: str | None = None,
+    budget_usd: float | None = None,
 ) -> list[str]:
-    """오케스트레이터 세션 명령. workdir는 세션이 보는 레포 경로 (컨테이너면 컨테이너 경로)."""
+    """오케스트레이터 세션 명령. workdir는 세션이 보는 레포 경로 (컨테이너면 컨테이너 경로).
+
+    budget_usd는 Claude 세션의 비용 상한이다. Codex CLI에는 같은 옵션이 없어 벽시계 상한만 건다.
+    """
     override = os.environ.get("FACTORY_AGENT_CMD")
     if override:
         return [*json.loads(override), prompt]
@@ -207,6 +219,7 @@ def agent_command(
             *codex_extra_args(),
             prompt,
         ]
+    budget = ["--max-budget-usd", str(budget_usd)] if budget_usd is not None else []
     return [
         "claude",
         "-p",
@@ -218,6 +231,7 @@ def agent_command(
         "--verbose",
         "--permission-mode",
         "acceptEdits",
+        *budget,
         "--allowedTools",
         *allowed_tools(root),
     ]
@@ -480,7 +494,9 @@ def run_job(
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
     workdir = docker.workdir if docker else None
-    inner = agent_command(worktree, prompt, args.model, agent=args.agent, workdir=workdir)
+    inner = agent_command(
+        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=args.budget_usd
+    )
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
     host_merge = merges_on_host(args.agent, docker is not None)
     session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
@@ -507,11 +523,21 @@ def run_job(
             result["exit_code"] = None
             result["timed_out"] = True
 
+    usage = session_usage(log_path)
+    result.update(session_cost_usd=usage["cost_usd"], session_tokens=usage["tokens"])
+    cost = usage["cost_usd"]
     job = _load_job(worktree, job_id)
-    if result["timed_out"] and job["status"] in ACTIVE - {"APPROVED"}:
-        detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
-        _factory(root, worktree, "block", job_id, "--reason", "TIMEOUT", "--detail", detail)
-        job = _load_job(worktree, job_id)
+    if job["status"] in ACTIVE - {"APPROVED"}:
+        reason = detail = None
+        if result["timed_out"]:
+            reason = "TIMEOUT"
+            detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
+        elif cost is not None and cost >= args.budget_usd:
+            reason = "BUDGET"
+            detail = f"세션 비용 ${cost:.2f}가 상한 ${args.budget_usd:.2f}에 닿아 세션이 멈춤"
+        if reason and detail:
+            _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
+            job = _load_job(worktree, job_id)
     if host_merge and job["status"] == "APPROVED":
         # 세션은 머지하지 않는다. 호스트가 기본 checkout의 factory.py로 머지한다.
         # 컨테이너 세션이면 재검증도 컨테이너에서 돌려 호스트가 에이전트 코드를 실행하지 않는다
@@ -596,8 +622,8 @@ def _summary(report: dict[str, Any]) -> str:
         f"인증: {report['auth']}, 격리 {report['isolation']}, "
         f"동시 실행 {report['max_parallel']}개, base {report['base']}",
         "",
-        "| 작업 | 상태 | 위험 | 활성/경과(분) | 비고 | worktree |",
-        "|---|---|---|---|---|---|",
+        "| 작업 | 상태 | 위험 | 활성/경과(분) | 세션 비용($) | 비고 | worktree |",
+        "|---|---|---|---|---|---|---|",
     ]
     for job in report["jobs"]:
         note = job.get("blocked") or job.get("error") or ""
@@ -606,9 +632,11 @@ def _summary(report: dict[str, Any]) -> str:
         if job.get("merge_commit"):
             note = f"머지 {job['merge_commit'][:7]}"
         where = "(삭제)" if job.get("worktree_removed") else job.get("worktree", "")
+        cost = job.get("session_cost_usd")
         lines.append(
             f"| {job.get('job_id') or '-'} | {job['status']} | {job.get('risk') or '-'} | "
-            f"{job.get('active_min', '-')}/{job.get('wall_min', '-')} | {note} | {where} |"
+            f"{job.get('active_min', '-')}/{job.get('wall_min', '-')} | "
+            f"{'-' if cost is None else f'{cost:.2f}'} | {note} | {where} |"
         )
     lines += [
         "",
@@ -625,6 +653,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("requirements", nargs="+")
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
+    parser.add_argument(
+        "--budget-usd", type=float, default=DEFAULT_BUDGET_USD, help="세션 비용 상한 (Claude)"
+    )
     parser.add_argument("--agent", choices=sorted(DEFAULT_MODELS), default="claude")
     parser.add_argument("--review-agent", choices=sorted(DEFAULT_MODELS), help="기본: --agent")
     parser.add_argument("--model", help="오케스트레이터 모델 (기본: 도구별 DEFAULT_MODELS)")
@@ -696,6 +727,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "image": image,
         "base": base,
         "max_parallel": args.max_parallel,
+        "budget_usd": args.budget_usd,
         "model": args.model,
         "jobs": jobs,
     }

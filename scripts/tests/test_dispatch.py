@@ -38,6 +38,11 @@ import json, os, subprocess, sys, time
 from pathlib import Path
 if os.environ.get("FAKE_AGENT_MODE") == "sleep":
     time.sleep(120)
+if os.environ.get("FAKE_AGENT_MODE") == "budget":
+    # claude -p --max-budget-usd: 상한에 닿으면 작업 도중 결과 이벤트를 내고 끝난다
+    print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+                      "total_cost_usd": 5.2, "usage": {"input_tokens": 10, "output_tokens": 5}}))
+    sys.exit(1)
 root = Path.cwd()
 print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FACTORY_AGENT"))
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
@@ -64,6 +69,8 @@ factory("red", job_id)
 factory("verify", job_id)
 factory("validate", job_id)
 factory("merge", job_id)
+print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.5,
+                  "usage": {"input_tokens": 100, "output_tokens": 20}}))
 """
 
 
@@ -455,3 +462,38 @@ def test_force_remove_deletes_read_only_files(tmp_path: Path) -> None:
     obj.chmod(0o444)
     assert dispatch._force_remove(target) is True
     assert not target.exists()
+
+
+def test_agent_command_passes_budget_cap_to_claude(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FACTORY_AGENT_CMD")
+    cmd = dispatch.agent_command(repo, "p", "claude-opus-5-5", budget_usd=3.0)
+    # --allowedTools는 가변 인자라 그 앞에 둔다
+    assert cmd[cmd.index("--max-budget-usd") + 1] == "3.0"
+    assert cmd.index("--max-budget-usd") < cmd.index("--allowedTools")
+    assert "--max-budget-usd" not in dispatch.agent_command(repo, "p", "claude-opus-5-5")
+    # Codex CLI에는 비용 상한 옵션이 없다 (벽시계 상한만 적용)
+    codex = dispatch.agent_command(repo, "p", "m", agent="codex", budget_usd=3.0)
+    assert "--max-budget-usd" not in codex
+
+
+def test_session_cost_is_recorded(repo: Path) -> None:
+    code, report = run(repo, "요구사항")
+    job = report["jobs"][0]
+    assert job["status"] == "MERGED"
+    assert job["session_cost_usd"] == 0.5
+    assert job["session_tokens"] == 120
+    assert report["budget_usd"] == dispatch.DEFAULT_BUDGET_USD
+
+
+def test_budget_exhaustion_blocks_job(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_AGENT_MODE", "budget")
+    code, report = run(repo, "--budget-usd", "5", "비싼 작업")
+    job = report["jobs"][0]
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"] == "BUDGET"
+    assert job["session_cost_usd"] == 5.2
+    state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
+    assert "$5.20" in state["jobs"][job["job_id"]]["blocked"]["detail"]
+    assert Path(job["worktree"]).exists()

@@ -59,6 +59,8 @@ MODELS = {
     "codex": {"builder": "gpt-6.1-sol", "builder_strong": "gpt-6-astra", "reviewer": "gpt-6.1-sol"},
 }
 PROMOTE_AFTER = 2
+# 리뷰어 호출 하나당 비용 상한 (API 환산, 임시값). Claude만 적용 (Codex CLI에는 옵션이 없다)
+REVIEW_BUDGET_USD = 1.0
 # 에이전트 세션(FACTORY_AGENT_SESSION=1)에서는 factory.py가 직접 거부한다 (도구 hook과 별개)
 HUMAN_ONLY = {"approve", "resume", "drop"}
 
@@ -965,6 +967,8 @@ def reviewer_command(agent: str, out_file: Path) -> list[str]:
         model,
         "--output-format",
         "json",
+        "--max-budget-usd",
+        os.environ.get("FACTORY_REVIEW_BUDGET_USD", str(REVIEW_BUDGET_USD)),
         "--allowedTools",
         "Read",
         "Glob",
@@ -1461,7 +1465,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     block.add_argument(
         "--reason",
         required=True,
-        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "TIMEOUT", "MANUAL"],
+        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "TIMEOUT", "BUDGET", "MANUAL"],
     )
     block.add_argument("--detail", required=True)
     status = sub.add_parser("status")

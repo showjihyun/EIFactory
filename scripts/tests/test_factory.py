@@ -1321,3 +1321,22 @@ def test_reviewer_cost_and_tokens_are_recorded(h: Harness) -> None:
     reviews = h.job()["reviews"]
     assert [r["cost_usd"] for r in reviews] == [0.01, 0.01, 0.01]
     assert [r["tokens"] for r in reviews] == [170, 170, 170]
+
+
+def test_claude_reviewer_has_budget_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 리뷰어 호출 하나당 비용 상한 (API 환산). Codex CLI에는 비용 상한 옵션이 없다
+    monkeypatch.delenv("FACTORY_REVIEW_BUDGET_USD", raising=False)
+    cmd = factory.reviewer_command("claude", Path("out.txt"))
+    assert cmd[cmd.index("--max-budget-usd") + 1] == str(factory.REVIEW_BUDGET_USD)
+    assert cmd.index("--max-budget-usd") < cmd.index("--allowedTools")
+    monkeypatch.setenv("FACTORY_REVIEW_BUDGET_USD", "0.25")
+    cmd = factory.reviewer_command("claude", Path("out.txt"))
+    assert cmd[cmd.index("--max-budget-usd") + 1] == "0.25"
+    assert "--max-budget-usd" not in factory.reviewer_command("codex", Path("out.txt"))
+
+
+def test_block_accepts_budget_reason(h: Harness) -> None:
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
+    h.run("new", "요구사항")
+    assert h.run("block", "J001", "--reason", "BUDGET", "--detail", "비용 상한") == 0
+    assert h.job()["blocked"]["reason"] == "BUDGET"

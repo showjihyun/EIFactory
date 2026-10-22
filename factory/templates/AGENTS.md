@@ -19,7 +19,7 @@
 - **상태는 `python scripts/factory.py`만 바꾼다.** 절차와 명령은 `factory/PROCESS.md`.
 - **위험 등급**: contract 선언과 diff 계산 중 높은 쪽. LOW는 자동 머지, MEDIUM·HIGH는 사람이 `approve`.
 - **사람 전용 명령**: `approve`, `resume`, `drop`, `recover --force`, `scripts/dispatch.py`, `scripts/issues.py`.
-- **시간 상한**: 소형 15분, 중형 30분 (활성 시간). **재시도 상한**: 검증 실패 3회, 같은 실패 2회 연속, 스펙 재작성 1회.
+- **시간 상한**: 소형 15분, 중형 30분 (활성 시간). **비용 상한**: 세션 $5, 리뷰어 호출 $1 (Claude, API 환산). **재시도 상한**: 검증 실패 3회, 같은 실패 2회 연속, 스펙 재작성 1회.
 
 ## 에이전트 작업 원칙
 
