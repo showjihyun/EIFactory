@@ -35,7 +35,9 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -522,10 +524,43 @@ def run_job(
     if docker:
         _docker("volume", "rm", f"{docker.name}-node", f"{docker.name}-venv")
     if job["status"] == "MERGED" and not args.keep_merged:
-        with _git_lock:
-            _git(root, "worktree", "remove", "--force", str(worktree))
-        result["worktree_removed"] = True
+        result["worktree_removed"] = _remove_worktree(root, worktree, result)
     return result
+
+
+def _force_remove(path: Path) -> bool:
+    """Windows 경로 길이 제한(MAX_PATH)을 넘는 파일, 읽기 전용 파일(Git objects)까지 지운다."""
+    target = str(path.resolve())
+    if sys.platform == "win32" and not target.startswith("\\\\?\\"):
+        target = "\\\\?\\" + target
+
+    def retry_writable(func: Any, failed: str, _error: BaseException) -> None:
+        try:
+            os.chmod(failed, stat.S_IWRITE)
+            func(failed)
+        except OSError:
+            pass
+
+    shutil.rmtree(target, onexc=retry_writable)
+    return not path.exists()
+
+
+def _remove_worktree(root: Path, worktree: Path, result: dict[str, Any]) -> bool:
+    """머지된 worktree를 지운다. 실패해도 작업 결과는 그대로 두고 사유만 남긴다.
+
+    컨테이너 verify가 남긴 임시 폴더(테스트용 Git 저장소)는 경로가 깊어 Windows에서 지우지
+    못할 수 있다 (Codex e2e에서 발견).
+    """
+    with _git_lock:
+        try:
+            _git(root, "-c", "core.longpaths=true", "worktree", "remove", "--force", str(worktree))
+            return True
+        except DispatchError as error:
+            if _force_remove(worktree):
+                _git(root, "worktree", "prune")
+                return True
+            result["cleanup_error"] = str(error)[-500:]
+            return False
 
 
 def _windows_host() -> bool:

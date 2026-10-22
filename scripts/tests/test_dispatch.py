@@ -420,3 +420,35 @@ def test_image_playwright_matches_frontend_version() -> None:
     dockerfile = (REPO_ROOT / ".devcontainer/Dockerfile").read_text(encoding="utf-8")
     assert f"ARG PLAYWRIGHT_VERSION={version}\n" in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright" in dockerfile
+
+
+def test_failed_worktree_removal_keeps_the_job_result(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 경로 길이 제한 등으로 worktree를 못 지워도 머지 결과를 잃지 않는다 (Codex e2e에서 발견)
+    real_git = dispatch._git
+
+    def failing_git(root: Path, *args: str) -> str:
+        if "remove" in args:
+            raise dispatch.DispatchError("git worktree remove 실패: Filename too long")
+        return real_git(root, *args)
+
+    monkeypatch.setattr(dispatch, "_git", failing_git)
+    monkeypatch.setattr(dispatch, "_force_remove", lambda path: False)
+    code, report = run(repo, "요구사항")
+    job = report["jobs"][0]
+    assert job["status"] == "MERGED"
+    assert job["worktree_removed"] is False
+    assert "Filename too long" in job["cleanup_error"]
+    assert code == 0
+
+
+def test_force_remove_deletes_read_only_files(tmp_path: Path) -> None:
+    # 테스트가 만든 Git 저장소의 objects는 읽기 전용이라 Windows에서 그냥은 지워지지 않는다
+    target = tmp_path / "wt"
+    obj = target / ".pytest_tmp" / "repo" / ".git" / "objects" / "ab" / "cdef"
+    obj.parent.mkdir(parents=True)
+    obj.write_text("x", encoding="utf-8")
+    obj.chmod(0o444)
+    assert dispatch._force_remove(target) is True
+    assert not target.exists()
