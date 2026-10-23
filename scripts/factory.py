@@ -1239,7 +1239,7 @@ def _mark_merged(root: Path, state: State, job: Job) -> None:
     _close_job(root, state, job, "MERGED")
 
 
-def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
+def _merge_steps(root: Path, state: State, job: Job, approved_now: bool) -> tuple[int, str]:
     job_id = job["id"]
     if _git(root, "branch", "--show-current").strip() != job["branch"]:
         _git(root, "switch", "-q", job["branch"])
@@ -1253,7 +1253,10 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
         _block(job, "TREE_CHANGED", "검증·승인 이후 작업 트리가 바뀌었습니다")
         return 1, f"{job_id}: BLOCKED (TREE_CHANGED). 검증한 변경과 머지할 변경이 다릅니다"
     approval = job["approval"]
-    if approval["by"] == "auto":
+    # 상태 파일을 믿지 않을 때는 지금 이 프로세스에서 실행한 approve만 사람 승인으로 본다
+    # (세션이 상태에 "사람 승인"을 써 넣을 수 있다)
+    auto = approval["by"] == "auto" or (_untrusted() and not approved_now)
+    if auto:
         risk, reasons = compute_risk(root, job)
         if risk not in AUTO_MERGE_RISKS:
             job["risk"], job["risk_reasons"] = risk, reasons
@@ -1272,7 +1275,7 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
             for p in changed
             if _matches(p, cfg.lock_patterns) and not cfg.is_acceptance_test(p, job_id)
         ]
-        if locked and approval["by"] == "auto":
+        if locked and auto:
             risk, reasons = compute_risk(root, job)
             job["risk"] = RISKS[max(RISKS.index(risk), RISKS.index("MEDIUM"))]
             job["risk_reasons"] = [*reasons, *[f"MEDIUM: 잠긴 파일 변경 ({p})" for p in locked]]
@@ -1288,7 +1291,7 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
             _block(job, "MERGE_CHECK_FAILED", "수락 테스트가 없습니다 (diff와 상태 모두)")
             return 1, f"{job_id}: BLOCKED (MERGE_CHECK_FAILED). 수락 테스트 없음"
         job["acceptance_tests"] = acceptance
-    summary = f"위험 {job['risk']}, 승인 {approval['by']}"
+    summary = f"위험 {job['risk']}, 승인 {'auto' if auto else approval['by']}"
     job["commit"] = (
         _commit_job(root, job, f"factory {job_id}: {job['requirement']}\n\n{summary}")
         or _git(root, "rev-parse", "HEAD").strip()
@@ -1364,7 +1367,9 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
     )
 
 
-def cmd_merge(root: Path, state: State, job_id: str) -> tuple[int, str]:
+def cmd_merge(
+    root: Path, state: State, job_id: str, approved_now: bool = False
+) -> tuple[int, str]:
     """승인된 작업을 base 브랜치에 머지한다 (기획안 8.3). 한 번에 하나씩 (merge lock)."""
     job = _job(state, job_id)
     _require(job, "APPROVED")
@@ -1378,7 +1383,7 @@ def cmd_merge(root: Path, state: State, job_id: str) -> tuple[int, str]:
     if holder is not None:
         return 1, f"{job_id}: 다른 작업 {holder}가 머지 중입니다 (상태 유지). 끝난 뒤 다시 merge"
     try:
-        return _merge_steps(root, state, job)
+        return _merge_steps(root, state, job, approved_now)
     finally:
         _release_merge_lock(root, job_id)
 
@@ -1393,7 +1398,7 @@ def cmd_approve(root: Path, state: State, job_id: str, reject: str | None) -> tu
         return 0, f"{job_id}: 반려 → RETRY_REQUIRED ({reject})"
     job["approval"] = {"by": "human", "decision": "approved", "reason": "", "at": now()}
     _set_status(job, "APPROVED")
-    return cmd_merge(root, state, job_id)
+    return cmd_merge(root, state, job_id, approved_now=True)
 
 
 def cmd_recover(root: Path, state: State, job_id: str, force: bool) -> str:
