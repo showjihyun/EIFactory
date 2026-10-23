@@ -542,7 +542,7 @@ class Collector:
             "attempts": job.get("attempts", 0),
             "time": job.get("time")
             and {
-                "active_s": job["time"].get("active_s"),
+                "active_s": self._active_s(job["time"]),
                 "cap_s": job["time"].get("cap_s"),
             },  # fmt: skip
             "cost": cost
@@ -678,6 +678,15 @@ class Collector:
             "attempts": job.get("attempts", 0),
             "budgets_applied": job.get("budgets_applied"),
         }
+
+    def _active_s(self, clock: dict[str, Any]) -> Any:
+        """활성 시간. 기록값은 상태가 바뀔 때만 갱신되므로 진행 중 구간은 지금까지 센다."""
+        try:
+            now = self.now()
+            total = sum((now if end is None else end) - start for start, end in clock["segments"])
+            return round(float(total), 1)
+        except (KeyError, TypeError, ValueError):
+            return clock.get("active_s")
 
     def _cost(self, job: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]:
         roles = []

@@ -249,6 +249,17 @@ def test_snapshot_kpi_matches_report(world: dict[str, Path]) -> None:
     assert snap["kpi"]["success_rate"] == report.metrics(jobs)["success_rate"]
 
 
+def test_card_active_time_counts_running_segment(world: dict[str, Path]) -> None:
+    # 상태 파일의 active_s는 상태가 바뀔 때만 갱신된다. 화면은 지금 시각까지 센다 (D17에서 발견)
+    job = state_job("J010", "BUILDING")
+    job["time"] = {"segments": [[NOW - 400, NOW - 300], [NOW - 120, None]],
+                   "active_s": 100.0, "cap_s": 900}  # fmt: skip
+    write_json(world["jobs"] / "J010" / "factory" / "state.json", {"jobs": {"J010": job}})
+    cards = {c["key"]: c for c in collector(world).snapshot()["jobs"]}
+    assert cards["J010"]["time"]["active_s"] == 220.0
+    assert cards["J002"]["time"]["active_s"] == 300.0  # 구간이 없으면 기록값
+
+
 def test_snapshot_counts_unpriced_jobs(world: dict[str, Path]) -> None:
     # 확정 세션 로그가 없으면 단가가 없다. 진행 중 J001은 토큰만 있고 비용은 "모름"
     snap = collector(world).snapshot()
