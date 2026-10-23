@@ -259,3 +259,50 @@ def test_live_usage_result_without_model_breakdown(tmp_path: Path) -> None:
     assert live["basis"] == "result" and live["estimated"] is False
     assert live["total"]["usd"] == 0.5
     assert live["roles"]["orchestrator"]["in"] == 9  # 역할 분해는 스트림 값
+
+
+# ---------- Git 확인 (대시보드 선행 P4-2) ----------
+
+
+def gitrepo(tmp_path: Path) -> Path:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    for args in (["init", "-q", "-b", "main"], ["config", "user.name", "t"],
+                 ["config", "user.email", "t@t"]):  # fmt: skip
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    (repo / "a.txt").write_text("1\n2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    return repo
+
+
+def head(repo: Path) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                          text=True, check=True).stdout.strip()  # fmt: skip
+
+
+def test_merged_into(tmp_path: Path) -> None:
+    repo = gitrepo(tmp_path)
+    base = head(repo)
+    subprocess.run(["git", "switch", "-qc", "side"], cwd=repo, check=True)
+    (repo / "b.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "side"], cwd=repo, check=True)
+    side = head(repo)
+    assert report.merged_into(repo, base, "main") is True
+    assert report.merged_into(repo, side, "main") is False
+    assert report.merged_into(repo, "0" * 40, "main") is False
+
+
+def test_changed_files_with_untracked_and_binary(tmp_path: Path) -> None:
+    repo = gitrepo(tmp_path)
+    base = head(repo)
+    (repo / "a.txt").write_text("1\nzwei\n3\n", encoding="utf-8")
+    (repo / "new.txt").write_text("n1\nn2\n", encoding="utf-8")
+    (repo / "bin.dat").write_bytes(bytes(range(256)))
+    # 세션이 쓴 .gitattributes로 외부 diff를 걸어도 실행되지 않는다 (--no-ext-diff --no-textconv)
+    (repo / ".gitattributes").write_text("*.txt diff=evil\n", encoding="utf-8")
+    files = {f["path"]: f for f in report.changed_files(repo, base)}
+    assert (files["a.txt"]["added"], files["a.txt"]["deleted"]) == (2, 1)
+    assert files["new.txt"]["added"] == 2 and files["new.txt"]["untracked"] is True
+    assert files["bin.dat"]["binary"] is True

@@ -541,6 +541,36 @@ def session_info(root: Path, job_id: str) -> dict[str, Any]:
     return info
 
 
+def host_record_path(root: Path, job_id: str) -> Path:
+    """호스트가 한 일(머지·승인·반려)의 기록. worktree 밖이라 세션이 쓸 수 없다."""
+    return _jobs_dir(root) / "meta" / job_id / "host.json"
+
+
+def host_record(root: Path, job_id: str) -> dict[str, Any]:
+    path = host_record_path(root, job_id)
+    if not path.exists():
+        return {"events": []}
+    record: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return record
+
+
+def _record_host(root: Path, job_id: str, action: str, job: dict[str, Any]) -> None:
+    record = host_record(root, job_id)
+    record["events"].append(
+        {
+            "action": action,
+            "status": job.get("status"),
+            "merge_commit": job.get("merge_commit"),
+            # 호스트가 신뢰 코드로 다시 돌린 검증만 (세션이 쓴 검증 기록은 넣지 않는다)
+            "merge_checks": [c for c in job.get("merge_checks", []) if c.get("why") == "untrusted"],
+            "at": time.time(),
+        }
+    )
+    path = host_record_path(root, job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def host_merge_env(docker: DockerJob | None, wait_s: float) -> dict[str, str]:
     """호스트가 기본 checkout의 factory.py로 머지·승인할 때의 설정.
 
@@ -684,6 +714,7 @@ def run_job(
         merged = _factory(root, worktree, "merge", job_id, env=env)
         result["host_merge"] = merged.stdout.strip()[-500:]
         job = _load_job(worktree, job_id)
+        _record_host(root, job_id, "merge", job)
     builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
     live = live_usage(log_path, unit_prices(sorted(logs.glob("*.jsonl"))), builder_model=builder_id)
     result["cost"] = job_cost(job, live)
@@ -757,7 +788,9 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
             env={"FACTORY_UNTRUSTED_STATE": "1"},
         )  # fmt: skip
         print(done.stdout.strip())
-        _save_record(root, job_id, _load_job(worktree, job_id))
+        job = _load_job(worktree, job_id)
+        _save_record(root, job_id, job)
+        _record_host(root, job_id, "reject", job)
         return done.returncode
     docker = None
     if info["isolation"] == "docker":
@@ -775,6 +808,7 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
     print(done.stdout.strip()[-2000:])
     job = _load_job(worktree, job_id)
     _save_record(root, job_id, job)
+    _record_host(root, job_id, "approve", job)
     if job["status"] == "MERGED" and not keep_merged:
         result: dict[str, Any] = {}
         if not _remove_worktree(root, worktree, result):

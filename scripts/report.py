@@ -308,6 +308,60 @@ def reverted(repo: Path, branch: str, merges: list[str]) -> set[str]:
     return {full[s] for s in REVERT.findall(log) if s in full}
 
 
+# ---------------------------------------------------------------- Git 확인 (대시보드)
+
+
+def _git_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "core.quotepath=off", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def merged_into(repo: Path, commit: str, branch: str) -> bool:
+    """commit이 branch에 들어 있는가 (대시보드의 "Git 확인" 값)."""
+    if _git_run(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}").returncode:
+        return False
+    return _git_run(repo, "merge-base", "--is-ancestor", commit, branch).returncode == 0
+
+
+def changed_files(worktree: Path, fork_point: str) -> list[dict[str, Any]]:
+    """기준점 대비 바뀐 파일과 줄 수 (추적 안 되는 새 파일 포함).
+
+    worktree 안 .gitattributes는 세션이 쓸 수 있으므로 외부 diff·textconv를 끈다
+    (--no-ext-diff --no-textconv). clean 필터는 Git 설정(호스트의 공통 .git)에 정의가 있어야
+    실행되고, 세션은 그 설정을 바꿀 수 없다 (컨테이너는 읽기 전용 마운트).
+    """
+    diff = _git_run(worktree, "diff", "--numstat", "--no-ext-diff", "--no-textconv",
+                    "--no-renames", fork_point)  # fmt: skip
+    files: list[dict[str, Any]] = []
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added, deleted, path = parts
+        binary = added == "-"
+        files.append({"path": path, "added": 0 if binary else int(added),
+                      "deleted": 0 if binary else int(deleted), "binary": binary,
+                      "untracked": False})  # fmt: skip
+    others = _git_run(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    for path in filter(None, others.stdout.split("\0")):
+        try:
+            data = (worktree / path).read_bytes()
+        except OSError:
+            continue
+        binary = b"\0" in data[:8192]
+        added = 0 if binary else len(data.decode("utf-8", errors="replace").splitlines())
+        files.append({"path": path, "added": added, "deleted": 0, "binary": binary,
+                      "untracked": True})  # fmt: skip
+    return files
+
+
 def _pct(value: float) -> str:
     return f"{value * 100:.0f}%"
 

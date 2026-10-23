@@ -654,3 +654,33 @@ def test_session_cap_comes_from_job_budgets(repo: Path) -> None:
     assert job["over_job_total"] is False
     _, report = run(repo, "--budget-usd", "2", "요구사항 2")
     assert report["jobs"][0]["session_budget_usd"] == 2.0
+
+
+def test_host_actions_are_recorded_outside_the_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch.main(["--approve", job_id], root=repo) == 0
+    host = dispatch.host_record(repo, job_id)
+    event = host["events"][-1]
+    assert event["action"] == "approve" and event["status"] == "MERGED"
+    assert event["merge_commit"] == git(repo, "rev-parse", "main")
+    assert event["merge_checks"][-1]["why"] == "untrusted"
+    assert not dispatch.host_record_path(repo, job_id).is_relative_to(Path(job["worktree"]))
+
+
+def test_reject_is_recorded(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    job = waiting_job(repo, monkeypatch)
+    dispatch.main(["--reject", job["job_id"], "--reason", "다시"], root=repo)
+    event = dispatch.host_record(repo, job["job_id"])["events"][-1]
+    assert event["action"] == "reject" and event["status"] == "RETRY_REQUIRED"
+
+
+def test_host_merge_is_recorded(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 호스트 머지(컨테이너·Codex 세션)는 세션이 끝난 뒤 호스트가 기록한다
+    monkeypatch.setattr(dispatch, "merges_on_host", lambda agent, docker: True)
+    _, report = run(repo, "요구사항")
+    job_id = report["jobs"][0]["job_id"]
+    event = dispatch.host_record(repo, job_id)["events"][-1]
+    assert event["action"] == "merge" and event["status"] == "MERGED"
