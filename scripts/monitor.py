@@ -443,6 +443,7 @@ class Collector:
         sub_at = -1.0
         totals = {"in": 0, "out": 0, "cr": 0, "cw": 0, "usd": 0.0}
         estimated_any = False
+        unpriced = 0
         for ref in refs:
             status = str(ref.get("status"))
             column = column_of(status)
@@ -466,6 +467,7 @@ class Collector:
             if cost:
                 totals["usd"] += cost["total_usd"]
                 estimated_any = estimated_any or cost["estimated"]
+                unpriced += int(cost["unpriced"])
             for k in ("in", "out", "cr", "cw"):
                 totals[k] += int(tokens.get(k) or 0)
             if job:
@@ -505,6 +507,7 @@ class Collector:
                 "lead_time_min_median": statistics.median(leads) if leads else None,
                 "cost_usd": round(totals["usd"], 4),
                 "cost_estimated": estimated_any,
+                "cost_unpriced": unpriced,
                 "tokens": {k: totals[k] for k in ("in", "out", "cr", "cw")},
             },
             "attention": self._attention(cards),

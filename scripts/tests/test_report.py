@@ -244,10 +244,20 @@ def test_job_cost_adds_reviewers() -> None:
     reviews = [{"reviewer": r, "cost_usd": 0.094} for r in ("code", "security", "test")]
     cost = report.job_cost({"reviews": reviews}, {"total": {"usd": 0.8}, "estimated": False})
     assert cost == {"session_usd": 0.8, "reviewers_usd": 0.282, "total_usd": 1.082,
-                    "estimated": False, "missing": []}  # fmt: skip
+                    "estimated": False, "missing": [], "unpriced": False}  # fmt: skip
     partial = report.job_cost({"reviews": [{"reviewer": "code", "cost_usd": None}]}, None)
     assert partial["missing"] == ["code"] and partial["estimated"] is True
     assert partial["session_usd"] is None and partial["total_usd"] == 0.0
+
+
+def test_job_cost_marks_tokens_without_price_as_unpriced() -> None:
+    # 첫 실행: 확정 세션이 없어 보정 단가가 없다 → $0이 아니라 "모름"
+    live = {"total": {"in": 10, "out": 5, "cr": 1000, "cw": 100, "usd": None}, "estimated": True}
+    cost = report.job_cost({"reviews": []}, live)
+    assert cost["unpriced"] is True and cost["session_usd"] is None
+    empty = {"total": {"in": 0, "out": 0, "cr": 0, "cw": 0, "usd": None}, "estimated": True}
+    assert report.job_cost({"reviews": []}, empty)["unpriced"] is False
+    assert report.job_cost({"reviews": []}, None)["unpriced"] is False
 
 
 def test_live_usage_result_without_model_breakdown(tmp_path: Path) -> None:

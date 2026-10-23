@@ -235,12 +235,15 @@ def job_cost(job: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]
     raw = (live or {}).get("total", {}).get("usd") if live else None
     session = None if raw is None else float(raw)
     estimated = live is None or bool(live.get("estimated")) or session is None or bool(missing)
+    # 토큰은 있는데 값이 없으면 보정 단가가 아직 없는 것이다 (첫 실행). $0이 아니라 "모름"
+    used = sum(int(v or 0) for k, v in ((live or {}).get("total") or {}).items() if k != "usd")
     return {
         "session_usd": session,
         "reviewers_usd": reviewers,
         "total_usd": round((session or 0) + reviewers, 6),
         "estimated": estimated,
         "missing": missing,
+        "unpriced": session is None and used > 0,
     }
 
 

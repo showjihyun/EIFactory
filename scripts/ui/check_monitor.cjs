@@ -59,6 +59,9 @@ async function startServer(jobs) {
     const attention = await page.locator("#attention .acard").count();
     if (attention < 2) fail(`주의 줄 ${attention}건 (승인 대기·막힘·오류)`);
     if (!(await page.locator("#attention").textContent()).includes("dispatch.py --approve J002")) fail("승인 명령이 없음");
+    if ((await page.locator("#top").textContent()).includes("null")) fail("윗줄에 'null' 글자");
+    const unpriced = await page.locator(".card[data-key='J001'] .meter .num").last().textContent();
+    if (!unpriced.includes("≈ ?")) fail(`단가 없는 작업이 '≈ ?'가 아님 (${unpriced})`);
 
     await page.click(".card[data-key='J002']");
     await page.waitForSelector("#drawer.open .sec", { timeout: 10000 });

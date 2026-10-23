@@ -326,6 +326,10 @@ const clock = (sec) => { if (!sec) return "-"; const d = new Date(sec * 1000); r
 const clockS = (ms) => { const d = new Date(ms); return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`; };
 const full = (sec) => (sec ? new Date(sec * 1000).toLocaleString("ko-KR") : "");
 const money = (v) => (v == null ? "-" : `$${Number(v).toFixed(2)}`);
+// 보정 단가가 아직 없으면(첫 세션이 끝나기 전) $0이 아니라 "모름"
+const UNPRICED = "보정 단가가 아직 없어요. 확정된 세션이 하나 끝나면 추정이 보여요.";
+const costText = (c) => (c.unpriced ? "≈ ?" : `${c.estimated ? "≈" : ""}${money(c.total_usd)}`);
+const kpiCost = (k) => `${k.cost_estimated ? "≈ " : ""}${money(k.cost_usd)}${k.cost_unpriced ? " + ?" : ""}`;
 const kfmt = (n) => { n = Number(n || 0); return n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n); };
 const hitRate = (t) => { const d = (t.in || 0) + (t.cr || 0) + (t.cw || 0); return d ? (t.cr || 0) / d : 0; };
 const varc = (v) => `var(--s-${v})`;
@@ -384,7 +388,7 @@ function renderTop() {
   const sub = snap && snap.subscription;
   const quota = (v) => el("span", { class: "quota", title: `${Math.round(v * 100)}%` }, [0, 1, 2, 3].map((i) => el("i", { class: v > i / 4 ? "on" : "" })));
   const t = (snap && snap.kpi && snap.kpi.tokens) || { in: 0, out: 0, cr: 0, cw: 0 };
-  top.append(
+  top.append(...[
     el("div", { class: "brand" }, bolt(working.length ? "BUILDING" : "QUEUED", 34), snap ? snap.repo.name : "factory"),
     snap ? el("span", { class: "pill" }, "base ", el("b", { text: snap.repo.base })) : null,
     el("span", { class: "pill" }, el("span", { class: `dot ${hot ? "warn" : ""}` }), `${working.length}개 일하는 중`),
@@ -393,12 +397,12 @@ function renderTop() {
     el("span", { class: "pill tok", title: `입력 ${t.in} · 출력 ${t.out} · 캐시 읽기 ${t.cr} · 캐시 쓰기 ${t.cw}` },
       el("span", {}, "⬆ ", el("b", { text: kfmt(t.in) })), el("span", {}, "⬇ ", el("b", { text: kfmt(t.out) })),
       el("span", {}, "💾 ", el("b", { text: kfmt(t.cr + t.cw) }), ` (적중 ${Math.round(hitRate(t) * 100)}%)`),
-      el("b", { text: `${snap && snap.kpi.cost_estimated ? "≈ " : ""}${money(snap ? snap.kpi.cost_usd : 0)}` })),
+      el("b", { text: snap ? kpiCost(snap.kpi) : money(0), title: snap && snap.kpi.cost_unpriced ? UNPRICED : null })),
     sub && sub.five_hour != null ? el("span", { class: "pill", title: `구독 사용량 (가장 최근 세션 로그) · 5시간 창 초기화 ${full(sub.five_hour_resets_at)}` },
       "구독 5h ", quota(sub.five_hour), ` ${Math.round(sub.five_hour * 100)}%`, sub.seven_day != null ? ` · 7d ${Math.round(sub.seven_day * 100)}%` : "") : null,
     el("button", { class: "iconbtn", "aria-label": "설정 보기", onclick: openSettings, text: "⚙ 설정" }),
     el("button", { class: "iconbtn", "aria-label": "테마 바꾸기", onclick: cycleTheme, text: themeIcon() }),
-  );
+  ].filter((n) => n != null)); // append는 null을 글자 "null"로 넣는다
 }
 function renderBanners() {
   const b = $("banners"); b.replaceChildren();
@@ -444,7 +448,7 @@ function renderStats() {
     tile(pct(k.success_rate), `성공률 (승인 대기 이상 도달 / 전체 ${k.total}건) · 목표 70%`, k.success_rate != null && k.success_rate < 0.7),
     tile(pct(k.intervention_rate), "사람 개입률 · 목표 30% 이하", k.intervention_rate != null && k.intervention_rate > 0.3),
     tile(k.lead_time_min_median == null ? "-" : `${k.lead_time_min_median}분`, "리드타임 중앙값 · 목표 소형 10분", k.lead_time_min_median != null && k.lead_time_min_median > 10),
-    tile(`${k.cost_estimated ? "≈ " : ""}${money(k.cost_usd)}`, "작업 비용 합계 (세션 + 리뷰어, API 환산)", false),
+    tile(kpiCost(k), `작업 비용 합계 (세션 + 리뷰어, API 환산)${k.cost_unpriced ? ` · 단가 없음 ${k.cost_unpriced}건` : ""}`, false),
     el("div", { class: "muted small", style: "grid-column:1/-1", text: "오판율은 정답표로 사람이 확인해요." }));
 }
 function renderLanes() {
@@ -497,14 +501,14 @@ function card(c) {
   const t = c.tokens || {};
   const tok = (t.in || 0) + (t.out || 0) + (t.cr || 0) + (t.cw || 0);
   const live = ["spec", "build", "review", "merging"].includes(c.column);
-  return el("div", { class: "card", tabindex: 0, role: "button", "data-key": c.key, "aria-label": `${c.id}, ${st.label}, 위험 ${c.risk || "-"}, 비용 ${cost ? money(cost.total_usd) : "-"}`,
+  return el("div", { class: "card", tabindex: 0, role: "button", "data-key": c.key, "aria-label": `${c.id}, ${st.label}, 위험 ${c.risk || "-"}, 비용 ${cost ? costText(cost) : "-"}`,
     onclick: () => openDrawer(c.key), onkeydown: (e) => e.key === "Enter" && openDrawer(c.key) },
     el("div", { class: "chead" }, bolt(c.status, 30), el("span", { class: "id", text: c.id }), c.source === "interactive" ? el("span", { class: "muted small", text: "대화형" }) : null, el("span", { class: "spacer" }), riskBadge(c.risk)),
     el("div", { class: "req", text: c.requirement }),
     c.blocked ? el("div", { class: "small" }, el("span", { class: "blocked-code", text: c.blocked.reason }), " ", el("span", { class: "muted", text: c.blocked.detail || "" })) : null,
     c.error ? el("div", { class: "small blocked-code", text: c.error }) : null,
     c.time ? el("div", { class: "meter" }, el("span", { text: "⏱" }), el("div", { class: "bar" }, el("i", { class: tr >= 1 ? "over" : tr >= 0.8 ? "warn" : "", style: `width:${Math.min(100, tr * 100)}%` })), el("span", { class: "num", text: `${mins(c.time.active_s)}/${mins(c.time.cap_s)}분` })) : null,
-    cost ? el("div", { class: "meter" }, el("span", { text: "💰" }), el("div", { class: "bar" }, el("i", { class: cost.estimated ? "est" : "cost", style: `width:${Math.min(100, (cost.total_usd / (cost.cap_usd || 6.5)) * 100)}%` })), el("span", { class: "num", text: `${cost.estimated ? "≈" : ""}${money(cost.total_usd)}/$${cost.cap_usd}` })) : null,
+    cost ? el("div", { class: "meter" }, el("span", { text: "💰" }), el("div", { class: "bar" }, el("i", { class: cost.estimated ? "est" : "cost", style: `width:${Math.min(100, (cost.total_usd / (cost.cap_usd || 6.5)) * 100)}%` })), el("span", { class: "num", title: cost.unpriced ? UNPRICED : null, text: `${costText(cost)}/$${cost.cap_usd}` })) : null,
     tok ? el("div", { class: "tokline", title: `입력 ${t.in} · 출력 ${t.out} · 캐시 읽기 ${t.cr} · 캐시 쓰기 ${t.cw}` }, live ? el("span", { class: "live-dot" }) : null, `🪙 ${kfmt(tok)} · 캐시 ${Math.round(hitRate(t) * 100)}%`) : null,
     c.column === "error" ? null : el("div", { class: "chips" }, chips),
     el("div", { class: "foot" }, el("span", { text: `${c.agent || "-"} ·` }), c.builder_model ? modelBadge(c.builder_model) : null, authIcon(c.orchestrator && c.orchestrator.auth),
@@ -644,7 +648,7 @@ function costSection(j) {
     if (unattr) box.append(el("div", { class: "small muted", text: `Builder 토큰 중 ${kfmt(unattr)}는 스트림에 항목별로 나오지 않아 합계에만 있어요.` }));
   } else box.append(el("div", { class: "small muted", text: "아직 사용량이 없어요" }));
   const b = c.budgets || {};
-  box.append(el("div", { class: "small", style: "margin-top:6px" }, el("b", { text: `합계 ${job.estimated ? "≈" : ""}${money(job.total_usd)}` }), ` (세션 ${money(job.session_usd)} + 리뷰어 ${money(job.reviewers_usd)}) / 작업 총액 상한 $${b.job_total} · 적용: 세션 $${b.session} · 리뷰어 호출 $${b.reviewer_call} · 리뷰어 합계 $${b.reviewer_total}`));
+  box.append(el("div", { class: "small", style: "margin-top:6px" }, el("b", { text: `합계 ${costText(job)}`, title: job.unpriced ? UNPRICED : null }), ` (세션 ${money(job.session_usd)} + 리뷰어 ${money(job.reviewers_usd)}) / 작업 총액 상한 $${b.job_total} · 적용: 세션 $${b.session} · 리뷰어 호출 $${b.reviewer_call} · 리뷰어 합계 $${b.reviewer_total}`));
   if (c.stages && c.stages.length) {
     const colors = { spec: "--s-spec", build: "--s-build", review: "--s-verify", merge: "--s-approved" };
     box.append(el("div", { class: "small muted", style: "margin-top:8px", text: "단계별 ≈ (추정·표시 전용, 상태 이력 기준)" }),

@@ -249,6 +249,16 @@ def test_snapshot_kpi_matches_report(world: dict[str, Path]) -> None:
     assert snap["kpi"]["success_rate"] == report.metrics(jobs)["success_rate"]
 
 
+def test_snapshot_counts_unpriced_jobs(world: dict[str, Path]) -> None:
+    # 확정 세션 로그가 없으면 단가가 없다. 진행 중 J001은 토큰만 있고 비용은 "모름"
+    snap = collector(world).snapshot()
+    cards = {c["key"]: c for c in snap["jobs"]}
+    assert cards["J001"]["cost"]["unpriced"] is True
+    assert snap["kpi"]["cost_unpriced"] == sum(
+        1 for c in snap["jobs"] if c["cost"] and c["cost"].get("unpriced")
+    )
+
+
 # ---------- D6 작업 상세 ----------
 
 
