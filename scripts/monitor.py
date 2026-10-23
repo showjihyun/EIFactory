@@ -14,12 +14,17 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+import http.server
 import json
 import re
 import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
+import webbrowser
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +33,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import report  # noqa: E402
-from factory_config import BUDGET_DEFAULTS, ConfigError, load_config  # noqa: E402
+from factory_config import BUDGET_DEFAULTS, CLAUDE_MODELS, ConfigError, load_config  # noqa: E402
+from proc import use_utf8_output  # noqa: E402
 
 JOB_ID = re.compile(r"^J\d{3,}$")
 HEX = re.compile(r"^[0-9a-f]{7,40}$")
@@ -664,3 +670,215 @@ class Collector:
         self.tail.read_new(log)
         items = activity_items(self.tail.events.get(log, []))
         return [i for i in items if i["n"] > after][-limit:]
+
+
+# ---------------------------------------------------------------- 서버 (D8)
+
+PAGE = Path(__file__).resolve().parent / "monitor_page.html"
+FALLBACK_PAGE = (
+    "<!doctype html><meta charset='utf-8'><title>팩토리 대시보드</title>"
+    "<p>scripts/monitor_page.html이 없습니다. API: /api/snapshot</p>"
+)
+CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'none'"
+)
+LIMITS = {"json": 1024 * 1024, "review": 64 * 1024}
+JOB_KEY = r"(?:local-)?J\d{3,}"
+ROUTES = [
+    (re.compile(r"^/$"), "page"),
+    (re.compile(r"^/api/snapshot$"), "snapshot"),
+    (re.compile(r"^/api/settings$"), "settings"),
+    (re.compile(rf"^/api/job/({JOB_KEY})$"), "detail"),
+    (re.compile(rf"^/api/job/({JOB_KEY})/activity$"), "activity"),
+    (re.compile(rf"^/api/job/({JOB_KEY})/review/([\w.-]+)$"), "review"),
+]
+# 자동(auto)일 때 고르는 모델 (factory.stage_model, dispatch.orchestrator_plan과 같은 규칙)
+AUTO_RULES = {
+    "orchestrator": "opus",
+    "builder": "sonnet → 실패 2회 뒤 opus",
+    "reviewer_code": "sonnet",
+    "reviewer_security": "sonnet (HIGH 위험이면 opus)",
+    "reviewer_test": "sonnet",
+}
+
+
+def settings_view(root: Path) -> dict[str, Any]:
+    """설정 패널 (읽기 전용): 단계별 모델·인증, 비용 상한, 자동 규칙."""
+    try:
+        cfg = load_config(root)
+    except ConfigError as error:
+        return {"error": str(error)}
+    return {
+        "stages": cfg.stages,
+        "budgets": cfg.budgets,
+        "auto_rules": AUTO_RULES,
+        "models": CLAUDE_MODELS,
+        "commands": [
+            "python scripts/factory_settings.py show",
+            "python scripts/factory_settings.py set <단계> model <auto|haiku|sonnet|opus>",
+            "python scripts/factory_settings.py set <단계> auth <auto|subscription|api>",
+            "python scripts/factory_settings.py set budgets <키> <값>",
+        ],
+    }
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    """읽기 전용. GET·HEAD만, 정해진 경로만, 같은 출처만."""
+
+    collector: Collector
+    root: Path
+    server_version = "factory-monitor"
+    sys_version = ""
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        return  # 요청 기록을 남기지 않는다 (경로·질의가 터미널에 쌓이지 않게)
+
+    def _send(self, status: int, body: bytes, content_type: str, etag: bool = True) -> None:
+        tag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"' if etag else None
+        if tag and self.headers.get("If-None-Match") == tag:
+            status, body = 304, b""
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if tag:
+            self.send_header("ETag", tag)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _error(self, status: int, message: str) -> None:
+        body = json.dumps({"error": message}, ensure_ascii=False).encode()
+        self._send(status, body, "application/json; charset=utf-8", etag=False)
+
+    def _json(self, data: Any) -> None:
+        body = json.dumps(data, ensure_ascii=False, default=str).encode()
+        if len(body) > LIMITS["json"]:
+            self._error(507, "응답이 너무 큽니다")
+            return
+        self._send(200, body, "application/json; charset=utf-8")
+
+    def _allowed(self) -> bool:
+        port = self.server.server_port  # type: ignore[attr-defined]
+        hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host") not in hosts:
+            self._error(421, "Host가 다릅니다")
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in {f"http://{h}" for h in hosts}:
+            self._error(403, "다른 출처의 요청은 받지 않습니다")
+            return False
+        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            self._error(403, "다른 출처의 요청은 받지 않습니다")
+            return False
+        return True
+
+    def do_GET(self) -> None:  # noqa: N802
+        if not self._allowed():
+            return
+        url = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.unquote(url.path)
+        for pattern, name in ROUTES:
+            match = pattern.match(path)
+            if match:
+                try:
+                    self._route(name, match.groups(), urllib.parse.parse_qs(url.query))
+                except Exception:  # noqa: BLE001 - 경로·스택을 화면에 내보내지 않는다
+                    self._error(500, "내부 오류 (터미널에서 monitor.py를 다시 띄워 보세요)")
+                return
+        self._error(404, "없는 경로")
+
+    do_HEAD = do_GET  # noqa: N815
+
+    def _route(self, name: str, groups: tuple[str, ...], query: dict[str, list[str]]) -> None:
+        if name == "page":
+            body = PAGE.read_bytes() if PAGE.exists() else FALLBACK_PAGE.encode()
+            self._send(200, body, "text/html; charset=utf-8")
+        elif name == "snapshot":
+            self._json(self.collector.snapshot())
+        elif name == "settings":
+            self._json(settings_view(self.root))
+        elif name == "detail":
+            detail = self.collector.detail(groups[0])
+            if detail is None:
+                self._error(404, "없는 작업")
+            else:
+                self._json(detail)
+        elif name == "activity":
+            raw = (query.get("after") or ["0"])[0]
+            after = int(raw) if raw.isdigit() else 0
+            self._json(self.collector.activity(groups[0], after))
+        elif name == "review":
+            self._review(groups[0], groups[1])
+
+    def _review(self, key: str, filename: str) -> None:
+        ref = self.collector._ref(key)
+        job_id = ref["id"] if ref else ""
+        if (
+            ref is None
+            or not ref.get("worktree")
+            or not REVIEW_FILE.match(filename)
+            or not filename.startswith(f"{job_id}-")
+        ):
+            self._error(404, "없는 리뷰 파일")
+            return
+        reviews = Path(ref["worktree"]) / "factory" / "reviews"
+        files = {p.name: p for p in reviews.glob(f"{job_id}-*")} if reviews.exists() else {}
+        target = files.get(filename)  # 경로를 이어 붙이지 않고 목록에서 찾는다
+        if target is None:
+            self._error(404, "없는 리뷰 파일")
+            return
+        data = target.read_bytes()[: LIMITS["review"]]
+        self._send(200, data, "text/plain; charset=utf-8")
+
+    def _method_not_allowed(self) -> None:
+        self.send_response(405)
+        self.send_header("Allow", "GET, HEAD")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
+
+
+def make_server(root: Path, jobs_dir: Path, port: int = 8765) -> http.server.ThreadingHTTPServer:
+    """127.0.0.1에만 연다 (바꾸는 옵션 없음). 포트가 쓰이면 다음 포트를 2개까지 시도."""
+    collector = Collector(root, jobs_dir)
+    handler = type("BoundHandler", (Handler,), {"collector": collector, "root": root})
+    last: OSError | None = None
+    for candidate in [port] if port == 0 else [port, port + 1, port + 2]:
+        try:
+            return http.server.ThreadingHTTPServer(("127.0.0.1", candidate), handler)
+        except OSError as error:
+            last = error
+    raise SystemExit(f"오류: 포트 {port}~{port + 2}를 열 수 없습니다 ({last})")
+
+
+def main(argv: list[str] | None = None, root: Path | None = None) -> int:
+    use_utf8_output()
+    root = root or Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(prog="monitor", description="팩토리 대시보드 (읽기 전용)")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--jobs-dir", type=Path, default=root.parent / f"{root.name}.jobs")
+    parser.add_argument("--no-open", action="store_true", help="브라우저를 열지 않음")
+    args = parser.parse_args(argv)
+    server = make_server(root, args.jobs_dir, args.port)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"팩토리 대시보드: {url} (읽기 전용, Ctrl+C로 끝)")
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

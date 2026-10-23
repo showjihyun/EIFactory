@@ -319,3 +319,96 @@ def test_lanes_and_conflicts() -> None:
     assert j2["segments"][-1]["stage"] == "wait"
     # 팩토리 산출물은 충돌로 보지 않는다
     assert conflicts == [{"a": "J001", "b": "J002", "files": ["frontend/src/List.tsx"]}]
+
+
+# ---------- D8 서버 ----------
+
+import http.client  # noqa: E402
+import threading  # noqa: E402
+
+
+@pytest.fixture
+def server(world: dict[str, Path]):  # type: ignore[no-untyped-def]
+    srv = monitor.make_server(world["root"], world["jobs"], port=0)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    yield srv
+    srv.shutdown()
+    srv.server_close()
+
+
+def req(srv: Any, path: str, method: str = "GET", headers: dict[str, str] | None = None
+        ) -> tuple[int, dict[str, str], bytes]:  # fmt: skip
+    port = srv.server_address[1]
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request(method, path, headers={"Host": f"127.0.0.1:{port}", **(headers or {})})
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp.status, {k.lower(): v for k, v in resp.getheaders()}, body
+
+
+def test_server_binds_loopback_only(server: Any) -> None:
+    assert server.server_address[0] == "127.0.0.1"
+
+
+def test_server_rejects_non_get(server: Any) -> None:
+    for method in ("POST", "PUT", "DELETE", "PATCH"):
+        assert req(server, "/api/snapshot", method)[0] == 405
+
+
+def test_server_checks_host_and_origin(server: Any) -> None:
+    assert req(server, "/api/snapshot", headers={"Host": "evil.com"})[0] == 421
+    assert req(server, "/api/snapshot", headers={"Origin": "http://evil.com"})[0] == 403
+    assert req(server, "/api/snapshot", headers={"Sec-Fetch-Site": "cross-site"})[0] == 403
+    port = server.server_address[1]
+    ok = req(server, "/api/snapshot", headers={"Origin": f"http://127.0.0.1:{port}"})
+    assert ok[0] == 200
+
+
+def test_server_routes_and_security_headers(server: Any) -> None:
+    status, headers, body = req(server, "/api/snapshot")
+    assert status == 200
+    assert "default-src 'self'" in headers["content-security-policy"]
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["cache-control"] == "no-store"
+    assert "access-control-allow-origin" not in headers
+    assert json.loads(body)["repo"]["base"] == "main"
+    assert req(server, "/api/job/J002")[0] == 200
+    assert req(server, "/api/job/J777")[0] == 404
+    assert req(server, "/api/job/..%2F..%2Fetc")[0] == 404
+    assert req(server, "/api/nope")[0] == 404
+    assert req(server, "/")[0] == 200
+    settings = json.loads(req(server, "/api/settings")[2])
+    assert "reviewer_test" in settings["stages"] and "job_total" in settings["budgets"]
+
+
+def test_server_etag_304(server: Any) -> None:
+    _, headers, _ = req(server, "/api/job/J002")
+    status, _, body = req(server, "/api/job/J002", headers={"If-None-Match": headers["etag"]})
+    assert status == 304 and body == b""
+
+
+def test_server_review_file_is_text_and_limited(server: Any, world: dict[str, Path]) -> None:
+    status, headers, body = req(server, "/api/job/J002/review/J002-1-code.txt")
+    assert status == 200 and headers["content-type"].startswith("text/plain")
+    assert b"<script>" in body  # 원문 그대로 (화면이 textContent로 넣는다)
+    assert req(server, "/api/job/J002/review/..%2Fstate.json")[0] == 404
+    assert req(server, "/api/job/J002/review/J001-1-code.txt")[0] == 404  # 다른 작업 파일
+    big = world["jobs"] / "J002" / "factory" / "reviews" / "J002-1-test.txt"
+    big.write_text("x" * 100_000, encoding="utf-8")
+    assert len(req(server, "/api/job/J002/review/J002-1-test.txt")[2]) <= 64 * 1024 + 100
+
+
+def test_server_internal_error_hides_details(server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(self: Any) -> None:
+        raise RuntimeError("C:/secret/path")
+
+    monkeypatch.setattr(monitor.Collector, "snapshot", boom)
+    status, _, body = req(server, "/api/snapshot")
+    assert status == 500 and b"secret" not in body
+
+
+def test_activity_endpoint(server: Any) -> None:
+    items = json.loads(req(server, "/api/job/J001/activity?after=0")[2])
+    assert items and all("[가림]" in i["text"] or "SECRET" not in i["text"] for i in items)
