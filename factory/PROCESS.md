@@ -48,6 +48,22 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
 | `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
+### 단계별 모델·인증 (`factory/config.json`의 `stages`)
+
+| 단계 | 자동(auto) 모델 | 인증 |
+|---|---|---|
+| `orchestrator` (dispatch 세션) | Opus 5.5 | auto·subscription·api |
+| `builder` (서브에이전트) | Sonnet 5.5, 실패 2회 뒤 Opus 5.5 | 오케스트레이터를 따름 (auto만) |
+| `reviewer_code`, `reviewer_test` | Sonnet 5.5 | auto·subscription·api |
+| `reviewer_security` | Sonnet 5.5, HIGH 위험이면 Opus 5.5 | auto·subscription·api |
+
+- 모델은 Claude 최신 세 가지만 (`haiku`=claude-haiku-5-5, `sonnet`=claude-sonnet-5-5, `opus`=claude-opus-5-5). 우선순위: `FACTORY_MODEL_<단계>` 환경변수 > 설정 > 자동. 오케스트레이터는 `dispatch.py --model`이 가장 우선.
+- 사람이 정한 Builder 모델은 실패가 쌓여도 승격하지 않는다. Builder 모델은 `new` 때 정해진다 (진행 중 작업은 그대로).
+- 인증 auto = `ANTHROPIC_API_KEY`가 있으면 API, 없으면 구독. 오케스트레이터가 구독이면 dispatch가 키를 세션에서 숨기고(`FACTORY_ANTHROPIC_API_KEY_STASH`), api로 정한 리뷰어에만 되돌려 준다. 키 값은 출력·기록하지 않는다.
+- 컨테이너 격리는 API 키만 쓴다: 오케스트레이터·리뷰어를 subscription으로 두면 dispatch가 시작하지 않는다.
+- 쓴 모델·인증과 이유는 작업 기록 `models`(단계별 `model`, `source`, `reason`, `auth`)와 dispatch 결과 `orchestrator`, `meta/<ID>/session.json`에 남는다.
+- 바꾸기: `python scripts/factory_settings.py show` / `set <단계> model|auth <값>` (사람 전용, guard·권한 deny로 막음).
+
 ### 작업 검증 범위 (`factory/config.json`의 `job_verify`)
 
 `verify`와 머지 전 재검증은 작업 diff(기준점 대비, 추적 안 되는 새 파일 포함)를 보고 검증 범위를 정한다. diff에 `full_if_changed` 경로나 키트 파일(`scripts/`, 정책·절차 파일, 도구 래퍼, `docker/`, `.devcontainer/`)이 없으면 `args`(샘플 레포: `--skip scripts`)를 붙여 팩토리 자체 테스트를 건너뛴다. 작업은 `scripts/`를 바꿀 수 없으므로(잠금) 그 결과가 작업마다 같기 때문이다. 하나라도 있으면 전체를 검증한다. 붙인 인자는 검증 기록의 `verify_args`에 남는다. 사람이 `scripts/`를 고칠 때는 `python scripts/verify.py` 전체를 직접 돌린다.

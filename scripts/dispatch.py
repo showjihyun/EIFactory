@@ -56,7 +56,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from factory_config import DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
+from factory_config import CLAUDE_MODELS, DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
 from report import session_usage  # noqa: E402
 
@@ -89,7 +89,10 @@ HOST_ONLY_SETTINGS = {
     "FACTORY_ROOT",
     "FACTORY_AGENT_SESSION",
     "FACTORY_DOCKER_NO_PROXY",
+    "FACTORY_ANTHROPIC_API_KEY_STASH",
 }
+# 오케스트레이터가 구독으로 돌 때 API 키를 숨겨 두는 이름 (리뷰어 중 API를 쓰는 것만 되돌려 쓴다)
+API_KEY_STASH = "FACTORY_ANTHROPIC_API_KEY_STASH"
 
 PROMPT = (
     "factory 스킬로 배정된 작업 {job_id}를 처리해. 요구사항: {requirement}\n"
@@ -143,6 +146,11 @@ def _factory(
     return _run([sys.executable, str(root / "scripts/factory.py"), *args], worktree, full_env)
 
 
+def auth_label(plan: dict[str, str]) -> str:
+    return {"api": "API 키 (환경변수)", "subscription": "로그인 세션 (구독)",
+            "login": "로그인 세션 (codex login)"}.get(plan["auth"], plan["auth"])  # fmt: skip
+
+
 def auth_mode(agent: str = "claude") -> str:
     if any(os.environ.get(name) for name in API_KEYS[agent]):
         return "API 키 (환경변수)"
@@ -160,6 +168,67 @@ def api_key_names(agents: list[str]) -> list[str]:
             )
         names.append(found)
     return names
+
+
+def orchestrator_plan(
+    root: Path, agent: str, model: str | None, auth: str | None, docker: bool
+) -> dict[str, str]:
+    """오케스트레이터 세션의 모델·인증 (기획안 6.6).
+
+    모델: --model > FACTORY_MODEL_ORCHESTRATOR > 설정 stages.orchestrator > 자동(Opus).
+    인증: --auth > 설정 > 자동(ANTHROPIC_API_KEY가 있으면 API, 없으면 구독).
+    컨테이너는 API 키만 쓴다 (구독 자격 증명을 넣지 않는다, 기획안 9장).
+    """
+    if agent != "claude":
+        has_key = any(os.environ.get(n) for n in API_KEYS[agent])
+        return {"model": model or DEFAULT_MODELS[agent], "alias": model or DEFAULT_MODELS[agent],
+                "source": "cli" if model else "auto", "reason": f"{agent} 기본",
+                "auth": "api" if has_key else "login"}  # fmt: skip
+    stage = load_config(root).stages["orchestrator"]
+    env_model = os.environ.get("FACTORY_MODEL_ORCHESTRATOR")
+    if model:
+        alias, source, reason = model, "cli", "--model로 지정"
+    elif env_model:
+        alias, source, reason = env_model, "env", "환경변수로 지정"
+    elif stage["model"] != "auto":
+        alias, source, reason = stage["model"], "config", "설정으로 지정"
+    else:
+        alias, source, reason = "opus", "auto", "오케스트레이터 기본"
+    if alias not in CLAUDE_MODELS:
+        raise DispatchError(
+            f"모델 {alias}: 가능한 모델은 {', '.join(CLAUDE_MODELS)} (최신 세 가지)"
+        )
+    setting = auth or stage["auth"]
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    mode = ("api" if has_key else "subscription") if setting == "auto" else setting
+    if mode == "api" and not has_key:
+        raise DispatchError("오케스트레이터 인증이 api인데 ANTHROPIC_API_KEY가 없습니다")
+    if mode == "subscription" and docker:
+        raise DispatchError("컨테이너 격리는 API 키만 씁니다 (오케스트레이터 인증을 api로)")
+    return {"model": CLAUDE_MODELS[alias], "alias": alias, "source": source, "reason": reason,
+            "auth": mode}  # fmt: skip
+
+
+def check_container_stages(root: Path) -> None:
+    """컨테이너에는 구독 로그인이 없으므로 리뷰어 인증을 subscription으로 둘 수 없다."""
+    stages = load_config(root).stages
+    bad = [name for name, item in stages.items() if item["auth"] == "subscription"]
+    if bad:
+        raise DispatchError(
+            f"컨테이너 격리는 API 키만 씁니다: {', '.join(bad)}의 auth를 api나 auto로"
+        )
+
+
+def session_auth_env(plan: dict[str, str]) -> tuple[dict[str, str], tuple[str, ...]]:
+    """세션에 넣을 환경변수와 지울 환경변수.
+
+    구독이면 claude가 키를 쓰지 않도록 ANTHROPIC_API_KEY를 지우고, 키가 있으면 다른 이름으로
+    넘겨 리뷰어 중 api로 정한 것만 쓰게 한다 (factory.stage_auth). 키 값은 출력·기록하지 않는다.
+    """
+    if plan.get("auth") != "subscription":
+        return {}, ()
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    return ({API_KEY_STASH: key} if key else {}), ("ANTHROPIC_API_KEY",)
 
 
 def allowed_tools(root: Path) -> list[str]:
@@ -531,7 +600,7 @@ def run_job(
     info.write_text(
         json.dumps(
             {"isolation": "docker" if docker else "host", "image": image, "stamp": stamp,
-             "agent": args.agent},
+             "agent": args.agent, "orchestrator": args.plan},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -559,6 +628,10 @@ def run_job(
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
     host_merge = merges_on_host(args.agent, docker is not None)
     session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
+    add, unset = session_auth_env(args.plan)
+    session_env.update(add)
+    for name in unset:
+        session_env.pop(name, None)
     if host_merge:
         session_env["FACTORY_MERGE_ON_HOST"] = "1"
     log_path = logs / f"{job_id}.jsonl"
@@ -705,6 +778,7 @@ def _agent_env(args: argparse.Namespace) -> dict[str, str]:
 def _summary(report: dict[str, Any]) -> str:
     lines = [
         f"도구: {report['agent']} (리뷰어 {report['review_agent']}), "
+        f"오케스트레이터 {report['orchestrator']['alias']} ({report['orchestrator']['source']}), "
         f"인증: {report['auth']}, 격리 {report['isolation']}, "
         f"동시 실행 {report['max_parallel']}개, base {report['base']}",
         "",
@@ -747,7 +821,12 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     )
     parser.add_argument("--agent", choices=sorted(DEFAULT_MODELS), default="claude")
     parser.add_argument("--review-agent", choices=sorted(DEFAULT_MODELS), help="기본: --agent")
-    parser.add_argument("--model", help="오케스트레이터 모델 (기본: 도구별 DEFAULT_MODELS)")
+    parser.add_argument(
+        "--model", help="오케스트레이터 모델 (claude: haiku|sonnet|opus, 기본: 설정·자동)"
+    )
+    parser.add_argument(
+        "--auth", choices=["subscription", "api"], help="오케스트레이터 인증 (기본: 설정·자동)"
+    )
     parser.add_argument("--isolation", choices=["host", "docker"], default="host")
     parser.add_argument("--require-api-key", action="store_true")
     parser.add_argument("--keep-merged", action="store_true", help="머지된 worktree도 남김")
@@ -766,7 +845,6 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         print("오류: 요구사항이 필요합니다 (또는 --approve / --reject)")
         return 2
     args.review_agent = args.review_agent or args.agent
-    args.model = args.model or DEFAULT_MODELS[args.agent]
     args.keys = None
 
     image: str | None = None
@@ -796,6 +874,12 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             load_config(root)
         except ConfigError as error:
             raise DispatchError(str(error)) from error
+        # 가짜 오케스트레이터(FACTORY_AGENT_CMD)로 시험할 때는 컨테이너 인증 조건을 보지 않는다
+        real_docker = args.isolation == "docker" and not os.environ.get("FACTORY_AGENT_CMD")
+        args.plan = orchestrator_plan(root, args.agent, args.model, args.auth, real_docker)
+        if real_docker:
+            check_container_stages(root)
+        args.model = args.plan["model"]
         if args.isolation == "docker":
             image = prepare_docker(root)
     except DispatchError as error:
@@ -804,7 +888,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     print(
-        f"도구: {args.agent}, 인증: {auth_mode(args.agent)}, 격리 {args.isolation}, "
+        f"도구: {args.agent}, 오케스트레이터 {args.plan['alias']} ({args.plan['source']}), "
+        f"인증: {auth_label(args.plan)}, 격리 {args.isolation}, "
         f"작업 {len(args.requirements)}개, 동시 {args.max_parallel}개"
     )
     with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
@@ -824,7 +909,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "started": stamp,
         "agent": args.agent,
         "review_agent": args.review_agent,
-        "auth": auth_mode(args.agent),
+        "auth": auth_label(args.plan),
+        "orchestrator": args.plan,
         "isolation": args.isolation,
         "image": image,
         "base": base,

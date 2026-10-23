@@ -559,3 +559,73 @@ def test_approve_unknown_job_fails(repo: Path) -> None:
 
 def test_requirements_are_required_without_approve(repo: Path) -> None:
     assert dispatch.main([], root=repo) == 2
+
+
+# ---------- 오케스트레이터 모델·인증 (단계 설정) ----------
+
+
+def set_stages(repo: Path, stages: dict[str, Any]) -> None:
+    config = repo / "factory" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["stages"] = stages
+    config.write_text(json.dumps(data), encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "stages")
+
+
+def test_orchestrator_model_auto_config_and_cli(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FACTORY_MODEL_ORCHESTRATOR", raising=False)
+    plan = dispatch.orchestrator_plan(repo, "claude", model=None, auth=None, docker=False)
+    assert (plan["model"], plan["source"]) == ("claude-opus-5-5", "auto")
+    set_stages(repo, {"orchestrator": {"model": "sonnet"}})
+    plan = dispatch.orchestrator_plan(repo, "claude", model=None, auth=None, docker=False)
+    assert (plan["model"], plan["source"]) == ("claude-sonnet-5-5", "config")
+    plan = dispatch.orchestrator_plan(repo, "claude", model="haiku", auth=None, docker=False)
+    assert (plan["model"], plan["source"]) == ("claude-haiku-5-5", "cli")
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.orchestrator_plan(repo, "claude", model="claude-3-opus", auth=None, docker=False)
+
+
+def test_orchestrator_auth_choices(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    auto = dispatch.orchestrator_plan(repo, "claude", model=None, auth=None, docker=False)
+    assert auto["auth"] == "subscription"
+    with pytest.raises(dispatch.DispatchError):  # api인데 키 없음
+        dispatch.orchestrator_plan(repo, "claude", model=None, auth="api", docker=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-not-a-real-key")
+    assert dispatch.orchestrator_plan(repo, "claude", None, None, docker=False)["auth"] == "api"
+    set_stages(repo, {"orchestrator": {"auth": "subscription"}})
+    sub = dispatch.orchestrator_plan(repo, "claude", model=None, auth=None, docker=False)
+    assert sub["auth"] == "subscription"
+    # 컨테이너에는 구독 자격 증명을 넣지 않는다 (API 키 전용)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.orchestrator_plan(repo, "claude", model=None, auth=None, docker=True)
+
+
+def test_subscription_session_hides_key_but_stashes_it_for_reviewers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-not-a-real-key")
+    add, unset = dispatch.session_auth_env({"auth": "subscription"})
+    assert "ANTHROPIC_API_KEY" in unset
+    assert add == {"FACTORY_ANTHROPIC_API_KEY_STASH": "dummy-not-a-real-key"}
+    assert dispatch.session_auth_env({"auth": "api"}) == ({}, ())
+    assert "FACTORY_ANTHROPIC_API_KEY_STASH" in dispatch.HOST_ONLY_SETTINGS
+
+
+def test_report_and_session_info_record_orchestrator(repo: Path) -> None:
+    _, report = run(repo, "요구사항")
+    assert report["orchestrator"]["source"] == "auto"
+    assert report["orchestrator"]["auth"] in {"subscription", "api"}
+    info = dispatch.session_info(repo, report["jobs"][0]["job_id"])
+    assert info["orchestrator"]["model"] == report["orchestrator"]["model"]
+
+
+def test_docker_refuses_subscription_reviewers(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-not-a-real-key")
+    set_stages(repo, {"reviewer_security": {"auth": "subscription"}})
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.check_container_stages(repo)
+    set_stages(repo, {"reviewer_security": {"auth": "api"}})
+    dispatch.check_container_stages(repo)

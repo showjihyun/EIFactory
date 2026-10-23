@@ -24,7 +24,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from factory_config import Config, ConfigError, load_config  # noqa: E402
+from factory_config import CLAUDE_MODELS, Config, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
 
 Job = dict[str, Any]
@@ -270,13 +270,22 @@ def _command(kind: str, default: list[str]) -> list[str]:
 
 
 def _run(
-    cmd: list[str], root: Path, stdin: str | None = None, env: dict[str, str] | None = None
+    cmd: list[str],
+    root: Path,
+    stdin: str | None = None,
+    env: dict[str, str] | None = None,
+    unset: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
+    full = None
+    if env or unset:
+        full = {**os.environ, **(env or {})}
+        for name in unset:
+            full.pop(name, None)
     return subprocess.run(
         resolve_command(cmd),
         cwd=root,
         input=stdin,
-        env={**os.environ, **env} if env else None,
+        env=full,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -585,11 +594,78 @@ def _agent(name: str = "FACTORY_AGENT", default: str = "claude") -> str:
     return agent
 
 
+API_KEY = "ANTHROPIC_API_KEY"
+# 오케스트레이터가 구독으로 돌 때 dispatch가 키를 이 이름으로 넘긴다 (claude가 키를 쓰지 않게).
+# API 키를 쓰는 리뷰어 프로세스에만 ANTHROPIC_API_KEY로 되돌려 준다. 값은 출력·기록하지 않는다
+API_KEY_STASH = "FACTORY_ANTHROPIC_API_KEY_STASH"
+
+
+def stage_model(root: Path, stage: str, job: Job) -> dict[str, str]:
+    """단계 모델: 환경변수(FACTORY_MODEL_<단계>) > 설정(stages) > 자동 규칙.
+
+    반환 {"alias", "model", "source": env|config|auto, "reason"}. Claude만 단계 설정을 쓴다.
+    """
+    agent = job.get("agent", "claude")
+    if agent != "claude":
+        name = MODELS[agent]["builder" if stage == "builder" else "reviewer"]
+        return {"alias": name, "model": name, "source": "auto", "reason": f"{agent} 기본"}
+    override = os.environ.get(f"FACTORY_MODEL_{stage.upper()}")
+    if override:
+        if override not in CLAUDE_MODELS:
+            raise FactoryError(
+                f"FACTORY_MODEL_{stage.upper()}={override} (가능: {', '.join(CLAUDE_MODELS)})"
+            )
+        alias, source, reason = override, "env", "환경변수로 지정"
+    elif _config(root).stages[stage]["model"] != "auto":
+        alias, source, reason = _config(root).stages[stage]["model"], "config", "설정으로 지정"
+    else:
+        source = "auto"
+        if stage == "builder" and job.get("attempts", 0) >= PROMOTE_AFTER:
+            alias, reason = "opus", f"실패 {job.get('attempts', 0)}회 → 상위 모델로 승격"
+        elif stage == "builder":
+            alias, reason = "sonnet", "Builder 기본 (경량 시작)"
+        elif stage == "reviewer_security" and job.get("risk") == "HIGH":
+            alias, reason = "opus", "HIGH 위험의 보안 리뷰"
+        elif stage == "orchestrator":
+            alias, reason = "opus", "오케스트레이터 기본"
+        else:
+            alias, reason = "sonnet", "리뷰어 기본"
+    return {"alias": alias, "model": CLAUDE_MODELS[alias], "source": source, "reason": reason}
+
+
+def stage_auth(root: Path, stage: str) -> tuple[str, dict[str, str], tuple[str, ...]]:
+    """리뷰어 프로세스의 인증: (방식, 넣을 환경변수, 지울 환경변수).
+
+    auto는 지금 환경을 따른다 (ANTHROPIC_API_KEY가 있으면 API, 없으면 구독).
+    """
+    setting = _config(root).stages[stage]["auth"]
+    key = os.environ.get(API_KEY) or os.environ.get(API_KEY_STASH)
+    if setting == "api" and not key:
+        raise FactoryError(f"{stage}: 인증이 api인데 API 키가 없습니다 ({API_KEY})")
+    if setting == "api" or (setting == "auto" and os.environ.get(API_KEY)):
+        add = {} if os.environ.get(API_KEY) else {API_KEY: str(key)}
+        return "api", add, (API_KEY_STASH,)
+    return "subscription", {}, (API_KEY, API_KEY_STASH)
+
+
 def _maybe_promote(job: Job) -> None:
-    """실패가 PROMOTE_AFTER회 쌓이면 다음 Builder를 상위 모델로 올린다 (기획안 6.6)."""
-    strong = MODELS[job.get("agent", "claude")]["builder_strong"]
-    if job["attempts"] >= PROMOTE_AFTER and job.get("builder_model") != strong:
+    """실패가 PROMOTE_AFTER회 쌓이면 다음 Builder를 상위 모델로 올린다 (기획안 6.6).
+
+    사람이 모델을 정했으면(설정·환경변수) 바꾸지 않는다.
+    """
+    current = (job.get("models") or {}).get("builder") or {"source": "auto"}
+    if current.get("source") != "auto" or job["attempts"] < PROMOTE_AFTER:
+        return
+    if job.get("agent", "claude") == "claude":
+        strong = "opus"
+        info = {"alias": strong, "model": CLAUDE_MODELS[strong], "source": "auto",
+                "reason": f"실패 {job['attempts']}회 → 상위 모델로 승격"}  # fmt: skip
+    else:
+        strong = MODELS[job["agent"]]["builder_strong"]
+        info = {"alias": strong, "model": strong, "source": "auto", "reason": "실패 누적 승격"}
+    if job.get("builder_model") != strong:
         job["builder_model"] = strong
+        job.setdefault("models", {})["builder"] = info
         job.setdefault("model_changes", []).append(
             {"attempt": job["attempts"], "model": strong, "reason": "실패 누적", "at": now()}
         )
@@ -764,7 +840,8 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "approval": None,
         "approval_brief": None,
         "agent": agent,
-        "builder_model": MODELS[agent]["builder"],
+        "builder_model": None,
+        "models": {},
         "model_changes": [],
         "blocked": None,
         "time": {
@@ -775,6 +852,9 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         },
         "history": [{"status": "QUEUED", "at": at}],
     }
+    job = state["jobs"][job_id]
+    builder = stage_model(root, "builder", job)
+    job["builder_model"], job["models"] = builder["alias"], {"builder": builder}
     state["active"] = job_id
     return f"{job_id} 생성 (브랜치 {branch}). 다음: {SPECS_DIR}/{job_id}.md 작성 후 spec {job_id}"
 
@@ -968,9 +1048,9 @@ def _parse_verdict(text: str) -> dict[str, Any] | None:
     return None
 
 
-def reviewer_command(agent: str, out_file: Path) -> list[str]:
+def reviewer_command(agent: str, out_file: Path, model: str | None = None) -> list[str]:
     """읽기 전용 리뷰어 프로세스. 프롬프트는 stdin으로 넘긴다."""
-    model = MODELS[agent]["reviewer"]
+    model = model or MODELS[agent]["reviewer"]
     if agent == "codex":
         return [
             "codex",
@@ -1016,18 +1096,31 @@ def _usage(envelope: dict[str, Any]) -> dict[str, Any]:
     return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens}
 
 
+def _reviewer_plan(root: Path, job: Job, reviewer: str) -> dict[str, Any]:
+    """리뷰어 하나의 모델·인증. 리뷰어를 띄우기 전에 전부 정한다 (키가 없으면 아무것도 안 띄움)."""
+    agent = _agent("FACTORY_REVIEW_AGENT", job.get("agent", "claude"))
+    stage = f"reviewer_{reviewer}"
+    info = stage_model(root, stage, {**job, "agent": agent})
+    if agent == "claude":
+        auth, add, unset = stage_auth(root, stage)
+    else:
+        auth, add, unset = "codex", {}, (API_KEY_STASH,)
+    return {"agent": agent, "info": {**info, "auth": auth}, "add": add, "unset": unset}
+
+
 def _run_reviewer(
-    root: Path, job: Job, reviewer: str, path: Path
+    root: Path, job: Job, reviewer: str, path: Path, plan: dict[str, Any]
 ) -> tuple[str, str, dict[str, Any]]:
     """리뷰어 하나를 실행하고 (최종 응답, stderr, 비용·토큰)을 돌려준다."""
-    agent = _agent("FACTORY_REVIEW_AGENT", job.get("agent", "claude"))
+    agent = plan["agent"]
     last_message = path.with_suffix(".last")
-    cmd = _command("validator", reviewer_command(agent, last_message))
+    cmd = _command("validator", reviewer_command(agent, last_message, plan["info"]["model"]))
     proc = _run(
         cmd,
         root,
         stdin=build_validator_prompt(root, job, reviewer),
-        env={"FACTORY_REVIEWER": reviewer},
+        env={"FACTORY_REVIEWER": reviewer, **plan["add"]},
+        unset=plan["unset"],
     )
     text = proc.stdout
     usage: dict[str, Any] = {"cost_usd": None, "tokens": None}
@@ -1092,11 +1185,18 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
     (root / REVIEWS_DIR).mkdir(parents=True, exist_ok=True)
     round_no = 1 + max((int(r.get("round", 0)) for r in job["reviews"]), default=0)
     paths = {name: root / REVIEWS_DIR / f"{job_id}-{round_no}-{name}.txt" for name in REVIEWERS}
+    plans = {name: _reviewer_plan(root, job, name) for name in REVIEWERS}
+    models = job.setdefault("models", {})
+    for name in REVIEWERS:
+        models[f"reviewer_{name}"] = plans[name]["info"]
     with ThreadPoolExecutor(max_workers=len(REVIEWERS)) as pool:
         outputs = dict(
             zip(
                 REVIEWERS,
-                pool.map(lambda name: _run_reviewer(root, job, name, paths[name]), REVIEWERS),
+                pool.map(
+                    lambda name: _run_reviewer(root, job, name, paths[name], plans[name]),
+                    REVIEWERS,
+                ),
                 strict=True,
             )
         )
@@ -1367,9 +1467,7 @@ def _merge_steps(root: Path, state: State, job: Job, approved_now: bool) -> tupl
     )
 
 
-def cmd_merge(
-    root: Path, state: State, job_id: str, approved_now: bool = False
-) -> tuple[int, str]:
+def cmd_merge(root: Path, state: State, job_id: str, approved_now: bool = False) -> tuple[int, str]:
     """승인된 작업을 base 브랜치에 머지한다 (기획안 8.3). 한 번에 하나씩 (merge lock)."""
     job = _job(state, job_id)
     _require(job, "APPROVED")

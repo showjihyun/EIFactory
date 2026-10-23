@@ -73,3 +73,43 @@ def test_sample_repo_skips_scripts_for_jobs() -> None:
     assert cfg.job_verify_args == ["--skip", "scripts"]
     for path in ("scripts/*", "frontend/package.json", ".devcontainer/*", "backend/uv.lock"):
         assert path in cfg.job_verify_full_if_changed
+
+
+# ---------- 단계별 모델·인증 (stages) ----------
+
+
+def test_claude_models_are_the_latest_three() -> None:
+    assert factory_config.CLAUDE_MODELS == {
+        "haiku": "claude-haiku-5-5",
+        "sonnet": "claude-sonnet-5-5",
+        "opus": "claude-opus-5-5",
+    }
+
+
+def test_stage_settings_default_to_auto(tmp_path: Path) -> None:
+    cfg = factory_config.load_config(tmp_path)
+    assert set(cfg.stages) == set(factory_config.STAGES)
+    for stage in factory_config.STAGES:
+        assert cfg.stages[stage] == {"model": "auto", "auth": "auto"}
+
+
+def test_stage_settings_from_config(tmp_path: Path) -> None:
+    write(tmp_path, {"stages": {"reviewer_test": {"model": "haiku", "auth": "subscription"}}})
+    cfg = factory_config.load_config(tmp_path)
+    assert cfg.stages["reviewer_test"] == {"model": "haiku", "auth": "subscription"}
+    assert cfg.stages["orchestrator"] == {"model": "auto", "auth": "auto"}
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        {"reviewer_code": {"model": "claude-3-opus"}},  # 최신 세 모델 별칭만
+        {"reviewer_code": {"auth": "free"}},
+        {"planner": {"model": "opus"}},  # 모르는 단계
+        {"builder": {"auth": "api"}},  # Builder는 오케스트레이터 세션의 인증을 따른다
+    ],
+)
+def test_invalid_stage_settings_are_rejected(tmp_path: Path, stages: dict[str, object]) -> None:
+    write(tmp_path, {"stages": stages})
+    with pytest.raises(factory_config.ConfigError):
+        factory_config.load_config(tmp_path)

@@ -56,7 +56,7 @@ CLOSED = {"MERGED", "DROPPED"}
 FACTORY_CMD = re.compile(r"^\s*(uv run (--\S+ \S+ )*)?python3?\s+scripts/factory\.py\b")
 HUMAN_ONLY = re.compile(r"scripts/factory\.py\s+(approve\b|resume\b|drop\b|recover\b.*--force)")
 LOCK_FREE = re.compile(r"scripts/factory\.py\s+(status|recover)\b")
-DISPATCH = re.compile(r"scripts/(dispatch|issues)\.py\b")
+DISPATCH = re.compile(r"scripts/(dispatch|issues|factory_settings)\.py\b")
 GIT_PUSH = re.compile(r"\bgit\s+push\b")
 GIT_STATE = re.compile(
     r"\bgit\s+(commit|checkout|switch|reset|rebase|merge|branch|stash|restore|clean|tag|"
@@ -229,7 +229,7 @@ def check_bash(command: str, job: dict[str, Any] | None) -> None:
         deny("approve·resume·drop·recover --force는 사람 전용 명령입니다.")
     if DISPATCH.search(command):
         deny(
-            "dispatch.py·issues.py(병렬 실행)는 사람 전용입니다. "
+            "dispatch.py·issues.py(병렬 실행)·factory_settings.py(설정)는 사람 전용입니다. "
             "세션 안에서 다른 세션을 띄우지 않습니다."
         )
     if GIT_PUSH.search(command):

@@ -8,6 +8,13 @@
   "changed_test": "(?!)",
   "acceptance_tests": [],
   "setup": [],
+  "stages": {
+    "orchestrator": {"model": "auto", "auth": "auto"},
+    "builder": {"model": "auto", "auth": "auto"},
+    "reviewer_code": {"model": "auto", "auth": "auto"},
+    "reviewer_security": {"model": "auto", "auth": "auto"},
+    "reviewer_test": {"model": "auto", "auth": "auto"}
+  },
   "job_verify": {
     "args": [],
     "full_if_changed": []

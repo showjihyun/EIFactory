@@ -23,6 +23,7 @@ sys.stdin.reconfigure(encoding="utf-8")  # factory.py는 UTF-8로 넘긴다
 stdin = sys.stdin.read() if kind == "validator" else ""
 row = {"kind": kind, "args": sys.argv[2:], "stdin": stdin}
 row["reviewer"] = os.environ.get("FACTORY_REVIEWER")
+row["has_api_key"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
 # 호출마다 파일 하나 (리뷰어는 병렬로 돌아 한 파일에 쓰면 줄이 섞인다)
 import time
 name = f"{time.time_ns():020d}-{os.getpid()}.json"
@@ -1503,3 +1504,100 @@ def test_untrusted_approve_by_human_merges_high_job(
     monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
     assert h.run("approve", "J001") == 0
     assert h.job()["status"] == "MERGED"
+
+
+# ---------- 단계별 모델·인증 ----------
+
+
+def set_stages(h: Harness, stages: dict[str, Any]) -> None:
+    config = h.repo / "factory" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["stages"] = stages
+    config.write_text(json.dumps(data), encoding="utf-8")
+    git(h.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "stages")
+
+
+def test_builder_model_is_chosen_automatically(h: Harness) -> None:
+    h.to_building()
+    job = h.job()
+    assert job["builder_model"] == "sonnet"
+    assert job["models"]["builder"]["source"] == "auto"
+    assert job["models"]["builder"]["model"] == "claude-sonnet-5-5"
+
+
+def test_builder_model_from_config_is_not_promoted(h: Harness) -> None:
+    set_stages(h, {"builder": {"model": "haiku"}})
+    h.to_building()
+    assert h.job()["builder_model"] == "haiku"
+    assert h.job()["models"]["builder"]["source"] == "config"
+    h.configure(
+        red=RED_OK, green=GREEN_OK, verify=[verify_fail("a"), verify_fail("b")], validator=""
+    )
+    h.run("verify", "J001")
+    h.run("verify", "J001")
+    # 사람이 정한 모델은 실패가 쌓여도 바꾸지 않는다
+    assert h.job()["builder_model"] == "haiku"
+    assert not h.job().get("model_changes")
+
+
+def test_stage_model_env_override_wins(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    set_stages(h, {"builder": {"model": "haiku"}})
+    monkeypatch.setenv("FACTORY_MODEL_BUILDER", "opus")
+    h.to_building()
+    assert h.job()["builder_model"] == "opus"
+    assert h.job()["models"]["builder"]["source"] == "env"
+
+
+def test_reviewer_models_per_stage(h: Harness) -> None:
+    set_stages(h, {"reviewer_test": {"model": "haiku"}})
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    models = h.job()["models"]
+    assert models["reviewer_code"]["model"] == "claude-sonnet-5-5"
+    assert models["reviewer_test"]["model"] == "claude-haiku-5-5"
+    # HIGH 위험의 보안 리뷰는 자동으로 상위 모델
+    assert models["reviewer_security"]["model"] == "claude-opus-5-5"
+    assert "HIGH" in models["reviewer_security"]["reason"]
+
+
+def test_reviewer_command_takes_the_stage_model() -> None:
+    cmd = factory.reviewer_command("claude", Path("out.txt"), model="claude-haiku-5-5")
+    assert cmd[cmd.index("--model") + 1] == "claude-haiku-5-5"
+
+
+def test_reviewer_subscription_auth_drops_api_key(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-not-a-real-key")
+    set_stages(h, {"reviewer_code": {"auth": "subscription"}})
+    to_validated(h)
+    calls = {c["reviewer"]: c for c in h.calls("validator")}
+    assert calls["code"]["has_api_key"] is False
+    assert calls["security"]["has_api_key"] is True
+    assert h.job()["models"]["reviewer_code"]["auth"] == "subscription"
+    assert h.job()["models"]["reviewer_security"]["auth"] == "api"
+
+
+def test_reviewer_api_auth_without_key_keeps_state(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("FACTORY_ANTHROPIC_API_KEY_STASH", raising=False)
+    set_stages(h, {"reviewer_code": {"auth": "api"}})
+    h.to_building()
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") != 0
+    assert h.job()["status"] == "VERIFYING"
+    assert h.calls("validator") == []
+
+
+def test_reviewer_api_auth_uses_stashed_key(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 오케스트레이터가 구독으로 돌 때 dispatch는 키를 다른 이름으로 넘긴다 (claude가 쓰지 않게)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("FACTORY_ANTHROPIC_API_KEY_STASH", "dummy-not-a-real-key")
+    set_stages(h, {"reviewer_code": {"auth": "api"}})
+    to_validated(h)
+    calls = {c["reviewer"]: c for c in h.calls("validator")}
+    assert calls["code"]["has_api_key"] is True
+    assert calls["test"]["has_api_key"] is False  # auto: 오케스트레이터와 같은 구독

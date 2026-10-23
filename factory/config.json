@@ -53,6 +53,14 @@
     ["backend", ["uv", "sync", "-q"]],
     ["frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]]
   ],
+  "stages": {
+    "_설명": "단계별 모델(auto|haiku|sonnet|opus)과 인증(auto|subscription|api). 바꿀 때는 python scripts/factory_settings.py set <단계> model|auth <값> (사람 전용). auto 규칙은 factory.py stage_model",
+    "orchestrator": {"model": "auto", "auth": "auto"},
+    "builder": {"model": "auto", "auth": "auto"},
+    "reviewer_code": {"model": "auto", "auth": "auto"},
+    "reviewer_security": {"model": "auto", "auth": "auto"},
+    "reviewer_test": {"model": "auto", "auth": "auto"}
+  },
   "job_verify": {
     "_설명": "작업 diff에 full_if_changed 경로가 없으면 scripts 영역(팩토리 자체 테스트, 약 3.5분)을 건너뛴다. scripts/와 정책·도구 파일은 코드가 항상 추가한다.",
     "args": ["--skip", "scripts"],

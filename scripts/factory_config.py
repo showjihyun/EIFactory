@@ -16,6 +16,18 @@ from typing import Any
 CONFIG_PATH = "factory/config.json"
 DEFAULT_WORKDIR = "/workspaces/bookmark-factory"
 
+# Claude 모델은 최신 세 가지만 쓴다. 바꿀 때는 기획안 11장 모델 교체 절차를 거친다 (기획안 1.2)
+CLAUDE_MODELS = {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+}
+# 모델·인증을 따로 정할 수 있는 단위. 오케스트레이터 세션 하나가 spec~validate를 진행하므로
+# 그 안의 단계마다 모델을 바꿀 수는 없다. Builder는 같은 세션의 서브에이전트라 인증을 따른다
+STAGES = ("orchestrator", "builder", "reviewer_code", "reviewer_security", "reviewer_test")
+MODEL_CHOICES = ("auto", *CLAUDE_MODELS)
+AUTH_CHOICES = ("auto", "subscription", "api")
+
 # 정책·절차 파일, 도구 래퍼, 격리 환경, 이 설정. 어느 레포에서나 잠그고 HIGH로 본다
 KIT_POLICY = [
     "AGENTS.md",
@@ -69,6 +81,8 @@ class Config:
     # job_verify_full_if_changed 경로가 하나라도 있으면 붙이지 않고 전체를 검증한다
     job_verify_args: list[str] = field(default_factory=list)
     job_verify_full_if_changed: list[str] = field(default_factory=list)
+    # 단계별 모델·인증 {단계: {"model": auto|haiku|sonnet|opus, "auth": auto|subscription|api}}
+    stages: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -83,6 +97,35 @@ class Config:
         return " 또는 ".join(
             item["example"].replace("{id}", job_id) for item in self.acceptance_tests
         )
+
+
+def _stages(raw: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{CONFIG_PATH}: stages는 객체여야 합니다")
+    unknown = sorted(k for k in set(raw) - set(STAGES) if not k.startswith("_"))  # _설명 허용
+    if unknown:
+        raise ConfigError(f"{CONFIG_PATH}: 모르는 단계 {unknown} (가능: {', '.join(STAGES)})")
+    out: dict[str, dict[str, str]] = {}
+    for stage in STAGES:
+        item = raw.get(stage) or {}
+        if not isinstance(item, dict) or set(item) - {"model", "auth", "_설명"}:
+            raise ConfigError(f"{CONFIG_PATH}: stages.{stage}에는 model, auth만 씁니다")
+        model, auth = str(item.get("model", "auto")), str(item.get("auth", "auto"))
+        if model not in MODEL_CHOICES:
+            raise ConfigError(
+                f"{CONFIG_PATH}: stages.{stage}.model={model} (가능: {', '.join(MODEL_CHOICES)})"
+            )
+        if auth not in AUTH_CHOICES:
+            raise ConfigError(
+                f"{CONFIG_PATH}: stages.{stage}.auth={auth} (가능: {', '.join(AUTH_CHOICES)})"
+            )
+        if stage == "builder" and auth != "auto":
+            raise ConfigError(
+                f"{CONFIG_PATH}: stages.builder.auth는 auto만 됩니다 "
+                "(Builder는 오케스트레이터 세션의 인증을 따른다)"
+            )
+        out[stage] = {"model": model, "auth": auth}
+    return out
 
 
 def load_config(root: Path) -> Config:
@@ -111,6 +154,7 @@ def load_config(root: Path) -> Config:
             docker_cache_volumes={
                 str(k): str(v) for k, v in docker.get("cache_volumes", {}).items()
             },
+            stages=_stages(data.get("stages") or {}),
             job_verify_args=[str(a) for a in job_verify.get("args", [])],
             # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
             job_verify_full_if_changed=_merge(

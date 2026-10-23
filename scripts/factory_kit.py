@@ -32,6 +32,7 @@ KIT_FILES = [
     "scripts/factory_kit.py",
     "scripts/dispatch.py",
     "scripts/issues.py",
+    "scripts/factory_settings.py",
     "scripts/report.py",
     "scripts/proc.py",
     "scripts/hooks/guard.py",

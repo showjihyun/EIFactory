@@ -25,7 +25,8 @@
       "Bash(python scripts/factory.py resume:*)",
       "Bash(python scripts/factory.py drop:*)",
       "Bash(python scripts/dispatch.py:*)",
-      "Bash(python scripts/issues.py:*)"
+      "Bash(python scripts/issues.py:*)",
+      "Bash(python scripts/factory_settings.py set:*)"
     ]
   },
   "hooks": {
