@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factory_config import CLAUDE_MODELS, DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
-from report import session_usage  # noqa: E402
+from report import job_cost, live_usage, session_usage, unit_prices  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 # 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
@@ -677,6 +677,9 @@ def run_job(
         merged = _factory(root, worktree, "merge", job_id, env=env)
         result["host_merge"] = merged.stdout.strip()[-500:]
         job = _load_job(worktree, job_id)
+    builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
+    live = live_usage(log_path, unit_prices(sorted(logs.glob("*.jsonl"))), builder_model=builder_id)
+    result["cost"] = job_cost(job, live)
     result.update(
         status=job["status"],
         risk=job.get("risk"),
@@ -782,7 +785,7 @@ def _summary(report: dict[str, Any]) -> str:
         f"인증: {report['auth']}, 격리 {report['isolation']}, "
         f"동시 실행 {report['max_parallel']}개, base {report['base']}",
         "",
-        "| 작업 | 상태 | 위험 | 활성/경과(분) | 세션 비용($) | 비고 | worktree |",
+        "| 작업 | 상태 | 위험 | 활성/경과(분) | 작업 비용($) | 비고 | worktree |",
         "|---|---|---|---|---|---|---|",
     ]
     for job in report["jobs"]:
@@ -792,11 +795,20 @@ def _summary(report: dict[str, Any]) -> str:
         if job.get("merge_commit"):
             note = f"머지 {job['merge_commit'][:7]}"
         where = "(삭제)" if job.get("worktree_removed") else job.get("worktree", "")
-        cost = job.get("session_cost_usd")
+        cost = job.get("cost") or {}
+        cost_text = "-"
+        if cost:
+            mark = "≈" if cost.get("estimated") else ""
+            session = cost.get("session_usd")
+            cost_text = (
+                f"{mark}{cost['total_usd']:.2f} (세션 "
+                f"{'-' if session is None else f'{session:.2f}'} + "
+                f"리뷰 {cost['reviewers_usd']:.2f})"
+            )
         lines.append(
             f"| {job.get('job_id') or '-'} | {job['status']} | {job.get('risk') or '-'} | "
             f"{job.get('active_min', '-')}/{job.get('wall_min', '-')} | "
-            f"{'-' if cost is None else f'{cost:.2f}'} | {note} | {where} |"
+            f"{cost_text} | {note} | {where} |"
         )
     lines += [
         "",

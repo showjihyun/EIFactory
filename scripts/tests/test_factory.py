@@ -1601,3 +1601,11 @@ def test_reviewer_api_auth_uses_stashed_key(h: Harness, monkeypatch: pytest.Monk
     calls = {c["reviewer"]: c for c in h.calls("validator")}
     assert calls["code"]["has_api_key"] is True
     assert calls["test"]["has_api_key"] is False  # auto: 오케스트레이터와 같은 구독
+
+
+def test_reviewer_usage_is_recorded_in_four_parts(h: Harness) -> None:
+    # 가짜 리뷰어 사용량: input 100, cache_read 50, output 20 (FAKE_CMD)
+    to_validated(h)
+    review = h.job()["reviews"][-1]
+    assert review["usage"] == {"in": 100, "out": 20, "cr": 50, "cw": 0}
+    assert review["tokens"] == 170

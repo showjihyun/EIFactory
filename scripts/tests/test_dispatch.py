@@ -29,7 +29,8 @@ elif kind == "verify":
     print("verify: PASS (exit 0)")
 elif kind == "validator":
     sys.stdin.read()
-    print(json.dumps({"type": "result", "result": '{"verdict": "PASS", "issues": []}'}))
+    print(json.dumps({"type": "result", "result": '{"verdict": "PASS", "issues": []}',
+                      "total_cost_usd": 0.01}))
 """
 
 # 오케스트레이터 세션을 흉내 낸다: 배정된 작업을 spec부터 merge까지 진행한다.
@@ -629,3 +630,13 @@ def test_docker_refuses_subscription_reviewers(repo: Path, monkeypatch: pytest.M
         dispatch.check_container_stages(repo)
     set_stages(repo, {"reviewer_security": {"auth": "api"}})
     dispatch.check_container_stages(repo)
+
+
+def test_job_cost_includes_reviewers(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _, report = run(repo, "요구사항")
+    cost = report["jobs"][0]["cost"]
+    assert cost["session_usd"] == 0.5
+    assert cost["reviewers_usd"] == 0.03
+    assert cost["total_usd"] == 0.53
+    out = capsys.readouterr().out
+    assert "작업 비용($)" in out and "0.53" in out

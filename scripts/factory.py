@@ -1093,7 +1093,13 @@ def _usage(envelope: dict[str, Any]) -> dict[str, Any]:
         for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
                   "output_tokens")
     )  # fmt: skip
-    return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens}
+    detail = {
+        "in": int(usage.get("input_tokens") or 0),
+        "out": int(usage.get("output_tokens") or 0),
+        "cr": int(usage.get("cache_read_input_tokens") or 0),
+        "cw": int(usage.get("cache_creation_input_tokens") or 0),
+    }
+    return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens, "usage": detail}
 
 
 def _reviewer_plan(root: Path, job: Job, reviewer: str) -> dict[str, Any]:
@@ -1123,7 +1129,7 @@ def _run_reviewer(
         unset=plan["unset"],
     )
     text = proc.stdout
-    usage: dict[str, Any] = {"cost_usd": None, "tokens": None}
+    usage: dict[str, Any] = {"cost_usd": None, "tokens": None, "usage": None}
     if last_message.exists():  # codex exec --output-last-message (토큰은 기록하지 않음)
         text = last_message.read_text(encoding="utf-8")
         last_message.unlink()
