@@ -294,8 +294,8 @@ def run_check_red(root: Path, expect: str, tests: list[str]) -> dict[str, Any]:
     }
 
 
-def run_verify(root: Path) -> tuple[int, str]:
-    cmd = _command("verify", [sys.executable, "scripts/verify.py"])
+def run_verify(root: Path, extra: list[str] | None = None) -> tuple[int, str]:
+    cmd = [*_command("verify", [sys.executable, "scripts/verify.py"]), *(extra or [])]
     proc = _run(cmd, root)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -436,11 +436,30 @@ def _fork_point(root: Path, job: Job) -> str:
     return _git(root, "merge-base", "HEAD", job["base_branch"]).strip()
 
 
-def tree_fingerprint(root: Path, job: Job) -> str:
-    """기준점 대비 바뀐 파일과 그 내용의 해시. 커밋 여부와 관계없이 같은 변경이면 같은 값."""
-    base = _fork_point(root, job)
+def _changed_paths(root: Path, base: str) -> set[str]:
+    """기준 커밋 대비 바뀐 파일 이름 (삭제, 추적 안 되는 새 파일, 바이너리 포함)."""
     names = set(_git(root, "diff", "--name-only", base).splitlines())
     names.update(_git(root, "ls-files", "--others", "--exclude-standard").splitlines())
+    return {n for n in names if n}
+
+
+def job_verify_args(root: Path, job: Job) -> list[str]:
+    """작업 검증에 덧붙일 verify 인자 (factory/config.json의 job_verify).
+
+    작업 diff에 전체 검증 조건 경로(키트 파일, 의존성 설정 등)가 있으면 빈 목록 = 전체 검증.
+    """
+    cfg = _config(root)
+    if not cfg.job_verify_args:
+        return []
+    changed = _changed_paths(root, _fork_point(root, job))
+    if any(_matches(p, cfg.job_verify_full_if_changed) for p in changed):
+        return []
+    return list(cfg.job_verify_args)
+
+
+def tree_fingerprint(root: Path, job: Job) -> str:
+    """기준점 대비 바뀐 파일과 그 내용의 해시. 커밋 여부와 관계없이 같은 변경이면 같은 값."""
+    names = _changed_paths(root, _fork_point(root, job))
     digest = hashlib.sha256()
     for rel in sorted(n for n in names if n and not _matches(n, TREE_EXCLUDE)):
         path = root / rel
@@ -847,7 +866,8 @@ def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
         return 1, f"{job_id}: BLOCKED (PROTECTED_FILE_CHANGED): {', '.join(changed)}"
 
     green = run_check_red(root, "green", job["acceptance_tests"])
-    verify_exit, verify_output = run_verify(root)
+    verify_args = job_verify_args(root, job)
+    verify_exit, verify_output = run_verify(root, verify_args)
     risk, reasons = compute_risk(root, job)
     job["risk"], job["risk_reasons"] = risk, reasons
     record = {
@@ -856,6 +876,7 @@ def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
         "green_verdict": green["verdict"],
         "green_tests": green.get("tests", []),
         "verify_exit": verify_exit,
+        "verify_args": verify_args,
         "verify_tail": verify_output.strip()[-2500:],
         "risk": risk,
         "at": now(),
@@ -1250,7 +1271,7 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
             _block(job, "CONFLICT", f"{job['base_branch']} 기준 rebase 충돌")
             return 1, f"{job_id}: BLOCKED (CONFLICT). {rebase.stdout.strip()[-800:]}"
         green = run_check_red(root, "green", job["acceptance_tests"])
-        verify_exit, verify_output = run_verify(root)
+        verify_exit, verify_output = run_verify(root, job_verify_args(root, job))
         job["merge_checks"] = job.get("merge_checks", []) + [
             {"green_verdict": green["verdict"], "verify_exit": verify_exit, "at": now()}
         ]

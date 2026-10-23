@@ -1,7 +1,10 @@
 """레포 전체 검증 (기획안 5장의 `make verify`).
 
 사용법:
-    python scripts/verify.py [--area backend|frontend|scripts|all]
+    python scripts/verify.py [--area backend|frontend|scripts|all] [--skip <영역>]...
+
+`--skip`은 팩토리 작업 검증이 쓴다 (factory/config.json의 job_verify). 작업이 바꿀 수 없는
+영역(scripts/는 잠금 대상)을 매번 다시 돌리지 않기 위해서다.
 
 모든 단계를 끝까지 실행한 뒤 결과 표를 출력한다. 하나라도 실패하면 종료 코드 1.
 """
@@ -114,13 +117,21 @@ def run_steps(steps: list[Step], root: Path) -> tuple[int, list[StepResult]]:
     return (0 if all(r.passed for r in report) else 1), report
 
 
+def select_steps(area: str, skip: list[str]) -> list[Step]:
+    return [s for s in STEPS if (area == "all" or s.area == area) and s.area not in skip]
+
+
 def main(argv: list[str] | None = None) -> int:
     use_utf8_output()
     parser = argparse.ArgumentParser(description="레포 전체 검증")
-    parser.add_argument("--area", choices=["backend", "frontend", "scripts", "all"], default="all")
+    areas = ["backend", "frontend", "scripts"]
+    parser.add_argument("--area", choices=[*areas, "all"], default="all")
+    parser.add_argument("--skip", choices=areas, action="append", default=[])
     args = parser.parse_args(argv)
 
-    steps = [s for s in STEPS if args.area == "all" or s.area == args.area]
+    steps = select_steps(args.area, args.skip)
+    if args.skip:
+        print(f"건너뜀: {', '.join(args.skip)}")
     code, report = run_steps(steps, ROOT)
 
     for r in report:

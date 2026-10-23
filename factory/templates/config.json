@@ -8,6 +8,10 @@
   "changed_test": "(?!)",
   "acceptance_tests": [],
   "setup": [],
+  "job_verify": {
+    "args": [],
+    "full_if_changed": []
+  },
   "docker": {
     "workdir": "/workspaces/project",
     "setup_script": "",

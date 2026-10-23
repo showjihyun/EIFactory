@@ -59,3 +59,17 @@ def test_sample_repo_config_is_valid() -> None:
     assert cfg.is_acceptance_test("frontend/e2e/login.J001.accept.e2e.ts", "J001")
     assert cfg.changed_test.match("frontend/e2e/bookmarks.e2e.ts")
     assert cfg.docker_workdir == "/workspaces/bookmark-factory"
+
+
+def test_job_verify_defaults_to_full_verify(tmp_path: Path) -> None:
+    cfg = factory_config.load_config(tmp_path)
+    assert cfg.job_verify_args == []
+    # 키트 공통 보호 경로는 언제나 전체 검증 조건이다
+    assert "scripts/*" in cfg.job_verify_full_if_changed
+
+
+def test_sample_repo_skips_scripts_for_jobs() -> None:
+    cfg = factory_config.load_config(REPO)
+    assert cfg.job_verify_args == ["--skip", "scripts"]
+    for path in ("scripts/*", "frontend/package.json", ".devcontainer/*", "backend/uv.lock"):
+        assert path in cfg.job_verify_full_if_changed

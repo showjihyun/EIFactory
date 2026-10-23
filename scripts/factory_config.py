@@ -65,6 +65,10 @@ class Config:
     docker_workdir: str = DEFAULT_WORKDIR
     docker_setup_script: str = ""
     docker_cache_volumes: dict[str, str] = field(default_factory=dict)
+    # 작업 검증에 덧붙이는 verify 인자 (예: 작업이 바꿀 수 없는 영역 건너뛰기). diff에
+    # job_verify_full_if_changed 경로가 하나라도 있으면 붙이지 않고 전체를 검증한다
+    job_verify_args: list[str] = field(default_factory=list)
+    job_verify_full_if_changed: list[str] = field(default_factory=list)
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -90,6 +94,7 @@ def load_config(root: Path) -> Config:
         except json.JSONDecodeError as error:
             raise ConfigError(f"{CONFIG_PATH}를 읽을 수 없습니다: {error}") from error
     docker = data.get("docker") or {}
+    job_verify = data.get("job_verify") or {}
     try:
         return Config(
             lock_patterns=_merge(KIT_LOCK, list(data.get("lock_patterns", []))),
@@ -106,6 +111,11 @@ def load_config(root: Path) -> Config:
             docker_cache_volumes={
                 str(k): str(v) for k, v in docker.get("cache_volumes", {}).items()
             },
+            job_verify_args=[str(a) for a in job_verify.get("args", [])],
+            # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
+            job_verify_full_if_changed=_merge(
+                KIT_LOCK, list(job_verify.get("full_if_changed", []))
+            ),
         )
     except (re.error, TypeError, ValueError, KeyError) as error:
         raise ConfigError(f"{CONFIG_PATH} 형식 오류: {error}") from error

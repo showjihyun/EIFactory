@@ -1340,3 +1340,36 @@ def test_block_accepts_budget_reason(h: Harness) -> None:
     h.run("new", "요구사항")
     assert h.run("block", "J001", "--reason", "BUDGET", "--detail", "비용 상한") == 0
     assert h.job()["blocked"]["reason"] == "BUDGET"
+
+
+# ---------- 작업 검증 범위 (job_verify) ----------
+
+
+def test_job_verify_skips_areas_the_change_cannot_affect(h: Harness) -> None:
+    # 작업 diff에 scripts 테스트가 기대는 파일이 없으면 scripts 영역을 건너뛴다
+    h.to_building()
+    (h.repo / "backend/src/bookmarks/feature.py").write_text("X = 1\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    assert h.calls("verify")[-1]["args"] == CFG.job_verify_args
+    assert h.job()["validation"][-1]["verify_args"] == CFG.job_verify_args
+
+
+def test_job_verify_runs_everything_when_kit_files_changed(h: Harness) -> None:
+    # 잠금 전에 scripts/를 바꾼 경우 (잠금은 바뀐 내용을 기준으로 잡힌다). 위험 등급과 별개로
+    # 검증은 전체를 돌린다
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
+    h.run("new", "요구사항")
+    h.write_spec()
+    (h.repo / "scripts/verify.py").write_text("print('changed')\n", encoding="utf-8")
+    h.run("spec", "J001")
+    h.run("red", "J001")
+    assert h.run("verify", "J001") == 0
+    assert h.calls("verify")[-1]["args"] == []
+    assert h.job()["validation"][-1]["verify_args"] == []
+
+
+def test_job_verify_full_for_new_untracked_dependency_file(h: Harness) -> None:
+    h.to_building()
+    (h.repo / "docker").mkdir(exist_ok=True)
+    (h.repo / "docker/extra.bin").write_bytes(b"\x00\xff")
+    assert factory.job_verify_args(h.repo, h.job()) == []

@@ -53,6 +53,16 @@
     ["backend", ["uv", "sync", "-q"]],
     ["frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]]
   ],
+  "job_verify": {
+    "_설명": "작업 diff에 full_if_changed 경로가 없으면 scripts 영역(팩토리 자체 테스트, 약 3.5분)을 건너뛴다. scripts/와 정책·도구 파일은 코드가 항상 추가한다.",
+    "args": ["--skip", "scripts"],
+    "full_if_changed": [
+      "backend/pyproject.toml",
+      "backend/uv.lock",
+      "frontend/package.json",
+      "frontend/package-lock.json"
+    ]
+  },
   "docker": {
     "workdir": "/workspaces/bookmark-factory",
     "setup_script": "cd backend && uv sync -q && cd ../frontend && npm ci --no-audit --no-fund --loglevel=error",

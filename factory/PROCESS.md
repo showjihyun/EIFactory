@@ -48,6 +48,10 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
 | `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
+### 작업 검증 범위 (`factory/config.json`의 `job_verify`)
+
+`verify`와 머지 전 재검증은 작업 diff(기준점 대비, 추적 안 되는 새 파일 포함)를 보고 검증 범위를 정한다. diff에 `full_if_changed` 경로나 키트 파일(`scripts/`, 정책·절차 파일, 도구 래퍼, `docker/`, `.devcontainer/`)이 없으면 `args`(샘플 레포: `--skip scripts`)를 붙여 팩토리 자체 테스트를 건너뛴다. 작업은 `scripts/`를 바꿀 수 없으므로(잠금) 그 결과가 작업마다 같기 때문이다. 하나라도 있으면 전체를 검증한다. 붙인 인자는 검증 기록의 `verify_args`에 남는다. 사람이 `scripts/`를 고칠 때는 `python scripts/verify.py` 전체를 직접 돌린다.
+
 ### BLOCKED 사유 코드
 
 | 코드 | 조건 |

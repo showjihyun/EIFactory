@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from proc import resolve_command  # noqa: E402
-from verify import STEPS, Step, run_steps  # noqa: E402
+from verify import STEPS, Step, run_steps, select_steps  # noqa: E402
 
 
 def py(code: str) -> list[str]:
@@ -71,3 +71,10 @@ def test_every_pytest_step_uses_a_checkout_local_basetemp() -> None:
 def test_frontend_runs_user_flow_tests() -> None:
     e2e = [s for s in STEPS if s.area == "frontend" and s.name == "e2e"]
     assert [s.cmd for s in e2e] == [["npm", "run", "-s", "e2e"]]
+
+
+def test_select_steps_by_area_and_skip() -> None:
+    areas = {s.area for s in select_steps("all", [])}
+    assert areas == {"backend", "frontend", "scripts"}
+    assert {s.area for s in select_steps("all", ["scripts"])} == {"backend", "frontend"}
+    assert {s.area for s in select_steps("backend", [])} == {"backend"}
