@@ -38,6 +38,10 @@ VALIDATOR_PROMPT = "factory/prompts/validator.md"  # 리뷰어 공통 지시
 REVIEWER_PROMPT = "factory/prompts/review-{name}.md"  # 리뷰어별 관점
 HEARTBEAT_PATH = "factory/heartbeat.json"
 MERGE_LOCK = "factory-merge.lock"  # Git 공통 디렉터리에 둔다 (worktree끼리 공유)
+# 상태 파일을 믿지 않는 실행 (dispatch의 호스트 머지·사람 승인). 컨테이너 세션은 작업 worktree의
+# 상태·설정 파일을 쓸 수 있으므로, 설정은 이 스크립트가 있는 checkout에서 읽고 검증은 다시 한다
+UNTRUSTED_ENV = "FACTORY_UNTRUSTED_STATE"
+TRUSTED_ROOT = Path(__file__).resolve().parents[1]
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
 SIZE_CAPS = {"small": 15 * 60, "medium": 30 * 60}
@@ -94,10 +98,14 @@ class FactoryError(Exception):
     """사용법·상태 오류. 상태를 바꾸지 않는다."""
 
 
+def _untrusted() -> bool:
+    return os.environ.get(UNTRUSTED_ENV) == "1"
+
+
 def _config(root: Path) -> Config:
     """레포별 설정 (factory/config.json + 키트 공통 보호)."""
     try:
-        return load_config(root)
+        return load_config(TRUSTED_ROOT if _untrusted() else root)
     except ConfigError as error:
         raise FactoryError(str(error)) from error
 
@@ -1056,6 +1064,11 @@ def write_approval_brief(root: Path, job: Job) -> str:
         *[f"- {path} (+{len(a)} -{len(d)})" for path, (a, d) in sorted(files.items())],
         "",
         "## 사람의 다음 명령",
+        "dispatch로 만든 작업은 기본 checkout에서 실행한다 (작업 worktree의 scripts/와 상태 "
+        "파일은 세션이 바꿀 수 있다):",
+        f"- 승인하고 머지: `python scripts/dispatch.py --approve {job['id']}`",
+        f'- 반려: `python scripts/dispatch.py --reject {job["id"]} --reason "<이유>"`',
+        "대화형 세션(기본 checkout)의 작업:",
         f"- 승인하고 머지: `python scripts/factory.py approve {job['id']}`",
         f'- 반려: `python scripts/factory.py approve {job["id"]} --reject "<이유>"`',
         f"- 중단: `python scripts/factory.py drop {job['id']}`",
@@ -1250,13 +1263,39 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
                 1,
                 f"{job_id}: 머지 전 재계산한 위험이 {risk}라 자동 머지하지 않습니다 → 사람 승인",
             )
+    untrusted = _untrusted()
+    if untrusted:
+        cfg = _config(root)
+        changed = sorted(_changed_paths(root, _fork_point(root, job)))
+        locked = [
+            p
+            for p in changed
+            if _matches(p, cfg.lock_patterns) and not cfg.is_acceptance_test(p, job_id)
+        ]
+        if locked and approval["by"] == "auto":
+            risk, reasons = compute_risk(root, job)
+            job["risk"] = RISKS[max(RISKS.index(risk), RISKS.index("MEDIUM"))]
+            job["risk_reasons"] = [*reasons, *[f"MEDIUM: 잠긴 파일 변경 ({p})" for p in locked]]
+            job["approval"] = None
+            _set_status(job, "APPROVAL_REQUIRED")
+            return 1, f"{job_id}: 잠긴 파일이 바뀌어 자동 머지하지 않습니다 → 사람 승인 ({locked})"
+        # 수락 테스트 목록은 상태가 아니라 diff에서도 찾는다 (상태 목록을 비우는 조작 대비)
+        acceptance = sorted(
+            {p for p in changed if cfg.is_acceptance_test(p, job_id) and (root / p).exists()}
+            | set(job["acceptance_tests"])
+        )
+        if not acceptance:
+            _block(job, "MERGE_CHECK_FAILED", "수락 테스트가 없습니다 (diff와 상태 모두)")
+            return 1, f"{job_id}: BLOCKED (MERGE_CHECK_FAILED). 수락 테스트 없음"
+        job["acceptance_tests"] = acceptance
     summary = f"위험 {job['risk']}, 승인 {approval['by']}"
     job["commit"] = (
         _commit_job(root, job, f"factory {job_id}: {job['requirement']}\n\n{summary}")
         or _git(root, "rev-parse", "HEAD").strip()
     )
 
-    if not _git_ok(root, "merge-base", "--is-ancestor", job["base_branch"], "HEAD"):
+    rebased = not _git_ok(root, "merge-base", "--is-ancestor", job["base_branch"], "HEAD")
+    if rebased:
         rebase = subprocess.run(
             ["git", *_identity(root), "rebase", "-q", job["base_branch"]],
             cwd=root,
@@ -1270,19 +1309,22 @@ def _merge_steps(root: Path, state: State, job: Job) -> tuple[int, str]:
             _abort_git_operations(root)
             _block(job, "CONFLICT", f"{job['base_branch']} 기준 rebase 충돌")
             return 1, f"{job_id}: BLOCKED (CONFLICT). {rebase.stdout.strip()[-800:]}"
+    if rebased or untrusted:
+        why = "rebase" if rebased else "untrusted"
         green = run_check_red(root, "green", job["acceptance_tests"])
         verify_exit, verify_output = run_verify(root, job_verify_args(root, job))
         job["merge_checks"] = job.get("merge_checks", []) + [
-            {"green_verdict": green["verdict"], "verify_exit": verify_exit, "at": now()}
+            {"green_verdict": green["verdict"], "verify_exit": verify_exit, "why": why, "at": now()}
         ]
         if green["verdict"] != "GREEN_OK" or verify_exit != 0:
             _block(
                 job,
                 "MERGE_CHECK_FAILED",
-                f"rebase 후 재검증 실패 (수락 테스트 {green['verdict']}, "
+                f"머지 전 재검증({why}) 실패 (수락 테스트 {green['verdict']}, "
                 f"verify exit {verify_exit})",
             )
             return 1, f"{job_id}: BLOCKED (MERGE_CHECK_FAILED)\n{verify_output.strip()[-1500:]}"
+    if rebased:
         job["verified_tree"] = tree_fingerprint(root, job)
         job["commit"] = _git(root, "rev-parse", "HEAD").strip()
 

@@ -1373,3 +1373,106 @@ def test_job_verify_full_for_new_untracked_dependency_file(h: Harness) -> None:
     (h.repo / "docker").mkdir(exist_ok=True)
     (h.repo / "docker/extra.bin").write_bytes(b"\x00\xff")
     assert factory.job_verify_args(h.repo, h.job()) == []
+
+
+# ---------- 상태 파일을 믿지 않는 머지 (호스트 머지, 사람 승인) ----------
+# 컨테이너 세션은 작업 worktree의 상태 파일을 마음대로 쓸 수 있다. 호스트 머지(dispatch)와
+# 사람 승인(dispatch --approve)은 FACTORY_UNTRUSTED_STATE=1로 상태의 검증 기록을 믿지 않는다.
+
+
+def forge_auto_approval(h: Harness) -> None:
+    """검증을 거치지 않았는데 자동 승인된 것처럼 상태를 조작한다 (지문도 맞춘다)."""
+    state = h.state()
+    job = state["jobs"]["J001"]
+    job.update(status="APPROVED", risk="LOW")
+    job["approval"] = {"by": "auto", "decision": "approved", "reason": "", "at": h.now}
+    job["verified_tree"] = factory.tree_fingerprint(h.repo, job)
+    (h.repo / "factory" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_untrusted_merge_always_reverifies(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    to_validated(h)
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    verify_calls, green_calls = len(h.calls("verify")), len(h.calls("check_red"))
+    assert h.run("merge", "J001") == 0
+    # base가 그대로여도 다시 검증한다 (상태의 검증 기록은 조작될 수 있다)
+    assert len(h.calls("verify")) == verify_calls + 1
+    assert len(h.calls("check_red")) == green_calls + 1
+    assert h.job()["merge_checks"][-1]["why"] == "untrusted"
+
+
+def test_untrusted_merge_catches_forged_verification(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.to_building()
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return None\n", encoding="utf-8")
+    forge_auto_approval(h)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("test")], validator=PASS)
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "MERGE_CHECK_FAILED"
+    assert git(h.repo, "rev-parse", "main") == base
+
+
+def test_untrusted_merge_derives_acceptance_tests_from_diff(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 상태의 수락 테스트 목록을 비워도, diff에 있는 이 작업의 수락 테스트는 돌린다
+    to_validated(h)
+    state = h.state()
+    state["jobs"]["J001"]["acceptance_tests"] = []
+    (h.repo / "factory" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    before = len(h.calls("check_red"))
+    assert h.run("merge", "J001") == 0
+    assert len(h.calls("check_red")) == before + 1
+    green = h.calls("check_red")[-1]["args"]
+    assert "backend/tests/acceptance/test_J001.py" in green
+
+
+def test_untrusted_merge_without_acceptance_tests_blocks(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.to_building()
+    (h.repo / "backend/tests/acceptance/test_J001.py").unlink()
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    forge_auto_approval(h)
+    state = h.state()
+    state["jobs"]["J001"]["acceptance_tests"] = []
+    (h.repo / "factory" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    assert h.run("merge", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "MERGE_CHECK_FAILED"
+
+
+def test_untrusted_auto_merge_with_locked_file_change_needs_human(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 잠긴 기존 테스트를 약하게 고치고 상태를 조작해 자동 승인으로 만든 경우
+    h.to_building()
+    (h.repo / "backend/tests/test_existing.py").write_text(
+        "def test_existing():\n    pass\n", encoding="utf-8"
+    )
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    forge_auto_approval(h)
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    base = git(h.repo, "rev-parse", "main")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    assert any("backend/tests/test_existing.py" in r for r in job["risk_reasons"])
+    assert git(h.repo, "rev-parse", "main") == base
+
+
+def test_untrusted_mode_reads_config_from_trusted_checkout(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 작업 worktree의 factory/config.json은 에이전트가 바꿀 수 있다
+    config = h.repo / "factory" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["lock_patterns"] = []
+    config.write_text(json.dumps(data), encoding="utf-8")
+    assert "backend/tests/*.py" not in factory._config(h.repo).lock_patterns
+    monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
+    assert "backend/tests/*.py" in factory._config(h.repo).lock_patterns

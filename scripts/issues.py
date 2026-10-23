@@ -118,8 +118,8 @@ def comment_body(job: dict[str, Any]) -> str:
         lines += [
             "- 사람 승인이 필요하다. 승인 요약: "
             f"`{job.get('worktree')}/factory/reviews/{job_id}-approval.md`",
-            f"- 승인: 그 worktree에서 `python scripts/factory.py approve {job_id}`",
-            f'- 반려: `python scripts/factory.py approve {job_id} --reject "<이유>"`',
+            f"- 승인: 기본 checkout에서 `python scripts/dispatch.py --approve {job_id}`",
+            f'- 반려: `python scripts/dispatch.py --reject {job_id} --reason "<이유>"`',
         ]
     elif status == "BLOCKED":
         lines += [

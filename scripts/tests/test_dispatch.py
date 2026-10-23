@@ -48,7 +48,8 @@ print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FA
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
 job_id = state["active"]
 contract = {
-    "type": "feature", "size": "small", "risk": "LOW", "risk_reason": "새 모듈",
+    "type": "feature", "size": "small", "risk": os.environ.get("FAKE_AGENT_RISK", "LOW"),
+    "risk_reason": "새 모듈",
     "acceptance_criteria": ["모듈이 있다"],
     "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
     "changed_tests": [], "allowed_config_changes": [],
@@ -115,6 +116,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FACTORY_SETUP_CMD", "[]")
     monkeypatch.setenv("FACTORY_MERGE_WAIT_S", "60")
     monkeypatch.delenv("FAKE_AGENT_MODE", raising=False)
+    monkeypatch.delenv("FAKE_AGENT_RISK", raising=False)
+    monkeypatch.delenv("FACTORY_UNTRUSTED_STATE", raising=False)
     return root
 
 
@@ -497,3 +500,62 @@ def test_budget_exhaustion_blocks_job(repo: Path, monkeypatch: pytest.MonkeyPatc
     state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
     assert "$5.20" in state["jobs"][job["job_id"]]["blocked"]["detail"]
     assert Path(job["worktree"]).exists()
+
+
+# ---------- 사람 승인 (--approve / --reject) ----------
+
+
+def waiting_job(repo: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    monkeypatch.setenv("FAKE_AGENT_RISK", "MEDIUM")
+    _, report = run(repo, "중간 위험 작업")
+    job: dict[str, Any] = report["jobs"][0]
+    assert job["status"] == "APPROVAL_REQUIRED"
+    return job
+
+
+def test_host_merge_does_not_trust_session_state() -> None:
+    env = dispatch.host_merge_env(None, wait_s=60)
+    assert env["FACTORY_UNTRUSTED_STATE"] == "1"
+    assert "FACTORY_VERIFY_CMD" not in env
+
+
+def test_session_info_is_kept_outside_the_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = waiting_job(repo, monkeypatch)
+    info = dispatch.session_info(repo, job["job_id"])
+    assert info["isolation"] == "host"
+    assert not Path(dispatch.session_info_path(repo, job["job_id"])).is_relative_to(
+        Path(job["worktree"])
+    )
+
+
+def test_approve_merges_with_trusted_code_and_reverification(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch.main(["--approve", job_id], root=repo) == 0
+    record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    assert record["status"] == "MERGED"
+    assert record["approval"]["by"] == "human"
+    assert record["merge_checks"][-1]["why"] == "untrusted"
+    assert git(repo, "rev-parse", "main") == record["merge_commit"]
+    assert not Path(job["worktree"]).exists()
+
+
+def test_reject_sends_job_back(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch.main(["--reject", job_id, "--reason", "이름이 이상함"], root=repo) == 0
+    state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
+    assert state["jobs"][job_id]["status"] == "RETRY_REQUIRED"
+    assert state["jobs"][job_id]["approval"]["reason"] == "이름이 이상함"
+
+
+def test_approve_unknown_job_fails(repo: Path) -> None:
+    assert dispatch.main(["--approve", "J999"], root=repo) == 2
+
+
+def test_requirements_are_required_without_approve(repo: Path) -> None:
+    assert dispatch.main([], root=repo) == 2

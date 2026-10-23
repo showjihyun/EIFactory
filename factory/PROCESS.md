@@ -95,7 +95,11 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
    - 비용 상한 (`--budget-usd`, 기본 $5, API 환산 임시값): Claude 세션에 `--max-budget-usd`로 건다. 상한에 닿아 세션이 작업 도중 멈추면 BLOCKED(`BUDGET`). 리뷰어 호출은 하나당 $1 (`FACTORY_REVIEW_BUDGET_USD`). Codex CLI에는 같은 옵션이 없어 벽시계 상한만 적용되고, 토큰 수는 기록한다.
    - 세션 비용·토큰은 결과 표와 `dispatch-<시각>.json`에 남는다.
-5. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다. 사람은 그 worktree에서 `approve`·`resume`·`drop`을 실행한다.
+5. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다.
+   - 승인 대기는 **기본 checkout에서** `python scripts/dispatch.py --approve <ID>` (반려 `--reject <ID> --reason "..."`). 작업 worktree의 `scripts/`와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 `factory.py approve`는 쓰지 않는다. 승인 요약(`factory/reviews/<ID>-approval.md`)도 세션이 쓴 파일이니 diff(`git -C <worktree> diff <base>`)를 직접 본다.
+   - BLOCKED는 그 worktree에서 `resume`·`drop`을 실행한다.
+   - 호스트 머지(컨테이너·Codex 세션)와 `--approve`는 상태 파일을 믿지 않는다 (`FACTORY_UNTRUSTED_STATE=1`): 설정은 기본 checkout에서 읽고, 수락 테스트 목록은 diff에서도 찾고, base가 그대로여도 수락 테스트 Green과 `verify`를 다시 돌린다 (컨테이너 작업이면 오프라인 컨테이너에서). 잠긴 파일(기존 테스트, 검증 설정)이 바뀐 자동 승인 작업은 머지하지 않고 사람 승인으로 돌린다.
+   - 세션 정보(격리 방식, 이미지)는 worktree 밖 `../<레포>.jobs/meta/<ID>/session.json`에 둔다.
 6. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
 - 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).
 - 인증: `ANTHROPIC_API_KEY` 환경변수가 있으면 API 키, 없으면 로그인 세션(구독). `--require-api-key`로 API 키를 강제할 수 있다. 키 값은 출력·기록하지 않는다.

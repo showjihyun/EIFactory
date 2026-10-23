@@ -5,6 +5,8 @@
                                [--agent claude|codex] [--review-agent claude|codex]
                                [--isolation host|docker] [--require-api-key] [--keep-merged]
                                "<요구사항>" ...
+    python scripts/dispatch.py --approve <작업 ID>
+    python scripts/dispatch.py --reject <작업 ID> --reason "<이유>"
 
 요구사항마다:
 1. 기본 checkout의 base 브랜치 끝에서 worktree를 만들고 `factory.py new --base <base>`로
@@ -12,6 +14,11 @@
 2. headless 세션(`claude -p` 또는 `codex exec`)으로 factory 스킬을 실행한다. 실행 래퍼가 벽시계
    시간 상한을 건다 (7.6). 세션에는 FACTORY_AGENT_SESSION=1을 넣어 사람 전용 명령을 막는다.
 3. 끝나면 상태를 읽는다. MERGED면 worktree를 지우고, 그 밖의 상태는 사람이 보도록 남긴다.
+
+사람 승인 (`--approve`, `--reject`): 승인 대기 작업을 기본 checkout의 factory.py로 처리한다.
+작업 worktree의 scripts/와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 factory.py를 쓰지
+않는다. 승인하면 상태의 검증 기록을 믿지 않고(FACTORY_UNTRUSTED_STATE) 다시 검증한 뒤 머지하며,
+컨테이너 작업이면 재검증도 오프라인 컨테이너에서 돌린다.
 
 격리 (`--isolation`):
 - host: 세션이 호스트에서 돈다. 머지는 각 세션의 `factory.py merge`가 한다.
@@ -448,6 +455,48 @@ def _load_job(worktree: Path, job_id: str) -> dict[str, Any]:
     return job
 
 
+def _jobs_dir(root: Path) -> Path:
+    return root.parent / f"{root.name}.jobs"
+
+
+def session_info_path(root: Path, job_id: str) -> Path:
+    """세션 정보 (격리 방식, 이미지). 작업 worktree 밖에 두어 세션이 바꾸지 못한다."""
+    return _jobs_dir(root) / "meta" / job_id / "session.json"
+
+
+def session_info(root: Path, job_id: str) -> dict[str, Any]:
+    path = session_info_path(root, job_id)
+    if not path.exists():
+        raise DispatchError(f"{job_id}: dispatch 세션 정보가 없습니다 ({path})")
+    info: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return info
+
+
+def host_merge_env(docker: DockerJob | None, wait_s: float) -> dict[str, str]:
+    """호스트가 기본 checkout의 factory.py로 머지·승인할 때의 설정.
+
+    세션이 쓴 상태 파일(검증 기록, 수락 테스트 목록)은 믿지 않고 다시 검증한다. 컨테이너 작업이면
+    재검증도 컨테이너에서 돌려 호스트가 에이전트 코드를 실행하지 않는다.
+    """
+    env = {"FACTORY_UNTRUSTED_STATE": "1", "FACTORY_MERGE_WAIT_S": str(int(wait_s))}
+    if docker:
+        tools = {
+            "FACTORY_VERIFY_CMD": docker_tool_command(docker, ["python", "scripts/verify.py"]),
+            "FACTORY_CHECK_RED_CMD": docker_tool_command(
+                docker, ["python", "scripts/check_red.py"]
+            ),
+        }
+        env.update({k: json.dumps(v) for k, v in tools.items()})
+    return env
+
+
+def _save_record(root: Path, job_id: str, job: dict[str, Any]) -> Path:
+    record = _jobs_dir(root) / "records" / f"{job_id}.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return record
+
+
 def run_job(
     root: Path,
     base: str,
@@ -477,6 +526,16 @@ def run_job(
         _git(root, "worktree", "move", str(slot), str(worktree))
     result.update(job_id=job_id, worktree=str(worktree))
     docker = _docker_job(root, worktree, job_id, stamp, image) if image else None
+    info = session_info_path(root, job_id)
+    info.parent.mkdir(parents=True, exist_ok=True)
+    info.write_text(
+        json.dumps(
+            {"isolation": "docker" if docker else "host", "image": image, "stamp": stamp,
+             "agent": args.agent},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )  # fmt: skip
 
     # 가상환경은 절대 경로를 품으므로 worktree를 옮긴 뒤에 설치한다
     if docker:
@@ -540,18 +599,8 @@ def run_job(
             job = _load_job(worktree, job_id)
     if host_merge and job["status"] == "APPROVED":
         # 세션은 머지하지 않는다. 호스트가 기본 checkout의 factory.py로 머지한다.
-        # 컨테이너 세션이면 재검증도 컨테이너에서 돌려 호스트가 에이전트 코드를 실행하지 않는다
-        env: dict[str, str] = {}
-        if docker:
-            tools = {
-                "FACTORY_VERIFY_CMD": docker_tool_command(docker, ["python", "scripts/verify.py"]),
-                "FACTORY_CHECK_RED_CMD": docker_tool_command(
-                    docker, ["python", "scripts/check_red.py"]
-                ),
-            }
-            env = {k: json.dumps(v) for k, v in tools.items()}
         # 앞 작업의 컨테이너 재검증이 수 분 걸리므로 lock을 세션 상한만큼 기다린다
-        env["FACTORY_MERGE_WAIT_S"] = str(int(args.wall_timeout * 60))
+        env = host_merge_env(docker, wait_s=args.wall_timeout * 60)
         merged = _factory(root, worktree, "merge", job_id, env=env)
         result["host_merge"] = merged.stdout.strip()[-500:]
         job = _load_job(worktree, job_id)
@@ -565,10 +614,7 @@ def run_job(
         log=str(log_path),
     )
     # 작업 상태는 worktree 안에 있으므로, worktree를 지우기 전에 기록으로 남긴다
-    record = jobs_dir / "records" / f"{job_id}.json"
-    record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    result["record"] = str(record)
+    result["record"] = str(_save_record(root, job_id, job))
     if docker:
         _docker("volume", "rm", f"{docker.name}-node", f"{docker.name}-venv")
     if job["status"] == "MERGED" and not args.keep_merged:
@@ -611,6 +657,46 @@ def _remove_worktree(root: Path, worktree: Path, result: dict[str, Any]) -> bool
             return False
 
 
+def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = False) -> int:
+    """승인 대기 작업을 사람이 승인(머지) 또는 반려한다. 기본 checkout의 factory.py로 실행한다."""
+    worktree = _jobs_dir(root) / job_id
+    info = session_info(root, job_id)
+    if not (worktree / "factory/state.json").exists():
+        raise DispatchError(f"{job_id}: 작업 worktree가 없습니다 ({worktree})")
+    status = _load_job(worktree, job_id)["status"]
+    if status != "APPROVAL_REQUIRED":
+        raise DispatchError(f"{job_id}: 승인 대기 상태가 아닙니다 ({status})")
+    if reject:
+        done = _factory(
+            root, worktree, "approve", job_id, "--reject", reject,
+            env={"FACTORY_UNTRUSTED_STATE": "1"},
+        )  # fmt: skip
+        print(done.stdout.strip())
+        _save_record(root, job_id, _load_job(worktree, job_id))
+        return done.returncode
+    docker = None
+    if info["isolation"] == "docker":
+        docker = _docker_job(root, worktree, job_id, info["stamp"], info["image"])
+        # 세션이 끝날 때 의존성 볼륨을 지웠으므로 재검증 전에 다시 설치한다 (키 없음)
+        setup = _run(docker_setup_command(docker), worktree)
+        if setup.returncode != 0:
+            raise DispatchError(f"컨테이너 설치 실패: {(setup.stdout + setup.stderr)[-500:]}")
+    try:
+        env = host_merge_env(docker, wait_s=DEFAULT_WALL_TIMEOUT_MIN * 60)
+        done = _factory(root, worktree, "approve", job_id, env=env)
+    finally:
+        if docker:
+            _docker("volume", "rm", f"{docker.name}-node", f"{docker.name}-venv")
+    print(done.stdout.strip()[-2000:])
+    job = _load_job(worktree, job_id)
+    _save_record(root, job_id, job)
+    if job["status"] == "MERGED" and not keep_merged:
+        result: dict[str, Any] = {}
+        if not _remove_worktree(root, worktree, result):
+            print(f"worktree를 지우지 못했습니다: {result.get('cleanup_error')}")
+    return 0 if job["status"] == "MERGED" else 1
+
+
 def _agent_env(args: argparse.Namespace) -> dict[str, str]:
     """factory.py가 작업에 기록하고 리뷰어를 고를 때 쓰는 도구 설정."""
     return {"FACTORY_AGENT": args.agent, "FACTORY_REVIEW_AGENT": args.review_agent}
@@ -640,8 +726,8 @@ def _summary(report: dict[str, Any]) -> str:
         )
     lines += [
         "",
-        "APPROVAL_REQUIRED·BLOCKED 작업은 해당 worktree에서 사람이 처리한다 "
-        "(`python scripts/factory.py approve|resume|drop <ID>`).",
+        "승인 대기: `python scripts/dispatch.py --approve <ID>` (반려는 `--reject <ID> --reason`). "
+        "BLOCKED: 해당 worktree에서 `python scripts/factory.py resume|drop <ID>`.",
     ]
     return "\n".join(lines)
 
@@ -650,7 +736,10 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
     root = root or Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(prog="dispatch", description="팩토리 병렬 실행")
-    parser.add_argument("requirements", nargs="+")
+    parser.add_argument("requirements", nargs="*")
+    parser.add_argument("--approve", metavar="ID", help="승인 대기 작업을 승인하고 머지")
+    parser.add_argument("--reject", metavar="ID", help="승인 대기 작업을 반려")
+    parser.add_argument("--reason", help="--reject 이유")
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
     parser.add_argument(
@@ -663,6 +752,19 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("--require-api-key", action="store_true")
     parser.add_argument("--keep-merged", action="store_true", help="머지된 worktree도 남김")
     args = parser.parse_args(argv)
+    if args.approve or args.reject:
+        if args.reject and not args.reason:
+            print("오류: --reject에는 --reason이 필요합니다")
+            return 2
+        try:
+            return decide(root, args.approve or args.reject, args.reason if args.reject else None,
+                          keep_merged=args.keep_merged)  # fmt: skip
+        except DispatchError as error:
+            print(f"오류: {error}")
+            return 2
+    if not args.requirements:
+        print("오류: 요구사항이 필요합니다 (또는 --approve / --reject)")
+        return 2
     args.review_agent = args.review_agent or args.agent
     args.model = args.model or DEFAULT_MODELS[args.agent]
     args.keys = None
