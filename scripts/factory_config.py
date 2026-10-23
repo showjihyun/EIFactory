@@ -27,6 +27,8 @@ CLAUDE_MODELS = {
 STAGES = ("orchestrator", "builder", "reviewer_code", "reviewer_security", "reviewer_test")
 MODEL_CHOICES = ("auto", *CLAUDE_MODELS)
 AUTH_CHOICES = ("auto", "subscription", "api")
+# 비용 상한 (API 환산 USD, 임시값. 기획안 7.4, 대시보드 설계안 4장 P2). `new` 때 작업에 고정된다
+BUDGET_DEFAULTS = {"session": 5.0, "reviewer_call": 0.5, "reviewer_total": 1.5, "job_total": 6.5}
 
 # 정책·절차 파일, 도구 래퍼, 격리 환경, 이 설정. 어느 레포에서나 잠그고 HIGH로 본다
 KIT_POLICY = [
@@ -83,6 +85,7 @@ class Config:
     job_verify_full_if_changed: list[str] = field(default_factory=list)
     # 단계별 모델·인증 {단계: {"model": auto|haiku|sonnet|opus, "auth": auto|subscription|api}}
     stages: dict[str, dict[str, str]] = field(default_factory=dict)
+    budgets: dict[str, float] = field(default_factory=lambda: dict(BUDGET_DEFAULTS))
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -128,6 +131,30 @@ def _stages(raw: Any) -> dict[str, dict[str, str]]:
     return out
 
 
+def _budgets(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{CONFIG_PATH}: budgets는 객체여야 합니다")
+    unknown = sorted(k for k in raw if k not in BUDGET_DEFAULTS and not str(k).startswith("_"))
+    if unknown:
+        raise ConfigError(
+            f"{CONFIG_PATH}: 모르는 상한 {unknown} (가능: {', '.join(BUDGET_DEFAULTS)})"
+        )
+    out = dict(BUDGET_DEFAULTS)
+    for key in BUDGET_DEFAULTS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+            raise ConfigError(f"{CONFIG_PATH}: budgets.{key}={value!r}는 양수여야 합니다")
+        out[key] = float(value)
+    if out["job_total"] < out["session"] + out["reviewer_total"]:
+        raise ConfigError(
+            f"{CONFIG_PATH}: budgets.job_total({out['job_total']})은 "
+            f"session + reviewer_total({out['session'] + out['reviewer_total']}) 이상이어야 합니다"
+        )
+    return out
+
+
 def load_config(root: Path) -> Config:
     path = root / CONFIG_PATH
     data: dict[str, Any] = {}
@@ -155,6 +182,7 @@ def load_config(root: Path) -> Config:
                 str(k): str(v) for k, v in docker.get("cache_volumes", {}).items()
             },
             stages=_stages(data.get("stages") or {}),
+            budgets=_budgets(data.get("budgets") or {}),
             job_verify_args=[str(a) for a in job_verify.get("args", [])],
             # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
             job_verify_full_if_changed=_merge(

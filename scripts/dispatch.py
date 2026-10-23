@@ -619,11 +619,18 @@ def run_job(
                 result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
                 return result
 
+    applied = _load_job(worktree, job_id).get("budgets_applied") or {}
+    session_cap = float(
+        args.budget_usd
+        if args.budget_usd is not None
+        else applied.get("session", DEFAULT_BUDGET_USD)
+    )
+    result["session_budget_usd"] = session_cap
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
     workdir = docker.workdir if docker else None
     inner = agent_command(
-        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=args.budget_usd
+        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=session_cap
     )
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
     host_merge = merges_on_host(args.agent, docker is not None)
@@ -664,9 +671,9 @@ def run_job(
         if result["timed_out"]:
             reason = "TIMEOUT"
             detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
-        elif cost is not None and cost >= args.budget_usd:
+        elif cost is not None and cost >= session_cap:
             reason = "BUDGET"
-            detail = f"세션 비용 ${cost:.2f}가 상한 ${args.budget_usd:.2f}에 닿아 세션이 멈춤"
+            detail = f"세션 비용 ${cost:.2f}가 상한 ${session_cap:.2f}에 닿아 세션이 멈춤"
         if reason and detail:
             _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
             job = _load_job(worktree, job_id)
@@ -680,6 +687,8 @@ def run_job(
     builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
     live = live_usage(log_path, unit_prices(sorted(logs.glob("*.jsonl"))), builder_model=builder_id)
     result["cost"] = job_cost(job, live)
+    job_total = float(applied.get("job_total", 0) or 0)
+    result["over_job_total"] = bool(job_total) and result["cost"]["total_usd"] > job_total
     result.update(
         status=job["status"],
         risk=job.get("risk"),
@@ -829,7 +838,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
     parser.add_argument(
-        "--budget-usd", type=float, default=DEFAULT_BUDGET_USD, help="세션 비용 상한 (Claude)"
+        "--budget-usd", type=float, help="세션 비용 상한 (기본: 작업에 고정된 budgets.session)"
     )
     parser.add_argument("--agent", choices=sorted(DEFAULT_MODELS), default="claude")
     parser.add_argument("--review-agent", choices=sorted(DEFAULT_MODELS), help="기본: --agent")
@@ -927,7 +936,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "image": image,
         "base": base,
         "max_parallel": args.max_parallel,
-        "budget_usd": args.budget_usd,
+        "budget_usd": args.budget_usd if args.budget_usd is not None else DEFAULT_BUDGET_USD,
         "model": args.model,
         "jobs": jobs,
     }

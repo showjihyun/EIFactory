@@ -23,11 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factory_config import (  # noqa: E402
     AUTH_CHOICES,
+    BUDGET_DEFAULTS,
     CLAUDE_MODELS,
     CONFIG_PATH,
     MODEL_CHOICES,
     STAGES,
     ConfigError,
+    _budgets,
     _stages,
     load_config,
 )
@@ -62,6 +64,8 @@ def show(root: Path) -> str:
         lines.append(
             f"| {stage} | {item['model']} | {resolved} | {auth}: {AUTH_NOTE[item['auth']]} |"
         )
+    lines += ["", "| 비용 상한 | 값 (USD, API 환산) |", "|---|---|"]
+    lines += [f"| {key} | {value} |" for key, value in cfg.budgets.items()]
     lines += [
         "",
         "모델은 Claude 최신 세 가지만: " + ", ".join(f"{k}={v}" for k, v in CLAUDE_MODELS.items()),
@@ -75,6 +79,18 @@ def show(root: Path) -> str:
 def set_value(root: Path, stage: str, key: str, value: str) -> str:
     path = root / CONFIG_PATH
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if stage == "budgets":
+        budgets = dict(data.get("budgets") or {})
+        try:
+            budgets[key] = float(value)
+        except ValueError as error:
+            raise ConfigError(f"budgets.{key}={value}는 숫자여야 합니다") from error
+        if key not in BUDGET_DEFAULTS:
+            raise ConfigError(f"모르는 상한 {key} (가능: {', '.join(BUDGET_DEFAULTS)})")
+        _budgets(budgets)
+        data["budgets"] = budgets
+        _write(path, data)
+        return f"budgets.{key} = {value} ({CONFIG_PATH}). 이후 new 되는 작업부터 적용"
     if key not in ("model", "auth"):
         raise ConfigError(f"바꿀 수 있는 항목은 model, auth입니다 ({key})")
     stages = dict(data.get("stages") or {})
@@ -83,10 +99,14 @@ def set_value(root: Path, stage: str, key: str, value: str) -> str:
     stages[stage] = item
     _stages(stages)  # 검사 (모르는 단계·값이면 ConfigError, 파일은 그대로)
     data["stages"] = stages
+    _write(path, data)
+    return f"{stage}.{key} = {value} ({CONFIG_PATH}). 커밋은 사람이 합니다"
+
+
+def _write(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
                     newline="\n")  # fmt: skip
-    return f"{stage}.{key} = {value} ({CONFIG_PATH}). 커밋은 사람이 합니다"
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:

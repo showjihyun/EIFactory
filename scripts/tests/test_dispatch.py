@@ -640,3 +640,17 @@ def test_job_cost_includes_reviewers(repo: Path, capsys: pytest.CaptureFixture[s
     assert cost["total_usd"] == 0.53
     out = capsys.readouterr().out
     assert "작업 비용($)" in out and "0.53" in out
+
+
+def test_session_cap_comes_from_job_budgets(repo: Path) -> None:
+    config = repo / "factory" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["budgets"] = {"session": 3.0, "job_total": 4.5}
+    config.write_text(json.dumps(data), encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "budgets")
+    _, report = run(repo, "요구사항")
+    job = report["jobs"][0]
+    assert job["session_budget_usd"] == 3.0
+    assert job["over_job_total"] is False
+    _, report = run(repo, "--budget-usd", "2", "요구사항 2")
+    assert report["jobs"][0]["session_budget_usd"] == 2.0
