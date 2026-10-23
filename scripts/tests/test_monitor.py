@@ -260,6 +260,21 @@ def test_card_active_time_counts_running_segment(world: dict[str, Path]) -> None
     assert cards["J002"]["time"]["active_s"] == 300.0  # 구간이 없으면 기록값
 
 
+def test_usage_reprices_when_another_session_finishes(world: dict[str, Path]) -> None:
+    # D17: J001 로그가 그대로여도(Builder 실행 중) 다른 세션이 끝나 단가가 생기면 추정이 보여야 한다
+    clock = [NOW]
+    col = monitor.Collector(world["root"], world["jobs"], now=lambda: clock[0])
+    ref = next(r for r in col.refs() if r["key"] == "J001")
+    assert col.usage(ref)["total"]["usd"] is None
+    result = {"type": "result", "total_cost_usd": 1.0,
+              "modelUsage": {OPUS: {"inputTokens": 1000, "outputTokens": 0,
+                                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                                    "costUSD": 1.0}}}  # fmt: skip
+    (world["jobs"] / "logs" / "J099.jsonl").write_text(json.dumps(result) + "\n", encoding="utf-8")
+    clock[0] = NOW + 31
+    assert col.usage(ref)["total"]["usd"] is not None
+
+
 def test_snapshot_counts_unpriced_jobs(world: dict[str, Path]) -> None:
     # 확정 세션 로그가 없으면 단가가 없다. 진행 중 J001은 토큰만 있고 비용은 "모름"
     snap = collector(world).snapshot()

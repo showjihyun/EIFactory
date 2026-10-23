@@ -362,7 +362,7 @@ class Collector:
         self.now = now
         self.cache = FileCache()
         self.tail = LogTail()
-        self._usage: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+        self._usage: dict[Path, tuple[tuple[Any, ...], dict[str, Any]]] = {}
         self._changed: dict[str, tuple[float, list[str]]] = {}
         self._prices: tuple[float, dict[str, float]] = (0.0, {})
 
@@ -389,12 +389,14 @@ class Collector:
             st = log.stat()
         except OSError:
             return None
-        key = (st.st_mtime_ns, st.st_size)
+        prices = self.prices()
+        # 로그가 그대로여도 다른 세션이 끝나 단가가 바뀌면 다시 계산한다 (D17)
+        key = (st.st_mtime_ns, st.st_size, tuple(sorted(prices.items())))
         cached = self._usage.get(log)
         if cached and cached[0] == key:
             return cached[1]
         builder = (((ref.get("job") or {}).get("models") or {}).get("builder") or {}).get("model")
-        value = report.live_usage(log, self.prices(), builder_model=builder)
+        value = report.live_usage(log, prices, builder_model=builder)
         self._usage[log] = (key, value)
         return value
 
