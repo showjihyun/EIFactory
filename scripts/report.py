@@ -126,13 +126,13 @@ def live_usage(
         kind = event.get("type")
         if kind == "assistant":
             msg = event.get("message") or {}
-            role = "builder" if event.get("parent_tool_use_id") else "orchestrator"
-            responses[str(msg.get("id"))] = (role, msg.get("model"), msg.get("usage") or {})
+            kind_of = "builder" if event.get("parent_tool_use_id") else "orchestrator"
+            responses[str(msg.get("id"))] = (kind_of, msg.get("model"), msg.get("usage") or {})
         elif kind == "system" and event.get("subtype") == "task_progress":
             if event.get("subagent_type") == "builder":
-                total = int((event.get("usage") or {}).get("total_tokens") or 0)
+                seen = int((event.get("usage") or {}).get("total_tokens") or 0)
                 tid = str(event.get("task_id"))
-                progress[tid] = max(progress.get(tid, 0), total)
+                progress[tid] = max(progress.get(tid, 0), seen)
         elif kind == "turn.completed":
             usage = event.get("usage") or {}
             has_turns = True
@@ -203,16 +203,18 @@ def unit_prices(logs: list[Path], recent: int = 20) -> dict[str, float]:
 
     손으로 관리하는 가격표를 두지 않는다. 모델이 바뀌어도 첫 세션이 끝나면 단가가 생긴다.
     """
-    usd: Counter[str] = Counter()
-    tokens: Counter[str] = Counter()
+    usd: dict[str, float] = {}
+    tokens: dict[str, int] = {}
     used = 0
     for log in sorted(logs, key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
         result = next((e for e in _events(log) if e.get("type") == "result"), None)
         if not result or not result.get("modelUsage"):
             continue
         for model, mu in result["modelUsage"].items():
-            usd[model] += float(mu.get("costUSD") or 0)
-            tokens[model] += sum(int(mu.get(f) or 0) for f in RESULT_KEYS.values())
+            usd[model] = usd.get(model, 0.0) + float(mu.get("costUSD") or 0)
+            tokens[model] = tokens.get(model, 0) + sum(
+                int(mu.get(f) or 0) for f in RESULT_KEYS.values()
+            )
         used += 1
         if used >= recent:
             break
@@ -224,7 +226,8 @@ def job_cost(job: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]
     reviews = job.get("reviews") or []
     missing = [str(r.get("reviewer")) for r in reviews if r.get("cost_usd") is None]
     reviewers = round(sum(float(r.get("cost_usd") or 0) for r in reviews), 6)
-    session = (live or {}).get("total", {}).get("usd") if live else None
+    raw = (live or {}).get("total", {}).get("usd") if live else None
+    session = None if raw is None else float(raw)
     estimated = live is None or bool(live.get("estimated")) or session is None or bool(missing)
     return {
         "session_usd": session,
@@ -239,7 +242,7 @@ def _lead_minutes(job: dict[str, Any]) -> float | None:
     """요구사항 입력 → 승인 대기(또는 자동 승인) 도달 시간 (KPI 리드타임)."""
     for entry in job.get("history", []):
         if entry["status"] in {"APPROVAL_REQUIRED", "APPROVED"}:
-            return round((entry["at"] - job["created_at"]) / 60, 1)
+            return round((float(entry["at"]) - float(job["created_at"])) / 60, 1)
     return None
 
 
@@ -356,8 +359,8 @@ def changed_files(worktree: Path, fork_point: str) -> list[dict[str, Any]]:
         except OSError:
             continue
         binary = b"\0" in data[:8192]
-        added = 0 if binary else len(data.decode("utf-8", errors="replace").splitlines())
-        files.append({"path": path, "added": added, "deleted": 0, "binary": binary,
+        count = 0 if binary else len(data.decode("utf-8", errors="replace").splitlines())
+        files.append({"path": path, "added": count, "deleted": 0, "binary": binary,
                       "untracked": True})  # fmt: skip
     return files
 
