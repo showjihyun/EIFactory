@@ -161,9 +161,15 @@ def live_usage(
         roles["builder"]["unattributed"] = max(0, gap)
 
     if result and result.get("modelUsage"):
+        # Builder 모델: 지정값, 없으면 스트림에서 서브에이전트가 쓴 모델 (예전 작업 기록)
+        builders = (
+            {builder_model}
+            if builder_model
+            else {m for kind_of, m, _ in responses.values() if kind_of == "builder" and m}
+        )
         roles = {}
         for model, mu in result["modelUsage"].items():
-            name = "builder" if builder_model and model == builder_model else "orchestrator"
+            name = "builder" if model in builders else "orchestrator"
             if name in roles:  # 같은 모델이 두 역할에 쓰였으면 합친다 (나눌 근거가 없음)
                 name = "orchestrator"
             role = roles.setdefault(name, _role(model))

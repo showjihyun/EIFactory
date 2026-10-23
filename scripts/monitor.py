@@ -302,6 +302,47 @@ def activity_items(events: list[dict[str, Any]], start: int = 0) -> list[dict[st
     return items
 
 
+STAGE_GROUP = {"spec": "spec", "build": "build", "review": "review", "wait": "review",
+               "merge": "merge", "merged": "merge", "blocked": "build"}  # fmt: skip
+
+
+def stage_shares(
+    events: list[dict[str, Any]], history: list[dict[str, Any]], reviewers_tokens: int = 0
+) -> list[tuple[str, float]]:
+    """단계별 토큰 비율 ≈ (표시 전용, 설계안 10.3).
+
+    응답마다 한 번, 응답 시각으로 상태 이력의 구간에 넣는다.
+
+    상태 이력은 세션이 쓰는 값이라 이 비율을 강제에 쓰지 않는다.
+    """
+    marks = sorted((float(h["at"]), STAGE_GROUP.get(STAGE_OF.get(h["status"], "spec"), "spec"))
+                   for h in history)  # fmt: skip
+    if not marks:
+        return []
+    last: dict[str, tuple[float, int]] = {}
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        msg = event.get("message") or {}
+        at = _ts(event.get("timestamp"))
+        usage = msg.get("usage") or {}
+        tokens = sum(int(usage.get(k) or 0) for k in report.STREAM_KEYS.values())
+        if at is not None:
+            last[str(msg.get("id"))] = (at, tokens)
+    totals: dict[str, int] = {}
+    for at, tokens in last.values():
+        stage = marks[0][1]
+        for mark_at, mark_stage in marks:
+            if mark_at <= at:
+                stage = mark_stage
+        totals[stage] = totals.get(stage, 0) + tokens
+    if reviewers_tokens:
+        totals["review"] = totals.get("review", 0) + reviewers_tokens
+    whole = sum(totals.values())
+    order = ["spec", "build", "review", "merge"]
+    return [(k, round(totals[k] / whole, 4)) for k in order if totals.get(k)] if whole else []
+
+
 def _group_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for entry in history:
@@ -441,7 +482,12 @@ class Collector:
         latest = self.cache.read_json(dispatches[-1]) if dispatches else None
         return {
             "generated_at": self.now(),
-            "repo": {"name": self.root.name, "base": self.base_branch()},
+            "repo": {
+                "name": self.root.name,
+                "base": (latest or {}).get("base")
+                if isinstance(latest, dict) and latest.get("base")
+                else self.base_branch(),
+            },
             "dispatch": (
                 {
                     "stamp": latest.get("started"),
@@ -621,7 +667,7 @@ class Collector:
                 for r in job.get("reviews") or []
             ],
             "files": {"trust": "git", "items": files},
-            "cost": self._cost(job, live),
+            "cost": {**self._cost(job, live), "stages": self._stages(ref, job)},
             "history": _group_history(job.get("history") or []),
             "blocked": job.get("blocked"),
             "blocks": job.get("blocks") or [],
@@ -639,12 +685,12 @@ class Collector:
                           "estimated": bool((live or {}).get("estimated"))})  # fmt: skip
         per: dict[str, dict[str, Any]] = {}
         for r in job.get("reviews") or []:
-            agg = per.setdefault(
-                r["reviewer"], {"usd": 0.0, "usage": {"in": 0, "out": 0, "cr": 0, "cw": 0}}
-            )
+            agg = per.setdefault(r["reviewer"], {"usd": 0.0, "usage": None})
             agg["usd"] += float(r.get("cost_usd") or 0)
-            for k, v in (r.get("usage") or {}).items():
-                agg["usage"][k] = agg["usage"].get(k, 0) + int(v or 0)
+            if r.get("usage"):  # 예전 기록에는 항목별 토큰이 없다 (0이 아니라 "제공 안 됨")
+                agg["usage"] = agg["usage"] or {"in": 0, "out": 0, "cr": 0, "cw": 0}
+                for k, v in r["usage"].items():
+                    agg["usage"][k] = agg["usage"].get(k, 0) + int(v or 0)
         model_of = {
             k.removeprefix("reviewer_"): v.get("model")
             for k, v in (job.get("models") or {}).items()
@@ -661,6 +707,20 @@ class Collector:
             "budgets": job.get("budgets_applied") or BUDGET_DEFAULTS,
         }
 
+    def _stages(self, ref: dict[str, Any], job: dict[str, Any]) -> list[dict[str, Any]]:
+        if ref["source"] == "interactive":
+            return []
+        log = self._log(ref["id"])
+        self.tail.read_new(log)
+        reviewer_tokens = sum(
+            sum(int(v or 0) for v in (r.get("usage") or {}).values())
+            for r in job.get("reviews") or []
+        )
+        shares = stage_shares(
+            self.tail.events.get(log, []), job.get("history") or [], reviewer_tokens
+        )
+        return [{"stage": k, "share": v} for k, v in shares]
+
     # ------------------------------------------------ 활동 (D7)
     def activity(self, key: str, after: int = 0, limit: int = 30) -> list[dict[str, Any]]:
         ref = self._ref(key)
@@ -675,6 +735,12 @@ class Collector:
 # ---------------------------------------------------------------- 서버 (D8)
 
 PAGE = Path(__file__).resolve().parent / "monitor_page.html"
+# 마스코트 "볼트" (블렌더 2D 렌더, sw-factory 기획안 dashboard/mascot). 상태 이름만 받는다
+ASSETS = Path(__file__).resolve().parent / "monitor_assets"
+MASCOT = re.compile(
+    r"^bolt_(QUEUED|SPEC_READY|BUILDING|RETRY_REQUIRED|VERIFYING|APPROVAL_REQUIRED|APPROVED"
+    r"|MERGED|BLOCKED|ERROR|DROPPED|UNKNOWN)\.png$"
+)
 FALLBACK_PAGE = (
     "<!doctype html><meta charset='utf-8'><title>팩토리 대시보드</title>"
     "<p>scripts/monitor_page.html이 없습니다. API: /api/snapshot</p>"
@@ -689,6 +755,7 @@ JOB_KEY = r"(?:local-)?J\d{3,}"
 ROUTES = [
     (re.compile(r"^/$"), "page"),
     (re.compile(r"^/api/snapshot$"), "snapshot"),
+    (re.compile(r"^/assets/([\w.]+)$"), "asset"),
     (re.compile(r"^/api/settings$"), "settings"),
     (re.compile(rf"^/api/job/({JOB_KEY})$"), "detail"),
     (re.compile(rf"^/api/job/({JOB_KEY})/activity$"), "activity"),
@@ -801,6 +868,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, body, "text/html; charset=utf-8")
         elif name == "snapshot":
             self._json(self.collector.snapshot())
+        elif name == "asset":
+            target = ASSETS / groups[0]
+            if MASCOT.match(groups[0]) and target.is_file():
+                self._send(200, target.read_bytes(), "image/png")
+            else:
+                self._error(404, "없는 그림")
         elif name == "settings":
             self._json(settings_view(self.root))
         elif name == "detail":
@@ -868,7 +941,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     args = parser.parse_args(argv)
     server = make_server(root, args.jobs_dir, args.port)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"팩토리 대시보드: {url} (읽기 전용, Ctrl+C로 끝)")
+    print(f"팩토리 대시보드: {url} (읽기 전용, Ctrl+C로 끝)", flush=True)
     if not args.no_open:
         webbrowser.open(url)
     try:

@@ -412,3 +412,31 @@ def test_server_internal_error_hides_details(server: Any, monkeypatch: pytest.Mo
 def test_activity_endpoint(server: Any) -> None:
     items = json.loads(req(server, "/api/job/J001/activity?after=0")[2])
     assert items and all("[가림]" in i["text"] or "SECRET" not in i["text"] for i in items)
+
+
+def test_stage_shares_split_by_history() -> None:
+    def ev(i: str, at: float, tokens: int) -> dict[str, Any]:
+        return {"type": "assistant", "timestamp": at,
+                "message": {"id": i, "usage": {"input_tokens": tokens}}}  # fmt: skip
+
+    history = [{"status": "QUEUED", "at": 0}, {"status": "BUILDING", "at": 100},
+               {"status": "VERIFYING", "at": 200}]  # fmt: skip
+    events = [ev("a", 10, 100), ev("a", 11, 100), ev("b", 150, 300), ev("c", 250, 100)]
+    shares = dict(monitor.stage_shares(events, history, reviewers_tokens=500))
+    # spec 100, build 300, review 100 + 리뷰어 500 → 합 1000
+    assert shares == {"spec": 0.1, "build": 0.3, "review": 0.6}
+
+
+def test_mascot_assets_are_whitelisted(server: Any) -> None:
+    status, headers, body = req(server, "/assets/bolt_MERGED.png")
+    assert status == 200 and headers["content-type"] == "image/png" and body[:4] == b"\x89PNG"
+    assert req(server, "/assets/bolt_NOPE.png")[0] == 404
+    assert req(server, "/assets/..%2Fmonitor.py")[0] == 404
+
+
+def test_reviewer_usage_missing_is_not_zero(world: dict[str, Path]) -> None:
+    write_json(world["jobs"] / "J005" / "factory" / "state.json", {"jobs": {"J005": state_job(
+        "J005", "VERIFYING", reviews=[{"round": 1, "reviewer": "code", "verdict": "PASS",
+                                       "cost_usd": 0.09, "tokens": 35000}])}})  # fmt: skip
+    roles = {r["role"]: r for r in collector(world).detail("J005")["cost"]["roles"]}
+    assert roles["reviewer_code"]["usage"] is None  # 예전 기록: 항목별 토큰 없음 (0이 아님)

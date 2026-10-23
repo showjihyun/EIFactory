@@ -16,6 +16,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/check_style.py` | 테스트 파일 형식·린트 확인 (잠그기 전) |
 | `scripts/dispatch.py` | 여러 요구사항을 worktree별 headless 세션으로 동시 실행 (사람 전용) |
 | `scripts/issues.py` | GitHub Issues(본인 작성, `factory` 라벨)를 dispatch로 처리하고 결과를 이슈에 남김 (사람 전용) |
+| `scripts/monitor.py` | 로컬 대시보드 (읽기 전용, 127.0.0.1). 화면은 `monitor_page.html`, 마스코트 `monitor_assets/`, 화면 시험 `scripts/ui/` |
 | `scripts/factory_settings.py` | 단계별 모델(Claude 최신 haiku·sonnet·opus 5.5)·인증(구독·API) 설정 보기·바꾸기 (사람 전용) |
 | `scripts/report.py` | 운영 보고서: KPI와 개선 후보 |
 | `scripts/factory_kit.py`, `scripts/factory_config.py` | 팩토리 키트 설치·점검, 레포별 설정 읽기 |

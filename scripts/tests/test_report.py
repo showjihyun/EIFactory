@@ -306,3 +306,16 @@ def test_changed_files_with_untracked_and_binary(tmp_path: Path) -> None:
     assert (files["a.txt"]["added"], files["a.txt"]["deleted"]) == (2, 1)
     assert files["new.txt"]["added"] == 2 and files["new.txt"]["untracked"] is True
     assert files["bin.dat"]["binary"] is True
+
+
+def test_live_usage_infers_builder_model_from_stream(tmp_path: Path) -> None:
+    # 예전 작업 기록에는 models가 없다: 스트림에서 서브에이전트가 쓴 모델을 Builder로 본다
+    result = json.dumps({"type": "result", "total_cost_usd": 0.8, "modelUsage": {
+        OPUS: {"inputTokens": 1, "outputTokens": 1, "cacheReadInputTokens": 0,
+               "cacheCreationInputTokens": 0, "costUSD": 0.7},
+        SONNET: {"inputTokens": 2, "outputTokens": 2, "cacheReadInputTokens": 0,
+                 "cacheCreationInputTokens": 0, "costUSD": 0.1}}})  # fmt: skip
+    log = write_log(tmp_path / "J001.jsonl", [assistant("b1", SONNET, u(1, 1), parent="t"), result])
+    roles = report.live_usage(log, {})["roles"]
+    assert roles["builder"]["model"] == SONNET and roles["builder"]["usd"] == 0.1
+    assert roles["orchestrator"]["usd"] == 0.7

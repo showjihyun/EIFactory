@@ -48,6 +48,19 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
 | `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
+### 대시보드 (`scripts/monitor.py`, 읽기 전용)
+
+```
+python scripts/monitor.py            # http://127.0.0.1:8765 를 브라우저로 연다
+python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
+```
+
+- 나를 기다리는 일(승인 대기·막힘·오류), 요약(성공률·개입률·리드타임·비용), 작업 레인(같은 파일 충돌 예고 ⚡), 보드, 작업 상세(다음 명령·검증 증거·호스트 기록·리뷰 원문·모델·인증·역할별 토큰과 비용·단계별 ≈·이력·최근 활동), ⚙ 설정(읽기 전용).
+- `127.0.0.1`에만 열고 GET만 받는다. 상태를 바꾸지 않고, 명령은 복사용 텍스트로만 보인다. 승인은 `dispatch.py --approve`, 설정은 `factory_settings.py`.
+- 값마다 출처를 표시한다: ⚠ 세션 기록(worktree 안, 위조 가능) / 🏠 호스트(`meta/`, dispatch) / ✓ Git 확인. 진행 중 비용은 ≈(추정), 끝나면 결과 이벤트의 확정값.
+- 화면 시험: `node scripts/ui/check_monitor.cjs` (`verify.py`의 `scripts ui` 단계, 작업 검증에서는 scripts 영역과 함께 건너뜀).
+- 설계: sw-factory `기획안/dashboard/` (설계안, DESIGN.md, 작업분해).
+
 ### 단계별 모델·인증 (`factory/config.json`의 `stages`)
 
 | 단계 | 자동(auto) 모델 | 인증 |
