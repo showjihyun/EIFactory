@@ -64,7 +64,7 @@ MODELS = {
 }
 PROMOTE_AFTER = 2
 # 리뷰어 호출 하나당 비용 상한 (API 환산, 임시값). Claude만 적용 (Codex CLI에는 옵션이 없다)
-REVIEW_BUDGET_USD = 1.0
+REVIEW_BUDGET_USD = 0.5  # factory_config.BUDGET_DEFAULTS와 같다 (작업에 고정된 값이 우선)
 # 에이전트 세션(FACTORY_AGENT_SESSION=1)에서는 factory.py가 직접 거부한다 (도구 hook과 별개)
 HUMAN_ONLY = {"approve", "resume", "drop"}
 
@@ -855,6 +855,7 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
     job = state["jobs"][job_id]
     builder = stage_model(root, "builder", job)
     job["builder_model"], job["models"] = builder["alias"], {"builder": builder}
+    job["budgets_applied"] = dict(_config(root).budgets)
     state["active"] = job_id
     return f"{job_id} 생성 (브랜치 {branch}). 다음: {SPECS_DIR}/{job_id}.md 작성 후 spec {job_id}"
 
@@ -1048,7 +1049,18 @@ def _parse_verdict(text: str) -> dict[str, Any] | None:
     return None
 
 
-def reviewer_command(agent: str, out_file: Path, model: str | None = None) -> list[str]:
+def reviewer_budget(job: Job) -> str:
+    """리뷰어 호출 하나의 비용 상한: 환경변수 > 작업에 고정된 상한(new 때) > 기본."""
+    env = os.environ.get("FACTORY_REVIEW_BUDGET_USD")
+    if env:
+        return env
+    applied = (job.get("budgets_applied") or {}).get("reviewer_call")
+    return str(applied if applied is not None else REVIEW_BUDGET_USD)
+
+
+def reviewer_command(
+    agent: str, out_file: Path, model: str | None = None, budget: str | None = None
+) -> list[str]:
     """읽기 전용 리뷰어 프로세스. 프롬프트는 stdin으로 넘긴다."""
     model = model or MODELS[agent]["reviewer"]
     if agent == "codex":
@@ -1077,7 +1089,7 @@ def reviewer_command(agent: str, out_file: Path, model: str | None = None) -> li
         "--output-format",
         "json",
         "--max-budget-usd",
-        os.environ.get("FACTORY_REVIEW_BUDGET_USD", str(REVIEW_BUDGET_USD)),
+        budget or reviewer_budget({}),
         "--allowedTools",
         "Read",
         "Glob",
@@ -1093,7 +1105,13 @@ def _usage(envelope: dict[str, Any]) -> dict[str, Any]:
         for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
                   "output_tokens")
     )  # fmt: skip
-    return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens}
+    detail = {
+        "in": int(usage.get("input_tokens") or 0),
+        "out": int(usage.get("output_tokens") or 0),
+        "cr": int(usage.get("cache_read_input_tokens") or 0),
+        "cw": int(usage.get("cache_creation_input_tokens") or 0),
+    }
+    return {"cost_usd": envelope.get("total_cost_usd"), "tokens": tokens, "usage": detail}
 
 
 def _reviewer_plan(root: Path, job: Job, reviewer: str) -> dict[str, Any]:
@@ -1114,7 +1132,10 @@ def _run_reviewer(
     """리뷰어 하나를 실행하고 (최종 응답, stderr, 비용·토큰)을 돌려준다."""
     agent = plan["agent"]
     last_message = path.with_suffix(".last")
-    cmd = _command("validator", reviewer_command(agent, last_message, plan["info"]["model"]))
+    cmd = _command(
+        "validator",
+        reviewer_command(agent, last_message, plan["info"]["model"], reviewer_budget(job)),
+    )
     proc = _run(
         cmd,
         root,
@@ -1123,7 +1144,7 @@ def _run_reviewer(
         unset=plan["unset"],
     )
     text = proc.stdout
-    usage: dict[str, Any] = {"cost_usd": None, "tokens": None}
+    usage: dict[str, Any] = {"cost_usd": None, "tokens": None, "usage": None}
     if last_message.exists():  # codex exec --output-last-message (토큰은 기록하지 않음)
         text = last_message.read_text(encoding="utf-8")
         last_message.unlink()
@@ -1185,6 +1206,15 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
     (root / REVIEWS_DIR).mkdir(parents=True, exist_ok=True)
     round_no = 1 + max((int(r.get("round", 0)) for r in job["reviews"]), default=0)
     paths = {name: root / REVIEWS_DIR / f"{job_id}-{round_no}-{name}.txt" for name in REVIEWERS}
+    spent = sum(float(r.get("cost_usd") or 0) for r in job["reviews"])
+    limit = float(
+        (job.get("budgets_applied") or {}).get("reviewer_total")
+        or _config(root).budgets["reviewer_total"]
+    )
+    if spent >= limit:
+        # 실제로 쓴 합계로만 막는다 (다음 회차 최대치로 미리 막으면 재시도 경로가 닫힌다)
+        _block(job, "BUDGET", f"리뷰어 합계 ${spent:.2f}가 상한 ${limit:.2f}에 닿음")
+        return 1, f"{job_id}: BLOCKED (BUDGET). 리뷰어 합계 ${spent:.2f} / ${limit:.2f}"
     plans = {name: _reviewer_plan(root, job, name) for name in REVIEWERS}
     models = job.setdefault("models", {})
     for name in REVIEWERS:

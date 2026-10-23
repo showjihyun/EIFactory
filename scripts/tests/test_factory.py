@@ -1601,3 +1601,61 @@ def test_reviewer_api_auth_uses_stashed_key(h: Harness, monkeypatch: pytest.Monk
     calls = {c["reviewer"]: c for c in h.calls("validator")}
     assert calls["code"]["has_api_key"] is True
     assert calls["test"]["has_api_key"] is False  # auto: 오케스트레이터와 같은 구독
+
+
+def test_reviewer_usage_is_recorded_in_four_parts(h: Harness) -> None:
+    # 가짜 리뷰어 사용량: input 100, cache_read 50, output 20 (FAKE_CMD)
+    to_validated(h)
+    review = h.job()["reviews"][-1]
+    assert review["usage"] == {"in": 100, "out": 20, "cr": 50, "cw": 0}
+    assert review["tokens"] == 170
+
+
+# ---------- 비용 상한 적용 (budgets) ----------
+
+
+def set_budgets(h: Harness, budgets: dict[str, float]) -> None:
+    config = h.repo / "factory" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["budgets"] = budgets
+    config.write_text(json.dumps(data), encoding="utf-8")
+    git(h.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "budgets")
+
+
+def test_new_snapshots_budgets(h: Harness) -> None:
+    set_budgets(h, {"reviewer_call": 0.3})
+    h.to_building()
+    assert h.job()["budgets_applied"]["reviewer_call"] == 0.3
+    assert h.job()["budgets_applied"]["session"] == 5.0
+
+
+def test_reviewer_call_cap_comes_from_the_job(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FACTORY_REVIEW_BUDGET_USD", raising=False)
+    job = {"budgets_applied": {"reviewer_call": 0.3}}
+    cmd = factory.reviewer_command("claude", Path("o"), budget=factory.reviewer_budget(job))
+    assert cmd[cmd.index("--max-budget-usd") + 1] == "0.3"
+    monkeypatch.setenv("FACTORY_REVIEW_BUDGET_USD", "0.2")
+    assert factory.reviewer_budget(job) == "0.2"
+    assert factory.reviewer_budget({}) == "0.2"
+    monkeypatch.delenv("FACTORY_REVIEW_BUDGET_USD")
+    assert factory.reviewer_budget({}) == "0.5"
+
+
+def test_reviewer_total_blocks_on_actual_spend(h: Harness) -> None:
+    # 가짜 리뷰어 호출 하나 $0.01 → 한 회차 $0.03. 상한 $0.05면 2회차까지 돌고 3회차 전에 막힌다
+    set_budgets(h, {"reviewer_total": 0.05, "job_total": 5.05})
+    h.to_building()
+    for _ in range(2):
+        fail = json.dumps({"verdict": "FAIL", "issues": [f"지적 {_}"]})  # 같은 실패 2회 규칙 피함
+        (h.repo / MAIN_PY).write_text(f"def list_items():\n    return [{_}]\n", encoding="utf-8")
+        h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=fail)
+        assert h.run("verify", "J001") == 0
+        h.run("validate", "J001")
+        assert h.job()["status"] == "RETRY_REQUIRED"
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [9]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    before = len(h.calls("validator"))
+    assert h.run("validate", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "BUDGET"
+    assert "리뷰어 합계" in h.job()["blocked"]["detail"]
+    assert len(h.calls("validator")) == before  # 리뷰어를 띄우지 않았다

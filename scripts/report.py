@@ -61,11 +61,197 @@ def session_usage(log: Path) -> dict[str, Any]:
     return {"cost_usd": cost, "tokens": tokens}
 
 
+# ---------------------------------------------------------------- 실시간 사용량 (대시보드)
+
+STREAM_KEYS = {
+    "in": "input_tokens",
+    "out": "output_tokens",
+    "cr": "cache_read_input_tokens",
+    "cw": "cache_creation_input_tokens",
+}
+RESULT_KEYS = {
+    "in": "inputTokens",
+    "out": "outputTokens",
+    "cr": "cacheReadInputTokens",
+    "cw": "cacheCreationInputTokens",
+}
+
+
+def _events(log: Path) -> list[dict[str, Any]]:
+    if not log.exists():
+        return []
+    events = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _role(model: str | None) -> dict[str, Any]:
+    return {"model": model, "in": 0, "out": 0, "cr": 0, "cw": 0, "usd": None, "unattributed": 0}
+
+
+def _tokens_of(role: dict[str, Any]) -> int:
+    return sum(int(role[k] or 0) for k in ("in", "out", "cr", "cw")) + int(role["unattributed"])
+
+
+def _price(role: dict[str, Any], prices: dict[str, float]) -> None:
+    unit = prices.get(role["model"] or "")
+    role["usd"] = round(_tokens_of(role) * unit, 6) if unit is not None else None
+
+
+def live_usage(
+    log: Path, prices: dict[str, float], builder_model: str | None = None
+) -> dict[str, Any]:
+    """세션 로그의 역할별 토큰(입력, 출력, 캐시 읽기, 캐시 쓰기)과 비용 (설계안 10.1, 10.4).
+
+    - 결과 이벤트가 있으면 modelUsage로 확정 (basis "result").
+    - 진행 중이면 응답(message.id)마다 한 번만 센 스트림 값 × 보정 단가 (basis "stream", 추정).
+      stream-json은 한 응답을 여러 이벤트로 보내며 사용량을 반복하므로 단순히 더하면 약 2배가 된다.
+    - Codex는 turn.completed의 합 (basis "turns", 캐시 쓰기는 제공 안 됨).
+    builder_model: 결과 이벤트에서 Builder 몫을 고를 모델 ID.
+    """
+    events = _events(log)
+    out: dict[str, Any] = {"basis": None, "estimated": True, "roles": {}, "subscription": None}
+    responses: dict[str, tuple[str, str | None, dict[str, Any]]] = {}
+    progress: dict[str, int] = {}
+    turns = _role(None)
+    has_turns = False
+    result = None
+    for event in events:
+        kind = event.get("type")
+        if kind == "assistant":
+            msg = event.get("message") or {}
+            kind_of = "builder" if event.get("parent_tool_use_id") else "orchestrator"
+            responses[str(msg.get("id"))] = (kind_of, msg.get("model"), msg.get("usage") or {})
+        elif kind == "system" and event.get("subtype") == "task_progress":
+            if event.get("subagent_type") == "builder":
+                seen = int((event.get("usage") or {}).get("total_tokens") or 0)
+                tid = str(event.get("task_id"))
+                progress[tid] = max(progress.get(tid, 0), seen)
+        elif kind == "turn.completed":
+            usage = event.get("usage") or {}
+            has_turns = True
+            turns["in"] += int(usage.get("input_tokens") or 0)
+            turns["cr"] += int(usage.get("cached_input_tokens") or 0)
+            turns["out"] += int(usage.get("output_tokens") or 0)
+        elif kind == "rate_limit_event":
+            windows = (event.get("rate_limit_info") or {}).get("unifiedWindows") or {}
+            five, seven = windows.get("five_hour") or {}, windows.get("seven_day") or {}
+            out["subscription"] = {
+                "five_hour": five.get("utilization"),
+                "seven_day": seven.get("utilization"),
+                "five_hour_resets_at": five.get("resetsAt"),
+            }
+        elif kind == "result":
+            result = event
+
+    roles: dict[str, dict[str, Any]] = {}
+    for role_name, model, usage in responses.values():
+        role = roles.setdefault(role_name, _role(model))
+        role["model"] = role["model"] or model
+        for key, field in STREAM_KEYS.items():
+            role[key] += int(usage.get(field) or 0)
+    if progress and "builder" in roles:
+        gap = sum(progress.values()) - _tokens_of(roles["builder"])
+        roles["builder"]["unattributed"] = max(0, gap)
+
+    if result and result.get("modelUsage"):
+        # Builder 모델: 지정값, 없으면 스트림에서 서브에이전트가 쓴 모델 (예전 작업 기록)
+        builders = (
+            {builder_model}
+            if builder_model
+            else {m for kind_of, m, _ in responses.values() if kind_of == "builder" and m}
+        )
+        roles = {}
+        for model, mu in result["modelUsage"].items():
+            name = "builder" if model in builders else "orchestrator"
+            if name in roles:  # 같은 모델이 두 역할에 쓰였으면 합친다 (나눌 근거가 없음)
+                name = "orchestrator"
+            role = roles.setdefault(name, _role(model))
+            for key, field in RESULT_KEYS.items():
+                role[key] += int(mu.get(field) or 0)
+            role["usd"] = round((role["usd"] or 0) + float(mu.get("costUSD") or 0), 6)
+        out.update(basis="result", estimated=False)
+        total_usd = result.get("total_cost_usd")
+    elif result and result.get("total_cost_usd") is not None:
+        out.update(basis="result", estimated=False)  # 모델별 분해가 없으면 역할은 스트림 값
+        total_usd = float(result["total_cost_usd"])
+    elif has_turns:
+        roles = {"orchestrator": {**turns, "cw": None}}
+        unit = prices.get("codex")
+        roles["orchestrator"]["usd"] = (
+            None if unit is None else round((turns["in"] + turns["out"] + turns["cr"]) * unit, 6)
+        )
+        out["basis"] = "turns"
+        total_usd = roles["orchestrator"]["usd"]
+    elif roles:
+        for role in roles.values():
+            _price(role, prices)
+        out["basis"] = "stream"
+        known = [r["usd"] for r in roles.values() if r["usd"] is not None]
+        total_usd = round(sum(known), 6) if known else None
+    else:
+        total_usd = None
+
+    out["roles"] = roles
+    total = {key: sum(int(r.get(key) or 0) for r in roles.values()) for key in STREAM_KEYS}
+    out["total"] = {**total, "usd": total_usd}
+    return out
+
+
+def unit_prices(logs: list[Path], recent: int = 20) -> dict[str, float]:
+    """모델별 보정 단가 = 확정 세션(결과 이벤트)의 Σ비용 / Σ토큰, 최근 recent개 (설계안 10.1).
+
+    손으로 관리하는 가격표를 두지 않는다. 모델이 바뀌어도 첫 세션이 끝나면 단가가 생긴다.
+    """
+    usd: dict[str, float] = {}
+    tokens: dict[str, int] = {}
+    used = 0
+    for log in sorted(logs, key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        result = next((e for e in _events(log) if e.get("type") == "result"), None)
+        if not result or not result.get("modelUsage"):
+            continue
+        for model, mu in result["modelUsage"].items():
+            usd[model] = usd.get(model, 0.0) + float(mu.get("costUSD") or 0)
+            tokens[model] = tokens.get(model, 0) + sum(
+                int(mu.get(f) or 0) for f in RESULT_KEYS.values()
+            )
+        used += 1
+        if used >= recent:
+            break
+    return {m: usd[m] / tokens[m] for m in tokens if tokens[m]}
+
+
+def job_cost(job: dict[str, Any], live: dict[str, Any] | None) -> dict[str, Any]:
+    """작업 비용 = 세션 + 리뷰어 (설계안 4장 P1). 리뷰어는 별도 프로세스라 세션 비용에 없다."""
+    reviews = job.get("reviews") or []
+    missing = [str(r.get("reviewer")) for r in reviews if r.get("cost_usd") is None]
+    reviewers = round(sum(float(r.get("cost_usd") or 0) for r in reviews), 6)
+    raw = (live or {}).get("total", {}).get("usd") if live else None
+    session = None if raw is None else float(raw)
+    estimated = live is None or bool(live.get("estimated")) or session is None or bool(missing)
+    # 토큰은 있는데 값이 없으면 보정 단가가 아직 없는 것이다 (첫 실행). $0이 아니라 "모름"
+    used = sum(int(v or 0) for k, v in ((live or {}).get("total") or {}).items() if k != "usd")
+    return {
+        "session_usd": session,
+        "reviewers_usd": reviewers,
+        "total_usd": round((session or 0) + reviewers, 6),
+        "estimated": estimated,
+        "missing": missing,
+        "unpriced": session is None and used > 0,
+    }
+
+
 def _lead_minutes(job: dict[str, Any]) -> float | None:
     """요구사항 입력 → 승인 대기(또는 자동 승인) 도달 시간 (KPI 리드타임)."""
     for entry in job.get("history", []):
         if entry["status"] in {"APPROVAL_REQUIRED", "APPROVED"}:
-            return round((entry["at"] - job["created_at"]) / 60, 1)
+            return round((float(entry["at"]) - float(job["created_at"])) / 60, 1)
     return None
 
 
@@ -132,6 +318,60 @@ def reverted(repo: Path, branch: str, merges: list[str]) -> set[str]:
         if proc.returncode == 0:
             full[proc.stdout.strip()] = sha
     return {full[s] for s in REVERT.findall(log) if s in full}
+
+
+# ---------------------------------------------------------------- Git 확인 (대시보드)
+
+
+def _git_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "core.quotepath=off", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def merged_into(repo: Path, commit: str, branch: str) -> bool:
+    """commit이 branch에 들어 있는가 (대시보드의 "Git 확인" 값)."""
+    if _git_run(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}").returncode:
+        return False
+    return _git_run(repo, "merge-base", "--is-ancestor", commit, branch).returncode == 0
+
+
+def changed_files(worktree: Path, fork_point: str) -> list[dict[str, Any]]:
+    """기준점 대비 바뀐 파일과 줄 수 (추적 안 되는 새 파일 포함).
+
+    worktree 안 .gitattributes는 세션이 쓸 수 있으므로 외부 diff·textconv를 끈다
+    (--no-ext-diff --no-textconv). clean 필터는 Git 설정(호스트의 공통 .git)에 정의가 있어야
+    실행되고, 세션은 그 설정을 바꿀 수 없다 (컨테이너는 읽기 전용 마운트).
+    """
+    diff = _git_run(worktree, "diff", "--numstat", "--no-ext-diff", "--no-textconv",
+                    "--no-renames", fork_point)  # fmt: skip
+    files: list[dict[str, Any]] = []
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added, deleted, path = parts
+        binary = added == "-"
+        files.append({"path": path, "added": 0 if binary else int(added),
+                      "deleted": 0 if binary else int(deleted), "binary": binary,
+                      "untracked": False})  # fmt: skip
+    others = _git_run(worktree, "ls-files", "--others", "--exclude-standard", "-z")
+    for path in filter(None, others.stdout.split("\0")):
+        try:
+            data = (worktree / path).read_bytes()
+        except OSError:
+            continue
+        binary = b"\0" in data[:8192]
+        count = 0 if binary else len(data.decode("utf-8", errors="replace").splitlines())
+        files.append({"path": path, "added": count, "deleted": 0, "binary": binary,
+                      "untracked": True})  # fmt: skip
+    return files
 
 
 def _pct(value: float) -> str:

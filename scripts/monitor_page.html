@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>팩토리 대시보드</title>
+<link rel="icon" href="/assets/bolt_BUILDING.png">
+<style>
+:root {
+  --bg: #F6F3EC; --surface: #FFFDF8; --sunken: #EFEBE2; --border: #E3DDD0;
+  --text: #2B2A27; --muted: #77736A; --accent: #D97757; --shadow: 0 1px 0 rgba(0,0,0,.04), 0 2px 8px rgba(60,40,20,.07);
+  --pass-bg: #DDF2E1; --pass: #2E7D43; --fail-bg: #FBDCD8; --fail: #B42318; --wait-bg: #ECEAE4;
+  --low-bg: #ECEBE6; --low: #6B675E; --med-bg: #FFE8CC; --med: #B35C00; --high-bg: #FBD9D5; --high: #B42318;
+  --s-queued: #6E66B8; --s-queued-bg: #ECEAF7;
+  --s-spec: #5561C9; --s-spec-bg: #E7E9FB;
+  --s-build: #3B7BC8; --s-build-bg: #E2EEFB;
+  --s-retry: #B7791F; --s-retry-bg: #FCEFD9;
+  --s-verify: #2F8C82; --s-verify-bg: #E6F3F1;
+  --s-approval: #A77B00; --s-approval-bg: #FFF2CC;
+  --s-approved: #3E8E52; --s-approved-bg: #E3F4E5;
+  --s-merged: #7B5BB5; --s-merged-bg: #EEE6F8;
+  --s-blocked: #C0453A; --s-blocked-bg: #FBE3E1;
+  --s-error: #8E3B3B; --s-error-bg: #F2E4E4;
+  --s-dropped: #8A867D; --s-dropped-bg: #EEECE8;
+  --orch: #D97757; --builder: #3B7BC8; --reviewer: #2F8C82;
+  --mono: ui-monospace, "Cascadia Code", "D2Coding", Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1F1E1B; --surface: #2A2925; --sunken: #191815; --border: #3A3833;
+    --text: #EDEAE3; --muted: #A9A59C; --accent: #E08A6D; --shadow: 0 1px 0 rgba(0,0,0,.3), 0 2px 10px rgba(0,0,0,.35);
+    --pass-bg: #1F3A27; --pass: #7BD98F; --fail-bg: #45231F; --fail: #FF8C80; --wait-bg: #34322D;
+    --low-bg: #34322D; --low: #C9C4BA; --med-bg: #43301A; --med: #FFB866; --high-bg: #4A221E; --high: #FF8C80;
+    --s-queued: #A39CF0; --s-queued-bg: #2D2B42; --s-spec: #8C97FF; --s-spec-bg: #282C4A;
+    --s-build: #6FB4FF; --s-build-bg: #1F3248; --s-retry: #FFC266; --s-retry-bg: #3F3220;
+    --s-verify: #5FD3C4; --s-verify-bg: #1D3936; --s-approval: #FFD34D; --s-approval-bg: #403617;
+    --s-approved: #7BD98F; --s-approved-bg: #1F3A27; --s-merged: #C9A2FF; --s-merged-bg: #342A47;
+    --s-blocked: #FF7A6E; --s-blocked-bg: #46231F; --s-error: #FF8C8C; --s-error-bg: #3D2424;
+    --s-dropped: #B8B3A8; --s-dropped-bg: #34322D;
+    --orch: #E08A6D; --builder: #6FB4FF; --reviewer: #5FD3C4;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1F1E1B; --surface: #2A2925; --sunken: #191815; --border: #3A3833;
+  --text: #EDEAE3; --muted: #A9A59C; --accent: #E08A6D; --shadow: 0 1px 0 rgba(0,0,0,.3), 0 2px 10px rgba(0,0,0,.35);
+  --pass-bg: #1F3A27; --pass: #7BD98F; --fail-bg: #45231F; --fail: #FF8C80; --wait-bg: #34322D;
+  --low-bg: #34322D; --low: #C9C4BA; --med-bg: #43301A; --med: #FFB866; --high-bg: #4A221E; --high: #FF8C80;
+  --s-queued: #A39CF0; --s-queued-bg: #2D2B42; --s-spec: #8C97FF; --s-spec-bg: #282C4A;
+  --s-build: #6FB4FF; --s-build-bg: #1F3248; --s-retry: #FFC266; --s-retry-bg: #3F3220;
+  --s-verify: #5FD3C4; --s-verify-bg: #1D3936; --s-approval: #FFD34D; --s-approval-bg: #403617;
+  --s-approved: #7BD98F; --s-approved-bg: #1F3A27; --s-merged: #C9A2FF; --s-merged-bg: #342A47;
+  --s-blocked: #FF7A6E; --s-blocked-bg: #46231F; --s-error: #FF8C8C; --s-error-bg: #3D2424;
+  --s-dropped: #B8B3A8; --s-dropped-bg: #34322D;
+  --orch: #E08A6D; --builder: #6FB4FF; --reviewer: #5FD3C4;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
+  font-size: 14px; line-height: 1.5;
+}
+.mono, code { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+.wrap { max-width: 1440px; margin: 0 auto; padding: 0 20px 80px; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+/* 상단 바 */
+.topbar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+.topbar .wrap { display: flex; align-items: center; gap: 18px; padding-top: 10px; padding-bottom: 10px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; }
+.brand img { width: 34px; height: 34px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pass); display: inline-block; }
+.dot.warn { background: var(--med); }
+.spacer { flex: 1; }
+.quota { display: inline-flex; gap: 2px; vertical-align: middle; }
+.quota i { width: 9px; height: 9px; border-radius: 3px; background: var(--sunken); border: 1px solid var(--border); }
+.quota i.on { background: var(--accent); border-color: var(--accent); }
+.iconbtn { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 4px 10px; cursor: pointer; }
+.banner { margin: 12px 0 0; padding: 10px 14px; border-radius: 12px; display: flex; gap: 10px; align-items: center; }
+.banner.warn { background: var(--s-approval-bg); color: var(--s-approval); }
+.banner.danger { background: var(--s-blocked-bg); color: var(--s-blocked); font-weight: 600; }
+.banner img { width: 28px; height: 28px; }
+
+h2 { font-size: 15px; margin: 26px 0 10px; display: flex; align-items: center; gap: 8px; }
+h2 .count { background: var(--s-approval-bg); color: var(--s-approval); border-radius: 999px; padding: 0 9px; font-size: 12px; }
+
+/* 주의 줄 */
+.attention { display: flex; gap: 12px; flex-wrap: wrap; }
+.acard { background: var(--surface); border-radius: 16px; box-shadow: var(--shadow); padding: 14px; width: 340px;
+  border: 1px solid var(--border); cursor: pointer; animation: drop .35s cubic-bezier(.3,1.6,.5,1) both; }
+.acard:hover { transform: translateY(-1px); }
+.acard.k-approval { border-color: var(--s-approval); background: linear-gradient(180deg, var(--s-approval-bg), var(--surface) 60%); }
+.acard.k-blocked { border-color: var(--s-blocked); background: linear-gradient(180deg, var(--s-blocked-bg), var(--surface) 60%); }
+.acard.k-error { border-color: var(--s-error); background: linear-gradient(180deg, var(--s-error-bg), var(--surface) 60%); }
+.ahead { display: flex; gap: 10px; align-items: center; }
+.ahead img { width: 48px; height: 48px; flex: none; }
+.atitle { font-weight: 700; }
+.aline { margin-top: 6px; font-size: 12.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.empty-att { display: flex; gap: 10px; align-items: center; color: var(--muted); padding: 6px 0; }
+.empty-att img { width: 40px; }
+@keyframes drop { from { transform: translateY(-14px) scale(.96); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* 명령 상자 */
+.cmd { display: flex; align-items: center; margin-top: 10px; background: var(--sunken); border-radius: 10px;
+  border: 1px solid var(--border); overflow: hidden; }
+.cmd code { flex: 1; padding: 6px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.cmd button { border: 0; border-left: 1px solid var(--border); background: transparent; padding: 6px 10px; cursor: pointer; }
+.cmd button.done { color: var(--pass); }
+
+/* 요약 숫자 */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat { background: var(--surface); border-radius: 16px; padding: 12px 16px; box-shadow: var(--shadow); border: 1px solid var(--border); }
+.stat .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.miss { width: 7px; height: 7px; border-radius: 50%; background: var(--med); display: inline-block; }
+
+/* 작업 레인 */
+.lanes { background: var(--surface); border-radius: 16px; padding: 14px 16px 10px; box-shadow: var(--shadow); border: 1px solid var(--border); overflow-x: auto; }
+.axis, .lane { display: grid; grid-template-columns: 150px 1fr 120px; align-items: center; gap: 10px; min-width: 760px; }
+.axis .ticks { position: relative; height: 18px; font-size: 11px; color: var(--muted); }
+.axis .ticks span { position: absolute; transform: translateX(-50%); }
+.lane { padding: 5px 0; }
+.lane .who { display: flex; gap: 6px; align-items: center; font-size: 12.5px; }
+.lane .who img { width: 26px; height: 26px; }
+.track { position: relative; height: 22px; background: var(--sunken); border-radius: 8px; }
+.seg { position: absolute; top: 3px; height: 16px; border-radius: 6px; font-size: 10.5px; line-height: 16px; padding: 0 6px;
+  overflow: hidden; white-space: nowrap; color: #fff; font-weight: 600; }
+.seg.wait { background: transparent !important; border: 2px dashed var(--s-approval); color: var(--s-approval); line-height: 12px; }
+.seg.wait.blocked { border-color: var(--s-blocked); color: var(--s-blocked); }
+.seg.live { background-image: repeating-linear-gradient(-45deg, rgba(255,255,255,.22) 0 6px, transparent 6px 12px) !important;
+  background-size: 17px 17px; animation: belt 1s linear infinite; }
+.seg.live::after { content: "▶"; position: absolute; right: 3px; }
+@keyframes belt { to { background-position: 17px 0; } }
+.now { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--accent); border-radius: 2px; }
+.lane .meta { font-size: 11.5px; color: var(--muted); }
+.conflict { margin: 2px 0 6px 160px; font-size: 12px; color: var(--s-retry); display: flex; gap: 6px; align-items: center; }
+.conflict b { color: var(--text); }
+.lanes-foot { font-size: 11.5px; color: var(--muted); margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; }
+
+/* 보드 */
+.board { display: grid; grid-template-columns: repeat(8, minmax(160px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+.col { background: var(--sunken); border-radius: 16px; padding: 8px; min-height: 140px; }
+.col.hot { background: color-mix(in srgb, var(--s-approval-bg) 70%, var(--sunken)); }
+.colhead { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; padding: 4px 6px 8px; }
+.colhead .cnt { margin-left: auto; color: var(--muted); font-weight: 500; }
+.colhead .sd { width: 9px; height: 9px; border-radius: 50%; }
+.card { background: var(--surface); border-radius: 14px; padding: 9px; box-shadow: var(--shadow); margin-bottom: 8px;
+  border: 1px solid var(--border); cursor: pointer; transition: transform .15s; }
+.card:hover { transform: translateY(-1px); }
+.card.sel { outline: 2px solid var(--accent); }
+.chead { display: flex; align-items: center; gap: 6px; }
+.chead img { width: 30px; height: 30px; }
+.chead .id { font-weight: 700; font-family: var(--mono); }
+.req { margin: 6px 0; font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.meter { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; align-items: center; font-size: 11.5px; margin-top: 3px; }
+.bar { height: 7px; background: var(--sunken); border-radius: 999px; overflow: hidden; position: relative; }
+.bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--s-build); }
+.bar > i.warn { background: var(--med); } .bar > i.over { background: var(--fail); }
+.bar > i.est { background: repeating-linear-gradient(-45deg, var(--accent) 0 3px, color-mix(in srgb, var(--accent) 35%, transparent) 3px 6px); }
+.bar > i.cost { background: var(--accent); }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 7px; }
+.chip { font-size: 10.5px; border-radius: 999px; padding: 1px 7px; font-weight: 600; }
+.chip.PASS { background: var(--pass-bg); color: var(--pass); }
+.chip.FAIL, .chip.BAD { background: var(--fail-bg); color: var(--fail); }
+.chip.WAIT { background: var(--wait-bg); color: var(--muted); animation: blink 1.6s ease-in-out infinite; }
+.chip.NONE { background: var(--wait-bg); color: var(--muted); }
+@keyframes blink { 50% { opacity: .45; } }
+.foot { display: flex; gap: 4px 6px; align-items: center; flex-wrap: wrap; margin-top: 7px; font-size: 11px; color: var(--muted); }
+.foot > * { white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 700; }
+.r-LOW { background: var(--low-bg); color: var(--low); }
+.r-MEDIUM { background: var(--med-bg); color: var(--med); }
+.r-HIGH { background: var(--high-bg); color: var(--high); font-weight: 800; }
+.r-NONE { background: var(--wait-bg); color: var(--muted); }
+.promo { background: var(--s-merged-bg); color: var(--s-merged); }
+.trust { border-radius: 999px; padding: 0 7px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.trust.session { border: 1px solid var(--s-approval); color: var(--s-approval); }
+.trust.host { border: 1px solid var(--border); color: var(--muted); }
+.trust.git { border: 1px solid var(--pass); color: var(--pass); }
+.blocked-code { font-family: var(--mono); font-size: 11px; color: var(--s-blocked); font-weight: 700; }
+.more { width: 100%; border: 1px dashed var(--border); background: transparent; border-radius: 10px; padding: 4px; cursor: pointer; color: var(--muted); }
+.pop { animation: pop .6s ease-out; }
+@keyframes pop { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 10px transparent; } }
+.bounce { animation: bounce 2s ease-in-out infinite; }
+@keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+
+/* 드로어 */
+.scrim { position: fixed; inset: 0; background: rgba(30,25,20,.25); z-index: 30; display: none; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 500px; max-width: 100%; background: var(--surface); z-index: 40;
+  box-shadow: -8px 0 30px rgba(40,30,20,.18); transform: translateX(105%); transition: transform .25s ease; overflow-y: auto; }
+.drawer.open { transform: none; }
+.drawer.open + .scrim, .scrim.on { display: block; }
+.dhead { display: flex; gap: 12px; padding: 18px 18px 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.dhead img { width: 64px; height: 64px; }
+.dhead .t { font-weight: 800; font-size: 17px; }
+.dhead .x { margin-left: auto; align-self: flex-start; }
+.sec { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.sec h3 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+.sec h3 .trust { margin-left: auto; }
+.ev span { overflow-wrap: anywhere; }
+.ev { display: grid; grid-template-columns: 96px 1fr; gap: 4px 10px; font-size: 12.5px; }
+.ev .ok { color: var(--pass); font-weight: 700; } .ev .no { color: var(--fail); font-weight: 700; }
+.ev .row-fail { background: var(--fail-bg); border-radius: 6px; padding: 0 6px; }
+.rolebar { display: grid; grid-template-columns: 150px 1fr 60px; gap: 8px; align-items: center; font-size: 12.5px; margin: 4px 0; }
+.rolebar .bar { height: 10px; }
+.stage { display: flex; height: 12px; border-radius: 999px; overflow: hidden; margin-top: 6px; }
+.stage i { display: block; height: 100%; background: repeating-linear-gradient(-45deg, var(--c) 0 4px, color-mix(in srgb, var(--c) 40%, transparent) 4px 8px); }
+.hist { display: flex; flex-wrap: wrap; gap: 4px; font-size: 11.5px; }
+.hist span { border-radius: 999px; padding: 1px 8px; }
+.act { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-all; }
+.act div { padding: 2px 0; border-bottom: 1px dotted var(--border); }
+details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+pre.raw { background: var(--sunken); border-radius: 10px; padding: 10px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+
+/* 토큰·모델 */
+.tok { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tok b { font-weight: 700; }
+.tokline { font-size: 11px; color: var(--muted); margin-top: 3px; display: flex; gap: 6px; align-items: center; }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; display: inline-block; }
+table.tt { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+table.tt th { text-align: right; color: var(--muted); font-weight: 600; padding: 3px 4px; border-bottom: 1px solid var(--border); }
+table.tt th:first-child, table.tt td:first-child { text-align: left; }
+table.tt td { text-align: right; padding: 4px; border-bottom: 1px dotted var(--border); white-space: nowrap; }
+table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
+.hit-low { color: var(--med); font-weight: 700; }
+.mix { display: flex; height: 8px; border-radius: 999px; overflow: hidden; margin: 8px 0 2px; }
+.mix i { display: block; height: 100%; }
+.legend { display: flex; gap: 10px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; background: var(--c); }
+.mb { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.mb.haiku { background: #E4F5D6; color: #3F7A1F; } .mb.sonnet { background: #DDEBFB; color: #2F67A8; } .mb.opus { background: #EEE3FA; color: #6E4BB0; }
+:root[data-theme="dark"] .mb.haiku { background: #263A1C; color: #A6E07E; } :root[data-theme="dark"] .mb.sonnet { background: #1F3248; color: #8CC4FF; } :root[data-theme="dark"] .mb.opus { background: #342A47; color: #CDB0FF; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .mb.haiku { background: #263A1C; color: #A6E07E; } :root:not([data-theme="light"]) .mb.sonnet { background: #1F3248; color: #8CC4FF; } :root:not([data-theme="light"]) .mb.opus { background: #342A47; color: #CDB0FF; } }
+.src { font-size: 10.5px; border-radius: 999px; padding: 0 6px; border: 1px solid var(--border); color: var(--muted); }
+.src.config { border-color: var(--accent); color: var(--accent); } .src.env, .src.cli { border-color: var(--text); color: var(--text); font-weight: 700; }
+.stagerow { display: grid; grid-template-columns: 118px auto auto 1fr; gap: 6px; align-items: center; font-size: 12px; padding: 4px 0; border-bottom: 1px dotted var(--border); }
+.stagerow .why { color: var(--muted); font-size: 11.5px; }
+
+/* 데모 패널 (목업 전용) */
+.demo { position: fixed; left: 14px; bottom: 14px; z-index: 50; background: var(--surface); border: 1px dashed var(--accent);
+  border-radius: 14px; padding: 8px 10px; box-shadow: var(--shadow); font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: calc(100% - 28px); }
+.demo b { color: var(--accent); }
+.demo button { border: 1px solid var(--border); background: var(--bg); border-radius: 8px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
+.demo button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.kbd { font-family: var(--mono); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; font-size: 11px; }
+
+.reduce *, .reduce *::before, .reduce *::after { animation: none !important; transition: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 1279px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 899px) {
+  .acard { width: 100%; }
+  .board { grid-template-columns: repeat(8, 220px); }
+  .lanes .axis, .lanes .lane { grid-template-columns: 110px 1fr; min-width: 520px; }
+  .lane .meta { display: none; } .axis > div:last-child { display: none; }
+  .conflict { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap" id="top"></div></header>
+<main class="wrap">
+  <div id="banners"></div>
+  <h2 id="att-h">🙋 나를 기다리는 일 <span class="count" id="att-count"></span></h2>
+  <div class="attention" id="attention" aria-live="polite"></div>
+  <h2>📊 요약</h2>
+  <div class="stats" id="stats"></div>
+  <h2>🛤 작업 레인 <span class="muted small">동시에 무엇이 돌고 있는지 · 같은 파일 충돌 예고</span></h2>
+  <div class="lanes" id="lanes"></div>
+  <h2>📋 보드</h2>
+  <div class="board" id="board"></div>
+  <p class="muted small" style="margin-top:18px">읽기 전용 대시보드 (127.0.0.1). 상태를 바꾸는 명령은 터미널에서 실행합니다. 설계: sw-factory 기획안 dashboard/</p>
+</main>
+<aside class="drawer" id="drawer" aria-label="작업 상세" tabindex="-1"></aside>
+<div class="scrim" id="scrim"></div>
+<script>
+"use strict";
+// 팩토리 대시보드 (읽기 전용). 데이터는 /api/*에서 받고, 모든 문자열은 textContent로 넣는다.
+const STATUS = {
+  QUEUED: { col: "spec", label: "대기", say: "차례를 기다려요", v: "queued", face: "(-.-)zZ" },
+  SPEC_READY: { col: "spec", label: "스펙 작성", say: "스펙과 테스트를 쓰는 중", v: "spec", face: "(•_•)✎" },
+  BUILDING: { col: "build", label: "구현", say: "만드는 중", v: "build", face: "(•̀ᴗ•́)" },
+  RETRY_REQUIRED: { col: "build", label: "재시도", say: "다시 하는 중", v: "retry", face: "(•_•;)" },
+  VERIFYING: { col: "review", label: "검증·리뷰", say: "확인하는 중", v: "verify", face: "(•ㅅ•)" },
+  APPROVAL_REQUIRED: { col: "approval", label: "승인 대기", say: "승인을 기다려요", v: "approval", face: "(•ᴗ•)?" },
+  APPROVED: { col: "merging", label: "머지 중", say: "넣는 중", v: "approved", face: "(•ᴗ•)ノ" },
+  MERGED: { col: "merged", label: "머지됨", say: "머지됐어요", v: "merged", face: "(≧▽≦)" },
+  BLOCKED: { col: "blocked", label: "막힘", say: "막혔어요", v: "blocked", face: "(×_×)" },
+  SETUP_FAILED: { col: "error", label: "오류", say: "준비하다 오류가 났어요", v: "error", face: "(⊙_⊙)!", img: "ERROR" },
+  ERROR: { col: "error", label: "오류", say: "오류가 났어요", v: "error", face: "(⊙_⊙)!" },
+  DROPPED: { col: null, label: "중단", say: "중단됐어요", v: "dropped", face: "(-_-)" },
+};
+const COLUMNS = [
+  ["spec", "Spec", "spec"], ["build", "Build", "build"], ["review", "Review", "verify"], ["approval", "승인 대기", "approval"],
+  ["merging", "머지 중", "approved"], ["merged", "머지됨", "merged"], ["blocked", "막힘", "blocked"], ["error", "오류", "error"],
+];
+const STAGE_COLOR = { spec: "spec", build: "build", review: "verify", merge: "approved", merged: "merged", wait: "approval", blocked: "blocked", dropped: "dropped" };
+const STAGE_NAME = { spec: "spec", build: "build", review: "review", merge: "merge", merged: "✓", wait: "🙋 기다리는 중", blocked: "막힘", dropped: "중단" };
+const ROLE_NAME = { orchestrator: "오케스트레이터", builder: "Builder", reviewer_code: "리뷰어 code", reviewer_security: "리뷰어 security", reviewer_test: "리뷰어 test" };
+const MERGED_KEEP_S = 24 * 3600;
+
+// ---------------------------------------------------------------- 도우미
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v;
+    else if (k === "style") n.setAttribute("style", v);
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return n;
+}
+const two = (n) => String(n).padStart(2, "0");
+const clock = (sec) => { if (!sec) return "-"; const d = new Date(sec * 1000); return `${two(d.getHours())}:${two(d.getMinutes())}`; };
+const clockS = (ms) => { const d = new Date(ms); return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`; };
+const full = (sec) => (sec ? new Date(sec * 1000).toLocaleString("ko-KR") : "");
+const money = (v) => (v == null ? "-" : `$${Number(v).toFixed(2)}`);
+// 보정 단가가 아직 없으면(첫 세션이 끝나기 전) $0이 아니라 "모름"
+const UNPRICED = "보정 단가가 아직 없어요. 확정된 세션이 하나 끝나면 추정이 보여요.";
+const costText = (c) => (c.unpriced ? "≈ ?" : `${c.estimated ? "≈" : ""}${money(c.total_usd)}`);
+const kpiCost = (k) => `${k.cost_estimated ? "≈ " : ""}${money(k.cost_usd)}${k.cost_unpriced ? " + ?" : ""}`;
+const kfmt = (n) => { n = Number(n || 0); return n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n); };
+const hitRate = (t) => { const d = (t.in || 0) + (t.cr || 0) + (t.cw || 0); return d ? (t.cr || 0) / d : 0; };
+const varc = (v) => `var(--s-${v})`;
+const mins = (s) => (s == null ? "-" : (s / 60).toFixed(1));
+function bolt(status, size, cls = "") {
+  const st = STATUS[status];
+  const label = `상태: ${st ? st.label : "알 수 없음"}`;
+  const name = st ? (st.img || status) : "UNKNOWN";
+  const live = ["BUILDING", "VERIFYING", "SPEC_READY", "RETRY_REQUIRED"].includes(status);
+  const img = el("img", { src: `/assets/bolt_${name}.png`, width: size, height: size, alt: label, title: label, class: `${cls} ${live ? "bounce" : ""}` });
+  img.addEventListener("error", () => img.replaceWith(el("span", { title: label, style: `font-size:${Math.max(10, size / 2.6)}px`, text: st ? st.face : "(?_?)" })), { once: true });
+  return img;
+}
+function riskBadge(r) { return el("span", { class: `badge r-${r || "NONE"}`, text: r || "위험 -" }); }
+function trust(kind) {
+  const t = { session: ["⚠ 세션 기록", "작업 worktree 안 파일. 세션이 쓸 수 있어 위조될 수 있어요"],
+    host: ["🏠 호스트", "dispatch가 worktree 밖에 쓴 값"], git: ["✓ Git 확인", "대시보드가 Git으로 직접 확인한 값"] }[kind];
+  return t ? el("span", { class: `trust ${kind}`, title: t[1], text: t[0] }) : null;
+}
+function modelBadge(alias) {
+  const a = String(alias || "");
+  const fam = a.includes("haiku") ? "haiku" : a.includes("sonnet") ? "sonnet" : a.includes("opus") ? "opus" : "";
+  return el("span", { class: `mb ${fam}`, title: fam ? `claude-${fam}-5-5` : a, text: fam ? `${fam} 5.5` : (a || "-") });
+}
+const authIcon = (a) => (a ? el("span", { title: a === "api" ? "API 키" : a === "login" ? "codex login" : "구독 (로그인 세션)", text: a === "api" ? "🔑" : "🎫" }) : null);
+const srcBadge = (s) => (s ? el("span", { class: `src ${s}`, text: { auto: "auto", config: "설정", env: "지정", cli: "지정" }[s] || s }) : null);
+function command(text) {
+  const btn = el("button", { "aria-label": "명령 복사", text: "📋", onclick: (e) => { e.stopPropagation(); copy(text, btn); } });
+  return el("div", { class: "cmd" }, el("code", { text, title: text }), btn);
+}
+function copy(text, btn) {
+  const ok = () => { btn.textContent = "✓ 복사"; btn.classList.add("done"); setTimeout(() => { btn.textContent = "📋"; btn.classList.remove("done"); }, 1500); };
+  const fallback = () => {
+    const t = el("textarea", { style: "position:fixed;left:-9999px" }); t.value = text; document.body.append(t); t.select();
+    try { document.execCommand("copy"); ok(); } finally { t.remove(); }
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(ok, fallback); else fallback();
+}
+async function getJSON(url, etag) {
+  const r = await fetch(url, { cache: "no-store", headers: etag ? { "If-None-Match": etag } : {} });
+  if (r.status === 304) return { notModified: true };
+  if (!r.ok) throw new Error(String(r.status));
+  return { data: await r.json(), etag: r.headers.get("ETag") };
+}
+
+// ---------------------------------------------------------------- 상태
+const S = { snap: null, etag: null, fails: 0, lastOk: 0, open: null, detail: null, detailEtag: null, activity: [], after: 0, settings: null, mergedOpen: false };
+
+// ---------------------------------------------------------------- 그리기
+function renderTop() {
+  const snap = S.snap, top = $("top"); top.replaceChildren();
+  const cards = snap ? snap.jobs : [];
+  const working = cards.filter((c) => ["spec", "build", "review", "merging"].includes(c.column));
+  const hot = working.some((c) => c.time && c.time.cap_s && c.time.active_s / c.time.cap_s >= 0.8);
+  const age = S.lastOk ? Math.round((Date.now() - S.lastOk) / 1000) : null;
+  const sub = snap && snap.subscription;
+  const quota = (v) => el("span", { class: "quota", title: `${Math.round(v * 100)}%` }, [0, 1, 2, 3].map((i) => el("i", { class: v > i / 4 ? "on" : "" })));
+  const t = (snap && snap.kpi && snap.kpi.tokens) || { in: 0, out: 0, cr: 0, cw: 0 };
+  top.append(...[
+    el("div", { class: "brand" }, bolt(working.length ? "BUILDING" : "QUEUED", 34), snap ? snap.repo.name : "factory"),
+    snap ? el("span", { class: "pill" }, "base ", el("b", { text: snap.repo.base })) : null,
+    el("span", { class: "pill" }, el("span", { class: `dot ${hot ? "warn" : ""}` }), `${working.length}개 일하는 중`),
+    el("span", { class: "pill", style: age != null && age > 10 ? "color:var(--med)" : "" }, age == null ? "연결 중…" : age > 10 ? `연결 확인 중… (${age}초 전 갱신)` : `${clockS(S.lastOk)} 갱신`),
+    el("span", { class: "spacer" }),
+    el("span", { class: "pill tok", title: `입력 ${t.in} · 출력 ${t.out} · 캐시 읽기 ${t.cr} · 캐시 쓰기 ${t.cw}` },
+      el("span", {}, "⬆ ", el("b", { text: kfmt(t.in) })), el("span", {}, "⬇ ", el("b", { text: kfmt(t.out) })),
+      el("span", {}, "💾 ", el("b", { text: kfmt(t.cr + t.cw) }), ` (적중 ${Math.round(hitRate(t) * 100)}%)`),
+      el("b", { text: snap ? kpiCost(snap.kpi) : money(0), title: snap && snap.kpi.cost_unpriced ? UNPRICED : null })),
+    sub && sub.five_hour != null ? el("span", { class: "pill", title: `구독 사용량 (가장 최근 세션 로그) · 5시간 창 초기화 ${full(sub.five_hour_resets_at)}` },
+      "구독 5h ", quota(sub.five_hour), ` ${Math.round(sub.five_hour * 100)}%`, sub.seven_day != null ? ` · 7d ${Math.round(sub.seven_day * 100)}%` : "") : null,
+    el("button", { class: "iconbtn", "aria-label": "설정 보기", onclick: openSettings, text: "⚙ 설정" }),
+    el("button", { class: "iconbtn", "aria-label": "테마 바꾸기", onclick: cycleTheme, text: themeIcon() }),
+  ].filter((n) => n != null)); // append는 null을 글자 "null"로 넣는다
+}
+function renderBanners() {
+  const b = $("banners"); b.replaceChildren();
+  if (S.fails >= 3) b.append(el("div", { class: "banner warn" }, bolt("RETRY_REQUIRED", 28), "서버 응답이 없어요. monitor.py가 켜져 있는지 확인해 주세요. (마지막 값은 그대로 보여요)"));
+  for (const w of (S.snap && S.snap.warnings) || []) b.append(el("div", { class: "banner danger" }, bolt("UNKNOWN", 28), w));
+}
+const cardOf = (key) => (S.snap ? S.snap.jobs.find((c) => c.key === key) : null);
+const waited = (c) => (c.last_transition_at && S.snap ? Math.round((S.snap.generated_at - c.last_transition_at) / 60) : null);
+function firstCommand(c) {
+  if (c.status === "APPROVAL_REQUIRED") return c.source === "interactive" ? `python scripts/factory.py approve ${c.id}` : `python scripts/dispatch.py --approve ${c.id}`;
+  if (c.status === "BLOCKED") return `python scripts/factory.py resume ${c.id}`;
+  return "python scripts/factory.py status --all";
+}
+function renderAttention() {
+  const box = $("attention"); box.replaceChildren();
+  const items = ((S.snap && S.snap.attention) || []).map((a) => cardOf(a.key)).filter(Boolean);
+  $("att-count").textContent = items.length ? String(items.length) : "";
+  document.title = (items.length ? `(${items.length}) ` : "") + "팩토리 대시보드";
+  if (!items.length) { box.append(el("div", { class: "empty-att" }, bolt("MERGED", 40), "할 일이 없어요. 로봇들이 일하는 중 (｡•̀ᴗ-)✧")); return; }
+  for (const c of items) {
+    const st = STATUS[c.status] || { say: c.status };
+    const kind = c.status === "APPROVAL_REQUIRED" ? "approval" : c.status === "BLOCKED" ? "blocked" : "error";
+    const rv = Object.values(c.reviewers || {});
+    const sub = c.status === "BLOCKED" ? (c.blocked && c.blocked.detail) : c.status === "APPROVAL_REQUIRED" ? c.requirement : c.error || c.requirement;
+    const w = waited(c);
+    box.append(el("div", { class: `acard k-${kind}`, tabindex: 0, role: "button", onclick: () => openDrawer(c.key), onkeydown: (e) => e.key === "Enter" && openDrawer(c.key) },
+      el("div", { class: "ahead" }, bolt(c.status, 48),
+        el("div", {}, el("div", { class: "atitle" }, el("span", { class: "mono", text: c.id }), ` ${st.say}`),
+          el("div", { class: "small" }, c.risk ? riskBadge(c.risk) : null, " ", el("span", { text: sub || "" })))),
+      el("div", { class: "aline" },
+        c.blocked ? el("span", { class: "blocked-code", text: c.blocked.reason }) : null,
+        rv.length ? el("span", { text: `리뷰 ${rv.map((v) => (v === "PASS" ? "✓" : v === "FAIL" ? "✗" : "?")).join("")}` }) : null,
+        trust(c.trust), w != null ? el("span", { class: "muted", text: `기다린 지 ${w}분` }) : null),
+      c.column === "error" ? null : command(firstCommand(c))));
+  }
+}
+function renderStats() {
+  const k = S.snap && S.snap.kpi; const s = $("stats"); s.replaceChildren();
+  if (!k) return;
+  const tile = (v, l, miss) => el("div", { class: "stat" }, el("div", { class: "v", text: v }), el("div", { class: "l" }, miss ? el("span", { class: "miss", title: "목표 미달 (기획안 3장)" }) : null, l));
+  const pct = (v) => (v == null ? "-" : `${Math.round(v * 100)}%`);
+  s.append(
+    tile(pct(k.success_rate), `성공률 (승인 대기 이상 도달 / 전체 ${k.total}건) · 목표 70%`, k.success_rate != null && k.success_rate < 0.7),
+    tile(pct(k.intervention_rate), "사람 개입률 · 목표 30% 이하", k.intervention_rate != null && k.intervention_rate > 0.3),
+    tile(k.lead_time_min_median == null ? "-" : `${k.lead_time_min_median}분`, "리드타임 중앙값 · 목표 소형 10분", k.lead_time_min_median != null && k.lead_time_min_median > 10),
+    tile(kpiCost(k), `작업 비용 합계 (세션 + 리뷰어, API 환산)${k.cost_unpriced ? ` · 단가 없음 ${k.cost_unpriced}건` : ""}`, false),
+    el("div", { class: "muted small", style: "grid-column:1/-1", text: "오판율은 정답표로 사람이 확인해요." }));
+}
+function renderLanes() {
+  const box = $("lanes"); box.replaceChildren();
+  const snap = S.snap; if (!snap) return;
+  const now = snap.generated_at;
+  const lanes = snap.lanes.filter((l) => l.segments.length && (!["MERGED", "DROPPED"].includes(l.status) || now - l.segments.at(-1).start < MERGED_KEEP_S)).slice(-12);
+  if (!lanes.length) { box.append(el("div", { class: "empty-att" }, bolt("QUEUED", 40), "지금 레인이 비어 있어요.")); return; }
+  lanes.sort((a, b) => a.segments[0].start - b.segments[0].start);
+  const t0 = Math.floor(Math.min(...lanes.map((l) => l.segments[0].start)) / 300) * 300, t1 = now + 120;
+  const pct = (t) => `${((t - t0) / (t1 - t0)) * 100}%`;
+  const ticks = el("div", { class: "ticks" });
+  const step = Math.max(300, Math.ceil((t1 - t0) / 8 / 300) * 300);
+  for (let t = t0; t <= t1; t += step) ticks.append(el("span", { style: `left:${pct(t)}`, text: clock(t) }));
+  box.append(el("div", { class: "axis" }, el("div", { class: "small muted", text: "작업" }), ticks, el("div", { class: "small muted", text: "활성 / 상한" })));
+  const conflictAfter = new Map((snap.conflicts || []).map((c) => [c.b, c]));
+  for (const lane of lanes) {
+    const c = cardOf(lane.key);
+    const track = el("div", { class: "track" });
+    lane.segments.forEach((g, i) => {
+      const end = g.end == null ? now : g.end;
+      const last = i === lane.segments.length - 1;
+      const wait = g.stage === "wait" || g.stage === "blocked";
+      const live = last && g.end == null && !wait;
+      const span = Math.max(end - g.start, 30);
+      track.append(el("div", { class: `seg ${wait ? "wait" : ""} ${g.stage === "blocked" ? "blocked" : ""} ${live ? "live" : ""}`,
+        style: `left:${pct(g.start)};width:max(14px, calc(${pct(g.start + span)} - ${pct(g.start)}));${wait ? "" : `background:${varc(STAGE_COLOR[g.stage] || "spec")}`}`,
+        title: `${STAGE_NAME[g.stage] || g.stage} · ${clock(g.start)}~${g.end == null ? "지금" : clock(end)} (${Math.round(span / 60)}분)`,
+        text: span / (t1 - t0) > 0.07 ? (STAGE_NAME[g.stage] || g.stage) : "" }));
+    });
+    track.append(el("div", { class: "now", style: `left:${pct(now)}`, title: "지금" }));
+    box.append(el("div", { class: "lane", role: "button", tabindex: 0, onclick: () => openDrawer(lane.key), onkeydown: (e) => e.key === "Enter" && openDrawer(lane.key) },
+      el("div", { class: "who" }, bolt(lane.status, 26), el("span", { class: "mono", text: c ? c.id : lane.key })),
+      track, el("div", { class: "meta", text: c && c.time ? `${mins(c.time.active_s)} / ${mins(c.time.cap_s)}분` : "" })));
+    const cf = conflictAfter.get(lane.key);
+    if (cf) box.append(el("div", { class: "conflict", role: "note" }, "⚡ ", el("b", { text: `${cf.a} ↔ ${cf.b}` }), " 같은 파일을 고치는 중: ", el("code", { text: cf.files.join(", ") }), el("span", { class: "muted", text: " · 늦게 끝나는 쪽이 충돌할 수 있어요" }), trust("git")));
+  }
+  box.append(el("div", { class: "lanes-foot" }, el("span", { text: "점선 = 사람을 기다리는 시간" }), el("span", { text: "▶ = 지금 진행 중" }), el("span", {}, "구간은 상태 이력 기준 ", trust("session"))));
+}
+function card(c) {
+  const st = STATUS[c.status] || { label: c.status };
+  const tr = c.time && c.time.cap_s ? c.time.active_s / c.time.cap_s : 0;
+  const cost = c.cost;
+  const chips = ["code", "security", "test"].map((r) => {
+    const v = (c.reviewers || {})[r];
+    const cls = v === "PASS" ? "PASS" : v === "FAIL" ? "FAIL" : v ? "BAD" : "NONE";
+    const mark = v === "PASS" ? "✓" : v === "FAIL" ? "✗" : v ? "?" : "…";
+    return el("span", { class: `chip ${cls}`, title: `${r}: ${v || "아직 리뷰 전"}`, text: `${r === "security" ? "sec" : r} ${mark}` });
+  });
+  const t = c.tokens || {};
+  const tok = (t.in || 0) + (t.out || 0) + (t.cr || 0) + (t.cw || 0);
+  const live = ["spec", "build", "review", "merging"].includes(c.column);
+  return el("div", { class: "card", tabindex: 0, role: "button", "data-key": c.key, "aria-label": `${c.id}, ${st.label}, 위험 ${c.risk || "-"}, 비용 ${cost ? costText(cost) : "-"}`,
+    onclick: () => openDrawer(c.key), onkeydown: (e) => e.key === "Enter" && openDrawer(c.key) },
+    el("div", { class: "chead" }, bolt(c.status, 30), el("span", { class: "id", text: c.id }), c.source === "interactive" ? el("span", { class: "muted small", text: "대화형" }) : null, el("span", { class: "spacer" }), riskBadge(c.risk)),
+    el("div", { class: "req", text: c.requirement }),
+    c.blocked ? el("div", { class: "small" }, el("span", { class: "blocked-code", text: c.blocked.reason }), " ", el("span", { class: "muted", text: c.blocked.detail || "" })) : null,
+    c.error ? el("div", { class: "small blocked-code", text: c.error }) : null,
+    c.time ? el("div", { class: "meter" }, el("span", { text: "⏱" }), el("div", { class: "bar" }, el("i", { class: tr >= 1 ? "over" : tr >= 0.8 ? "warn" : "", style: `width:${Math.min(100, tr * 100)}%` })), el("span", { class: "num", text: `${mins(c.time.active_s)}/${mins(c.time.cap_s)}분` })) : null,
+    cost ? el("div", { class: "meter" }, el("span", { text: "💰" }), el("div", { class: "bar" }, el("i", { class: cost.estimated ? "est" : "cost", style: `width:${Math.min(100, (cost.total_usd / (cost.cap_usd || 6.5)) * 100)}%` })), el("span", { class: "num", title: cost.unpriced ? UNPRICED : null, text: `${costText(cost)}/$${cost.cap_usd}` })) : null,
+    tok ? el("div", { class: "tokline", title: `입력 ${t.in} · 출력 ${t.out} · 캐시 읽기 ${t.cr} · 캐시 쓰기 ${t.cw}` }, live ? el("span", { class: "live-dot" }) : null, `🪙 ${kfmt(tok)} · 캐시 ${Math.round(hitRate(t) * 100)}%`) : null,
+    c.column === "error" ? null : el("div", { class: "chips" }, chips),
+    el("div", { class: "foot" }, el("span", { text: `${c.agent || "-"} ·` }), c.builder_model ? modelBadge(c.builder_model) : null, authIcon(c.orchestrator && c.orchestrator.auth),
+      c.promoted ? el("span", { class: "badge promo", title: "실패 2회 뒤 상위 모델로 승격", text: "↑opus" }) : null,
+      c.attempts ? el("span", { text: `실패 ${c.attempts}회` }) : null, el("span", { class: "spacer" }), trust(c.trust)));
+}
+function renderBoard() {
+  const b = $("board"); b.replaceChildren();
+  const snap = S.snap; if (!snap) return;
+  for (const [key, name, v] of COLUMNS) {
+    let list = snap.jobs.filter((c) => c.column === key).sort((a, x) => (x.last_transition_at || 0) - (a.last_transition_at || 0));
+    let older = 0;
+    if (key === "merged") { const recent = list.filter((c) => snap.generated_at - (c.last_transition_at || 0) < MERGED_KEEP_S); older = list.length - recent.length; list = recent; }
+    const col = el("section", { class: `col ${key === "approval" && list.length ? "hot" : ""}`, "aria-label": `${name} ${list.length}건` },
+      el("div", { class: "colhead" }, el("span", { class: "sd", style: `background:${varc(v)}` }), name, el("span", { class: "cnt", text: String(list.length) })));
+    const shown = key === "merged" && !S.mergedOpen ? list.slice(0, 2) : list;
+    shown.forEach((c) => col.append(card(c)));
+    if (key === "merged" && list.length > 2) col.append(el("button", { class: "more", onclick: () => { S.mergedOpen = !S.mergedOpen; renderBoard(); }, text: S.mergedOpen ? "접기" : `더 보기 (${list.length - 2})` }));
+    if (older) col.append(el("div", { class: "muted small", style: "padding:4px 6px", text: `24시간 지난 머지 ${older}건은 숨김` }));
+    if (!list.length && !older) col.append(el("div", { class: "muted small", style: "padding:6px", text: "비어 있어요" }));
+    b.append(col);
+  }
+  if (S.open) document.querySelector(`.card[data-key="${CSS.escape(S.open)}"]`)?.classList.add("sel");
+}
+function render() { renderTop(); renderBanners(); renderAttention(); renderStats(); renderLanes(); renderBoard(); }
+
+// ---------------------------------------------------------------- 드로어
+function sec(title, trustKind, ...kids) { return el("section", { class: "sec" }, el("h3", {}, title, trust(trustKind)), ...kids); }
+function openDrawer(key) {
+  S.open = key; S.detail = null; S.detailEtag = null; S.activity = []; S.after = 0;
+  document.querySelectorAll(".card.sel").forEach((n) => n.classList.remove("sel"));
+  document.querySelector(`.card[data-key="${CSS.escape(key)}"]`)?.classList.add("sel");
+  const c = cardOf(key);
+  const d = $("drawer"); d.replaceChildren(el("div", { class: "dhead" }, bolt(c ? c.status : "QUEUED", 64), el("div", { class: "t", text: `${c ? c.id : key} 불러오는 중…` }), el("button", { class: "iconbtn x", "aria-label": "닫기 (Esc)", onclick: closeDrawer, text: "✕" })));
+  d.classList.add("open"); $("scrim").classList.add("on"); d.focus();
+  if (c && c.source === "dispatch") { renderErrorDrawer(c); return; }
+  refreshDrawer();
+}
+function renderErrorDrawer(c) {
+  const d = $("drawer"); d.replaceChildren();
+  d.append(el("div", { class: "dhead" }, bolt(c.status, 64), el("div", {}, el("div", { class: "t", text: `${c.id} · ${STATUS[c.status] ? STATUS[c.status].say : c.status}` }), el("div", { class: "small", text: c.requirement })),
+    el("button", { class: "iconbtn x", "aria-label": "닫기 (Esc)", onclick: closeDrawer, text: "✕" })));
+  d.append(sec("오류", "host", el("pre", { class: "raw", text: c.error || "-" }), el("div", { class: "small muted", text: "dispatch 결과에만 있는 작업이에요 (상태 파일이 없음)." })));
+}
+async function refreshDrawer() {
+  const key = S.open; if (!key) return;
+  try {
+    const r = await getJSON(`/api/job/${encodeURIComponent(key)}`, S.detailEtag);
+    if (S.open !== key) return;
+    if (!r.notModified) { S.detail = r.data; S.detailEtag = r.etag; }
+    const a = await getJSON(`/api/job/${encodeURIComponent(key)}/activity?after=${S.after}`);
+    if (S.open !== key) return;
+    if (a.data && a.data.length) { S.activity = [...S.activity, ...a.data].slice(-30); S.after = a.data.at(-1).n; }
+    if (!r.notModified || (a.data && a.data.length)) renderDetail();
+  } catch (e) {
+    if (!S.detail) $("drawer").append(el("div", { class: "sec muted", text: "작업 정보를 불러오지 못했어요." }));
+  }
+}
+function renderDetail() {
+  const j = S.detail; if (!j) return;
+  const d = $("drawer"); const scroll = d.scrollTop; d.replaceChildren();
+  const st = STATUS[j.status] || { say: "알 수 없는 상태" };
+  d.append(el("div", { class: "dhead" }, bolt(j.status, 64),
+    el("div", {}, el("div", { class: "t" }, el("span", { class: "mono", text: j.id }), ` · ${st.say}`),
+      el("div", { class: "small" }, riskBadge(j.risk), ` ${j.agent || "-"} · ${j.isolation || (j.source === "interactive" ? "대화형" : "-")}`),
+      el("div", { class: "small", style: "margin-top:4px", text: j.requirement || "" })),
+    el("button", { class: "iconbtn x", "aria-label": "닫기 (Esc)", onclick: closeDrawer, text: "✕" })));
+  d.append(sec("다음 명령", null, ...j.next.map(command),
+    el("div", { class: "small muted", style: "margin-top:6px" }, "실행 버튼은 없어요. 터미널에 붙여 넣어 실행합니다. ", el("span", { class: "kbd", text: "c" }), " 첫 명령 복사")));
+  const ok = (v) => el("span", { class: v ? "ok" : "no", text: v ? "✓" : "✗" });
+  const ev = el("div", { class: "ev" });
+  const e = j.evidence;
+  if (e.red.length) ev.append(el("span", { text: "Red" }), el("span", {}, ok(e.red.at(-1) === "RED_OK" || e.red.at(-1) === "GREEN_OK"), ` ${e.red.join(" → ")}`));
+  for (const v of e.verify) ev.append(el("span", { text: "verify" }), el("span", { class: v.exit ? "row-fail" : "" }, ok(v.green === "GREEN_OK" && !v.exit), ` Green ${v.green || "-"} · exit ${v.exit} · 범위 ${(v.args || []).join(" ") || "전체"}`));
+  if (e.last_failure) ev.append(el("span", { text: "마지막 실패" }), el("span", { class: "row-fail", text: typeof e.last_failure === "string" ? e.last_failure : JSON.stringify(e.last_failure) }));
+  if (e.acceptance_tests.length) ev.append(el("span", { text: "수락 테스트" }), el("span", { class: "mono", style: "font-size:11.5px", text: e.acceptance_tests.join("\n") }));
+  if (e.changed_tests.length) ev.append(el("span", { text: "바꾼 기존 테스트" }), el("span", { class: "mono", style: "font-size:11.5px", text: e.changed_tests.join("\n") }));
+  if (!ev.childNodes.length) ev.append(el("span", { text: "-" }), el("span", { class: "muted", text: "아직 검증 전이에요" }));
+  d.append(sec("검증 증거", "session", ev));
+  const host = el("div", { class: "ev" });
+  if (j.host.merge_commit) host.append(el("span", { text: "머지 커밋" }), el("span", {}, el("code", { text: j.host.merge_commit.slice(0, 12) }), j.host.merged_into_base ? " base에 포함 " : " base에서 찾지 못함 ", j.host.merged_into_base ? trust("git") : null));
+  for (const evn of j.host.events || []) host.append(el("span", { text: { merge: "호스트 머지", approve: "사람 승인", reject: "반려" }[evn.action] || evn.action }),
+    el("span", { text: `${clock(evn.at)} · ${evn.status}${(evn.merge_checks || []).length ? ` · 재검증 ${evn.merge_checks.map((m) => `${m.green_verdict}/exit ${m.verify_exit}`).join(", ")}` : ""}` }));
+  if (j.blocked) host.append(el("span", { text: "BLOCKED" }), el("span", {}, el("span", { class: "blocked-code", text: j.blocked.reason }), ` ${j.blocked.detail || ""}`));
+  if (host.childNodes.length) d.append(sec("호스트가 확인한 값", "host", host));
+  if (j.reviews.length) {
+    const lastRound = Math.max(...j.reviews.map((r) => r.round || 0));
+    const now = j.reviews.filter((r) => (r.round || 0) === lastRound);
+    const box = sec(`리뷰 (${lastRound}회차)`, "session", el("div", { class: "chips" }, now.map((r) => el("span", { class: `chip ${r.verdict === "PASS" ? "PASS" : r.verdict === "FAIL" ? "FAIL" : "BAD"}`, text: `${r.reviewer} ${r.verdict === "PASS" ? "✓ PASS" : r.verdict === "FAIL" ? "✗ FAIL" : "? 못 읽음"}` }))));
+    for (const r of now) if ((r.issues || []).length) box.append(el("ul", { style: "margin:6px 0;padding-left:18px;font-size:12px" }, r.issues.map((i) => el("li", { text: `[${r.reviewer}] ${i}` }))));
+    for (const r of now) if (r.path) {
+      const name = r.path.split("/").pop();
+      const pre = el("pre", { class: "raw", text: "펼치면 불러와요" });
+      const det = el("details", { style: "margin-top:4px" }, el("summary", { text: `원문 보기 (${r.reviewer})` }), pre);
+      det.addEventListener("toggle", async () => { if (det.open) { try { const resp = await fetch(`/api/job/${encodeURIComponent(j.key)}/review/${encodeURIComponent(name)}`, { cache: "no-store" }); pre.textContent = resp.ok ? await resp.text() : "불러오지 못했어요"; } catch (err) { pre.textContent = "불러오지 못했어요"; } } });
+      box.append(det);
+    }
+    d.append(box);
+  }
+  const mo = j.models || {};
+  const rows = [];
+  if (j.orchestrator && (j.orchestrator.alias || j.orchestrator.model)) rows.push(["orchestrator", j.orchestrator.alias || j.orchestrator.model, j.orchestrator.source, j.orchestrator.reason, j.orchestrator.auth, "host"]);
+  for (const k of ["builder", "reviewer_code", "reviewer_security", "reviewer_test"]) if (mo[k]) rows.push([k, mo[k].alias || mo[k].model, mo[k].source, mo[k].reason, k === "builder" ? (j.orchestrator && j.orchestrator.auth) : mo[k].auth, "session"]);
+  if (rows.length) d.append(sec("모델·인증", null, ...rows.map(([k, alias, src, why, auth, tr]) => el("div", { class: "stagerow" },
+    el("span", { text: ROLE_NAME[k] }), modelBadge(alias), el("span", {}, authIcon(auth), " ", srcBadge(src)), el("span", { class: "why" }, `${why || ""}${k === "builder" ? " · 인증은 오케스트레이터를 따름" : ""} `, trust(tr))))));
+  const files = (j.files && j.files.items) || [];
+  d.append(sec("위험 근거", null, el("ul", { style: "margin:0;padding-left:18px;font-size:12.5px" }, (j.risk_reasons.length ? j.risk_reasons : ["아직 판단 전 (spec 뒤에 정해져요)"]).map((r) => el("li", { text: r }))),
+    files.length ? el("div", { class: "small", style: "margin-top:6px" }, `바뀐 파일 ${files.length}개 +${files.reduce((s, f) => s + f.added, 0)} −${files.reduce((s, f) => s + f.deleted, 0)} `, trust("git")) : null,
+    files.length ? el("details", { style: "margin-top:4px" }, el("summary", { text: "파일 목록" }), el("ul", { class: "mono", style: "font-size:11.5px;margin:4px 0;padding-left:18px" }, files.map((f) => el("li", { text: `${f.path}  ${f.binary ? "(바이너리)" : `+${f.added} −${f.deleted}`}${f.untracked ? " (새 파일)" : ""}` })))) : null));
+  d.append(costSection(j));
+  const hist = el("div", { class: "hist" });
+  j.history.forEach((g, i) => { const s2 = STATUS[g.status] || { v: "error", label: g.status }; hist.append(el("span", { style: `background:${varc(s2.v + "-bg")};color:${varc(s2.v)}`, title: full(g.at), text: `${clock(g.at)} ${s2.label}${g.count > 1 ? ` ×${g.count}` : ""}` }), i < j.history.length - 1 ? "→" : ""); });
+  d.append(sec("진행 기록", "session", j.history.length ? hist : el("span", { class: "muted small", text: "상태 기록이 없어요" }),
+    el("div", { class: "small muted", style: "margin-top:4px", text: `시도 ${j.attempts}회${(j.blocks || []).length ? ` · BLOCKED ${j.blocks.length}번` : ""}` })));
+  d.append(sec("최근 활동", "session", S.activity.length ? el("div", { class: "act" }, S.activity.map((a) => el("div", { text: `${a.at ? clock(a.at) : "--:--"}  ${a.text}` })))
+    : el("span", { class: "muted small", text: j.source === "interactive" ? "dispatch 작업만 로그가 있어요" : "아직 활동이 없어요" }),
+    el("div", { class: "small muted", style: "margin-top:4px", text: "키 형태 문자열은 [가림]으로 바꿔 보여요." })));
+  d.scrollTop = scroll;
+}
+function costSection(j) {
+  const c = j.cost, job = c.job;
+  const box = sec(`비용·토큰 ${job.estimated ? "(≈ 추정)" : "(확정)"} · API 환산`, null);
+  if (c.roles.length) {
+    const td = (v) => el("td", { title: v == null ? "제공 안 됨" : Number(v).toLocaleString(), text: v == null ? "-" : kfmt(v) });
+    const hit = (x) => { const h = hitRate(x); return el("td", { class: h < 0.8 ? "hit-low" : "", text: `${Math.round(h * 100)}%` }); };
+    const sum = { in: 0, out: 0, cr: 0, cw: 0 };
+    for (const r of c.roles) for (const k of Object.keys(sum)) sum[k] += Number((r.usage || {})[k] || 0);
+    box.append(el("table", { class: "tt" },
+      el("thead", {}, el("tr", {}, ["역할", "모델", "입력", "출력", "캐시 읽기", "캐시 쓰기", "적중", "$"].map((h) => el("th", { text: h })))),
+      el("tbody", {}, c.roles.map((r) => el("tr", {}, el("td", { text: ROLE_NAME[r.role] || r.role }), el("td", {}, modelBadge(r.model)), ...(r.usage ? [td(r.usage.in), td(r.usage.out), td(r.usage.cr), td(r.usage.cw), hit(r.usage)] : [el("td", { colspan: 5, class: "muted", style: "text-align:center", text: "항목별 토큰 없음 (예전 기록)" })]),
+        el("td", { text: r.usd == null ? "-" : `${r.estimated ? "≈" : ""}${Number(r.usd).toFixed(2)}` }))),
+        el("tr", { class: "sum" }, el("td", { text: "합계" }), el("td", {}), td(sum.in), td(sum.out), td(sum.cr), td(sum.cw), hit(sum), el("td", { text: `${job.estimated ? "≈" : ""}${Number(job.total_usd).toFixed(2)}` })))));
+    const all = sum.in + sum.out + sum.cr + sum.cw || 1;
+    box.append(el("div", { class: "mix", title: "토큰 구성" }, [["in", "#3B7BC8"], ["out", "#D97757"], ["cr", "#7BC47F"], ["cw", "#E8B93B"]].map(([k, col]) => el("i", { style: `width:${(sum[k] / all) * 100}%;background:${col}` }))),
+      el("div", { class: "legend" }, el("span", { style: "--c:#3B7BC8", text: `입력 ${kfmt(sum.in)}` }), el("span", { style: "--c:#D97757", text: `출력 ${kfmt(sum.out)}` }), el("span", { style: "--c:#7BC47F", text: `캐시 읽기 ${kfmt(sum.cr)}` }), el("span", { style: "--c:#E8B93B", text: `캐시 쓰기 ${kfmt(sum.cw)}` })));
+    const unattr = c.roles.reduce((s, r) => s + (r.unattributed || 0), 0);
+    if (unattr) box.append(el("div", { class: "small muted", text: `Builder 토큰 중 ${kfmt(unattr)}는 스트림에 항목별로 나오지 않아 합계에만 있어요.` }));
+  } else box.append(el("div", { class: "small muted", text: "아직 사용량이 없어요" }));
+  const b = c.budgets || {};
+  box.append(el("div", { class: "small", style: "margin-top:6px" }, el("b", { text: `합계 ${costText(job)}`, title: job.unpriced ? UNPRICED : null }), ` (세션 ${money(job.session_usd)} + 리뷰어 ${money(job.reviewers_usd)}) / 작업 총액 상한 $${b.job_total} · 적용: 세션 $${b.session} · 리뷰어 호출 $${b.reviewer_call} · 리뷰어 합계 $${b.reviewer_total}`));
+  if (c.stages && c.stages.length) {
+    const colors = { spec: "--s-spec", build: "--s-build", review: "--s-verify", merge: "--s-approved" };
+    box.append(el("div", { class: "small muted", style: "margin-top:8px", text: "단계별 ≈ (추정·표시 전용, 상태 이력 기준)" }),
+      el("div", { class: "stage" }, c.stages.map((s) => el("i", { title: `${s.stage} ≈ ${Math.round(s.share * 100)}%`, style: `width:${s.share * 100}%;--c:var(${colors[s.stage] || "--s-spec"})` }))),
+      el("div", { class: "small muted", text: c.stages.map((s) => `${s.stage} ${Math.round(s.share * 100)}%`).join(" · ") }));
+  }
+  box.append(el("div", { class: "small muted", style: "margin-top:6px" }, "상한 바꾸기: ", el("code", { text: "python scripts/factory_settings.py set budgets <키> <값>" })));
+  return box;
+}
+async function openSettings() {
+  S.open = null;
+  const d = $("drawer"); d.replaceChildren(el("div", { class: "dhead" }, bolt("SPEC_READY", 64), el("div", { class: "t", text: "⚙ 설정 (읽기 전용)" }), el("button", { class: "iconbtn x", "aria-label": "닫기 (Esc)", onclick: closeDrawer, text: "✕" })));
+  d.classList.add("open"); $("scrim").classList.add("on"); d.focus();
+  try { S.settings = (await getJSON("/api/settings")).data; } catch (e) { d.append(el("div", { class: "sec muted", text: "설정을 불러오지 못했어요." })); return; }
+  const s = S.settings;
+  if (s.error) { d.append(sec("설정 오류", null, el("pre", { class: "raw", text: s.error }))); return; }
+  d.append(sec("단계별 모델·인증", null, ...Object.entries(s.stages).map(([k, v]) => el("div", { class: "stagerow" },
+    el("span", { text: ROLE_NAME[k] || k }), v.model === "auto" ? el("span", { class: "src", text: "auto" }) : modelBadge(v.model),
+    el("span", {}, v.auth === "auto" ? el("span", { class: "src", text: "auth auto" }) : authIcon(v.auth), k === "builder" ? el("span", { class: "muted small", text: " 오케스트레이터를 따름" }) : null),
+    el("span", { class: "why", text: v.model === "auto" ? `자동: ${s.auto_rules[k]}` : "설정으로 지정" }))),
+    el("div", { class: "small muted", style: "margin-top:8px", text: `모델은 Claude 최신 세 가지만: ${Object.entries(s.models).map(([a, m]) => `${a}=${m}`).join(" · ")}. 인증 auto = ANTHROPIC_API_KEY가 있으면 🔑 API, 없으면 🎫 구독. 컨테이너 격리는 API만.` })));
+  d.append(sec("비용 상한 (API 환산, new 때 작업에 고정)", null, el("div", { class: "ev" }, Object.entries(s.budgets).flatMap(([k, v]) => [el("span", { text: k }), el("span", { text: `$${v}` })]))));
+  d.append(sec("바꾸기 (터미널, 사람 전용)", null, ...s.commands.map(command),
+    el("div", { class: "small muted", style: "margin-top:6px", text: "한 번만: FACTORY_MODEL_BUILDER=opus … · 오케스트레이터는 dispatch.py --model / --auth. 화면에서는 바꾸지 않아요." })));
+}
+function closeDrawer() { $("drawer").classList.remove("open"); $("scrim").classList.remove("on"); S.open = null; document.querySelectorAll(".card.sel").forEach((n) => n.classList.remove("sel")); }
+
+// ---------------------------------------------------------------- 테마, 키보드, 폴링
+const THEMES = ["system", "light", "dark"];
+let theme = "system";
+try { theme = localStorage.getItem("factory-theme") || "system"; } catch (e) { /* 저장소 없음 */ }
+function applyTheme() { if (theme === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", theme); }
+function themeIcon() { return { system: "🖥 시스템", light: "☀ 밝게", dark: "🌙 어둡게" }[theme]; }
+function cycleTheme() { theme = THEMES[(THEMES.indexOf(theme) + 1) % 3]; try { localStorage.setItem("factory-theme", theme); } catch (e) { /* 무시 */ } applyTheme(); renderTop(); }
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("input,textarea")) return;
+  const keys = S.snap ? S.snap.jobs.filter((c) => c.column !== "hidden").map((c) => c.key) : [];
+  if (e.key === "Escape") closeDrawer();
+  else if ((e.key === "j" || e.key === "k") && keys.length) {
+    const i = S.open ? keys.indexOf(S.open) : -1;
+    openDrawer(keys[(i + (e.key === "j" ? 1 : keys.length - 1)) % keys.length]);
+  } else if (e.key === "c" && S.open) { const b = document.querySelector("#drawer .cmd button"); if (b) b.click(); }
+});
+$("scrim").addEventListener("click", closeDrawer);
+
+async function poll() {
+  try {
+    const r = await getJSON("/api/snapshot", S.etag);
+    if (!r.notModified) { S.snap = r.data; S.etag = r.etag; }
+    S.fails = 0; S.lastOk = Date.now();
+    if (!r.notModified) render(); else { renderTop(); renderBanners(); }
+    if (S.open) refreshDrawer();
+  } catch (e) {
+    S.fails += 1; renderTop(); renderBanners();
+  }
+  setTimeout(poll, document.hidden ? 10000 : 2000);
+}
+applyTheme(); render(); poll();
+</script>
+</body>
+</html>

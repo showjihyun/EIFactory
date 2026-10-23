@@ -53,6 +53,13 @@
     ["backend", ["uv", "sync", "-q"]],
     ["frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]]
   ],
+  "budgets": {
+    "_설명": "비용 상한 (API 환산 USD, 임시값). new 때 작업에 고정된다. 바꾸기: python scripts/factory_settings.py set budgets <키> <값>",
+    "session": 5.0,
+    "reviewer_call": 0.5,
+    "reviewer_total": 1.5,
+    "job_total": 6.5
+  },
   "stages": {
     "_설명": "단계별 모델(auto|haiku|sonnet|opus)과 인증(auto|subscription|api). 바꿀 때는 python scripts/factory_settings.py set <단계> model|auth <값> (사람 전용). auto 규칙은 factory.py stage_model",
     "orchestrator": {"model": "auto", "auth": "auto"},

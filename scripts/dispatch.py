@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factory_config import CLAUDE_MODELS, DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
-from report import session_usage  # noqa: E402
+from report import job_cost, live_usage, session_usage, unit_prices  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 # 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
@@ -541,6 +541,36 @@ def session_info(root: Path, job_id: str) -> dict[str, Any]:
     return info
 
 
+def host_record_path(root: Path, job_id: str) -> Path:
+    """호스트가 한 일(머지·승인·반려)의 기록. worktree 밖이라 세션이 쓸 수 없다."""
+    return _jobs_dir(root) / "meta" / job_id / "host.json"
+
+
+def host_record(root: Path, job_id: str) -> dict[str, Any]:
+    path = host_record_path(root, job_id)
+    if not path.exists():
+        return {"events": []}
+    record: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return record
+
+
+def _record_host(root: Path, job_id: str, action: str, job: dict[str, Any]) -> None:
+    record = host_record(root, job_id)
+    record["events"].append(
+        {
+            "action": action,
+            "status": job.get("status"),
+            "merge_commit": job.get("merge_commit"),
+            # 호스트가 신뢰 코드로 다시 돌린 검증만 (세션이 쓴 검증 기록은 넣지 않는다)
+            "merge_checks": [c for c in job.get("merge_checks", []) if c.get("why") == "untrusted"],
+            "at": time.time(),
+        }
+    )
+    path = host_record_path(root, job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def host_merge_env(docker: DockerJob | None, wait_s: float) -> dict[str, str]:
     """호스트가 기본 checkout의 factory.py로 머지·승인할 때의 설정.
 
@@ -619,11 +649,18 @@ def run_job(
                 result["error"] = f"{area} 설치 실패: {(done.stdout + done.stderr)[-500:]}"
                 return result
 
+    applied = _load_job(worktree, job_id).get("budgets_applied") or {}
+    session_cap = float(
+        args.budget_usd
+        if args.budget_usd is not None
+        else applied.get("session", DEFAULT_BUDGET_USD)
+    )
+    result["session_budget_usd"] = session_cap
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
     workdir = docker.workdir if docker else None
     inner = agent_command(
-        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=args.budget_usd
+        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=session_cap
     )
     command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
     host_merge = merges_on_host(args.agent, docker is not None)
@@ -664,9 +701,9 @@ def run_job(
         if result["timed_out"]:
             reason = "TIMEOUT"
             detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
-        elif cost is not None and cost >= args.budget_usd:
+        elif cost is not None and cost >= session_cap:
             reason = "BUDGET"
-            detail = f"세션 비용 ${cost:.2f}가 상한 ${args.budget_usd:.2f}에 닿아 세션이 멈춤"
+            detail = f"세션 비용 ${cost:.2f}가 상한 ${session_cap:.2f}에 닿아 세션이 멈춤"
         if reason and detail:
             _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
             job = _load_job(worktree, job_id)
@@ -677,6 +714,12 @@ def run_job(
         merged = _factory(root, worktree, "merge", job_id, env=env)
         result["host_merge"] = merged.stdout.strip()[-500:]
         job = _load_job(worktree, job_id)
+        _record_host(root, job_id, "merge", job)
+    builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
+    live = live_usage(log_path, unit_prices(sorted(logs.glob("*.jsonl"))), builder_model=builder_id)
+    result["cost"] = job_cost(job, live)
+    job_total = float(applied.get("job_total", 0) or 0)
+    result["over_job_total"] = bool(job_total) and result["cost"]["total_usd"] > job_total
     result.update(
         status=job["status"],
         risk=job.get("risk"),
@@ -745,7 +788,9 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
             env={"FACTORY_UNTRUSTED_STATE": "1"},
         )  # fmt: skip
         print(done.stdout.strip())
-        _save_record(root, job_id, _load_job(worktree, job_id))
+        job = _load_job(worktree, job_id)
+        _save_record(root, job_id, job)
+        _record_host(root, job_id, "reject", job)
         return done.returncode
     docker = None
     if info["isolation"] == "docker":
@@ -763,6 +808,7 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
     print(done.stdout.strip()[-2000:])
     job = _load_job(worktree, job_id)
     _save_record(root, job_id, job)
+    _record_host(root, job_id, "approve", job)
     if job["status"] == "MERGED" and not keep_merged:
         result: dict[str, Any] = {}
         if not _remove_worktree(root, worktree, result):
@@ -782,7 +828,7 @@ def _summary(report: dict[str, Any]) -> str:
         f"인증: {report['auth']}, 격리 {report['isolation']}, "
         f"동시 실행 {report['max_parallel']}개, base {report['base']}",
         "",
-        "| 작업 | 상태 | 위험 | 활성/경과(분) | 세션 비용($) | 비고 | worktree |",
+        "| 작업 | 상태 | 위험 | 활성/경과(분) | 작업 비용($) | 비고 | worktree |",
         "|---|---|---|---|---|---|---|",
     ]
     for job in report["jobs"]:
@@ -792,11 +838,20 @@ def _summary(report: dict[str, Any]) -> str:
         if job.get("merge_commit"):
             note = f"머지 {job['merge_commit'][:7]}"
         where = "(삭제)" if job.get("worktree_removed") else job.get("worktree", "")
-        cost = job.get("session_cost_usd")
+        cost = job.get("cost") or {}
+        cost_text = "-"
+        if cost:
+            mark = "≈" if cost.get("estimated") else ""
+            session = cost.get("session_usd")
+            cost_text = (
+                f"{mark}{cost['total_usd']:.2f} (세션 "
+                f"{'-' if session is None else f'{session:.2f}'} + "
+                f"리뷰 {cost['reviewers_usd']:.2f})"
+            )
         lines.append(
             f"| {job.get('job_id') or '-'} | {job['status']} | {job.get('risk') or '-'} | "
             f"{job.get('active_min', '-')}/{job.get('wall_min', '-')} | "
-            f"{'-' if cost is None else f'{cost:.2f}'} | {note} | {where} |"
+            f"{cost_text} | {note} | {where} |"
         )
     lines += [
         "",
@@ -817,7 +872,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
     parser.add_argument(
-        "--budget-usd", type=float, default=DEFAULT_BUDGET_USD, help="세션 비용 상한 (Claude)"
+        "--budget-usd", type=float, help="세션 비용 상한 (기본: 작업에 고정된 budgets.session)"
     )
     parser.add_argument("--agent", choices=sorted(DEFAULT_MODELS), default="claude")
     parser.add_argument("--review-agent", choices=sorted(DEFAULT_MODELS), help="기본: --agent")
@@ -915,7 +970,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "image": image,
         "base": base,
         "max_parallel": args.max_parallel,
-        "budget_usd": args.budget_usd,
+        "budget_usd": args.budget_usd if args.budget_usd is not None else DEFAULT_BUDGET_USD,
         "model": args.model,
         "jobs": jobs,
     }

@@ -89,6 +89,8 @@ STEPS: list[Step] = [
         ],
         ".",
     ),
+    # 대시보드 화면 (프론트엔드의 Playwright 사용). scripts 영역이라 작업 검증에서는 건너뛴다
+    Step("scripts", "ui", ["node", "scripts/ui/check_monitor.cjs"], "."),
 ]
 
 

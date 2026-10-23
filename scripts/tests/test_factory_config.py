@@ -113,3 +113,33 @@ def test_invalid_stage_settings_are_rejected(tmp_path: Path, stages: dict[str, o
     write(tmp_path, {"stages": stages})
     with pytest.raises(factory_config.ConfigError):
         factory_config.load_config(tmp_path)
+
+
+# ---------- 비용 상한 (budgets, 대시보드 선행 P2) ----------
+
+
+def test_budgets_default(tmp_path: Path) -> None:
+    cfg = factory_config.load_config(tmp_path)
+    assert cfg.budgets == {"session": 5.0, "reviewer_call": 0.5, "reviewer_total": 1.5,
+                           "job_total": 6.5}  # fmt: skip
+
+
+def test_budgets_from_config(tmp_path: Path) -> None:
+    write(tmp_path, {"budgets": {"reviewer_total": 2.0, "job_total": 7.0}})
+    cfg = factory_config.load_config(tmp_path)
+    assert cfg.budgets["reviewer_total"] == 2.0 and cfg.budgets["session"] == 5.0
+
+
+@pytest.mark.parametrize(
+    "budgets",
+    [
+        {"session": -1},
+        {"session": "많이"},
+        {"tokens": 3},
+        {"session": 6.0},  # 작업 총액(6.5) < 세션 6 + 리뷰어 합계 1.5
+    ],
+)
+def test_invalid_budgets(tmp_path: Path, budgets: dict[str, object]) -> None:
+    write(tmp_path, {"budgets": budgets})
+    with pytest.raises(factory_config.ConfigError):
+        factory_config.load_config(tmp_path)

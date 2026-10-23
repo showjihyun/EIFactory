@@ -77,3 +77,18 @@ def test_written_with_lf_and_utf8(repo: Path) -> None:
     raw = (repo / "factory" / "config.json").read_bytes()
     assert b"\r\n" not in raw
     assert "레포별 설정".encode() in raw
+
+
+def test_set_budget(repo: Path) -> None:
+    assert factory_settings.main(["set", "budgets", "reviewer_total", "1.0"], root=repo) == 0
+    data = json.loads((repo / "factory" / "config.json").read_text(encoding="utf-8"))
+    assert data["budgets"]["reviewer_total"] == 1.0
+    # 작업 총액(6.5) < 세션 5 + 리뷰어 합계 2 → 거부
+    assert factory_settings.main(["set", "budgets", "reviewer_total", "2.0"], root=repo) == 2
+    assert factory_settings.main(["set", "budgets", "session", "-1"], root=repo) == 2
+
+
+def test_show_includes_budgets(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    factory_settings.main(["show"], root=repo)
+    out = capsys.readouterr().out
+    assert "reviewer_total" in out and "job_total" in out
