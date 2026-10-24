@@ -28,6 +28,7 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 
 - 먼저 `python scripts/factory.py status`를 실행한다. 진행 중이거나 APPROVED인 작업이 있으면 새 작업을 만들지 말고 `python scripts/factory.py recover <ID>`로 이어받는다 (PROCESS.md 0번).
 - 프롬프트가 dispatcher가 배정한 작업 ID를 주고 그 작업이 QUEUED이면, recover 없이 spec 작성부터 진행한다.
+- 프롬프트가 충돌로 RETRY_REQUIRED가 된 작업을 이어서 처리하라고 하면, recover 없이 Builder 호출(PROCESS.md 6번)부터 진행한다.
 - `scripts/dispatch.py`는 실행하지 않는다 (사람 전용).
 - hook이 "다른 세션이 진행 중"이라며 막으면 우회하지 말고 멈추고 보고한다.
 
@@ -35,6 +36,7 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 
 - 상태가 `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 즉시 멈추고, `python scripts/factory.py status` 결과와 함께 요약을 보고한다.
 - `APPROVED`(자동 승인)는 멈추는 상태가 아니다. `python scripts/factory.py merge <ID>`를 실행한다.
+- merge가 `RETRY_REQUIRED (CONFLICT)`를 출력하면 멈추지 않는다. 출력된 충돌 파일과 원문을 Builder에게 전달해 6번부터 반복한다.
 - `approve`, `resume`, `drop`, `recover --force`는 사람 전용이다. 실행하지 말고 사람에게 안내만 한다.
 - hook이 도구 호출을 막으면 우회하지 말고, 막힌 이유를 보고에 포함한다.
 

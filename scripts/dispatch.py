@@ -13,7 +13,9 @@
    작업을 만든다 (상태는 worktree마다 따로). worktree를 작업 ID 폴더로 옮긴 뒤 의존성을 설치한다.
 2. headless 세션(`claude -p` 또는 `codex exec`)으로 factory 스킬을 실행한다. 실행 래퍼가 벽시계
    시간 상한을 건다 (7.6). 세션에는 FACTORY_AGENT_SESSION=1을 넣어 사람 전용 명령을 막는다.
-3. 끝나면 상태를 읽는다. MERGED면 worktree를 지우고, 그 밖의 상태는 사람이 보도록 남긴다.
+3. 끝나면 상태를 읽는다. rebase 충돌로 RETRY_REQUIRED면 같은 worktree에서 세션을 이어서 띄워
+   Builder가 새 base 위에서 충돌을 풀게 한다 (최대 MAX_CONTINUE회, `--approve` 뒤에도 같다).
+   MERGED면 worktree를 지우고, 그 밖의 상태는 사람이 보도록 남긴다.
 
 사람 승인 (`--approve`, `--reject`): 승인 대기 작업을 기본 checkout의 factory.py로 처리한다.
 작업 worktree의 scripts/와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 factory.py를 쓰지
@@ -58,7 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from factory_config import CLAUDE_MODELS, DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
-from report import job_cost, live_usage, session_usage, unit_prices  # noqa: E402
+from report import combine_usage, job_cost, live_usage, session_usage, unit_prices  # noqa: E402
 
 BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 # 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
@@ -105,6 +107,22 @@ CODEX_PROMPT = (
     "작업은 dispatcher가 이미 `new`로 만들어 QUEUED 상태다. recover 없이 "
     "factory/PROCESS.md 3번(spec·수락 테스트 작성)부터 진행해."
 )
+# rebase 충돌로 RETRY_REQUIRED가 된 작업을 이어서 처리하는 세션 (기획안 8.3)
+CONTINUE_TASK = (
+    "작업 {job_id}는 base에 먼저 머지된 변경과 충돌해 RETRY_REQUIRED 상태다. factory.py가 "
+    "작업 변경을 새 base 끝 위에 다시 펼쳐 두었다. 충돌 표시(<<<<<<<)가 남은 파일: {files}. "
+    "recover 없이 factory/PROCESS.md 6번(Builder 호출)부터 진행해. "
+    "Builder에게 이 파일들과 '두 변경을 모두 살려 충돌을 푼다'는 점을 전달해."
+)
+CONTINUE_PROMPT = (
+    "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n" + CONTINUE_TASK
+)
+CODEX_CONTINUE_PROMPT = (
+    "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 작업 {job_id}를 이어서 "
+    "처리해. 요구사항: {requirement}\n" + CONTINUE_TASK
+)
+# 충돌을 풀러 세션을 다시 띄우는 최대 횟수. 같은 파일이 다시 충돌하면 factory.py가 BLOCKED로 막는다
+MAX_CONTINUE = 2
 
 _git_lock = threading.Lock()  # worktree add/move/remove는 Git 공통 디렉터리를 바꾸므로 한 번에 하나
 
@@ -630,7 +648,8 @@ def run_job(
     info.write_text(
         json.dumps(
             {"isolation": "docker" if docker else "host", "image": image, "stamp": stamp,
-             "agent": args.agent, "orchestrator": args.plan},
+             "agent": args.agent, "review_agent": args.review_agent, "orchestrator": args.plan,
+             "wall_timeout": args.wall_timeout},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -658,65 +677,26 @@ def run_job(
     result["session_budget_usd"] = session_cap
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
-    workdir = docker.workdir if docker else None
-    inner = agent_command(
-        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=session_cap
-    )
-    command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
-    host_merge = merges_on_host(args.agent, docker is not None)
-    session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
-    add, unset = session_auth_env(args.plan)
-    session_env.update(add)
-    for name in unset:
-        session_env.pop(name, None)
-    if host_merge:
-        session_env["FACTORY_MERGE_ON_HOST"] = "1"
     log_path = logs / f"{job_id}.jsonl"
-    with open(log_path, "wb") as out, open(logs / f"{job_id}.stderr", "wb") as err:
-        proc = subprocess.Popen(
-            resolve_command(command),
-            cwd=worktree,
-            stdout=out,
-            stderr=err,
-            stdin=subprocess.DEVNULL,
-            env=session_env,
-            start_new_session=sys.platform != "win32",
-        )
-        try:
-            result["exit_code"] = proc.wait(timeout=args.wall_timeout * 60)
-            result["timed_out"] = False
-        except subprocess.TimeoutExpired:
-            if docker:
-                _docker("kill", docker.name)
-            _kill_tree(proc)
-            result["exit_code"] = None
-            result["timed_out"] = True
-
-    usage = session_usage(log_path)
-    result.update(session_cost_usd=usage["cost_usd"], session_tokens=usage["tokens"])
-    cost = usage["cost_usd"]
+    result.update(_session(root, worktree, job_id, prompt, args, docker, log_path, session_cap))
     job = _load_job(worktree, job_id)
-    if job["status"] in ACTIVE - {"APPROVED"}:
-        reason = detail = None
-        if result["timed_out"]:
-            reason = "TIMEOUT"
-            detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
-        elif cost is not None and cost >= session_cap:
-            reason = "BUDGET"
-            detail = f"세션 비용 ${cost:.2f}가 상한 ${session_cap:.2f}에 닿아 세션이 멈춤"
-        if reason and detail:
-            _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
-            job = _load_job(worktree, job_id)
-    if host_merge and job["status"] == "APPROVED":
-        # 세션은 머지하지 않는다. 호스트가 기본 checkout의 factory.py로 머지한다.
-        # 앞 작업의 컨테이너 재검증이 수 분 걸리므로 lock을 세션 상한만큼 기다린다
-        env = host_merge_env(docker, wait_s=args.wall_timeout * 60)
-        merged = _factory(root, worktree, "merge", job_id, env=env)
-        result["host_merge"] = merged.stdout.strip()[-500:]
+    session_logs = [log_path]
+    for _ in range(MAX_CONTINUE):
+        if not needs_continue(job):
+            break
+        more = continue_session(root, worktree, job_id, args, docker, session_cap)
+        result.setdefault("continued", []).append(more)
+        session_logs.append(Path(more["log"]))
+        if more.get("session_cost_usd") is not None:
+            result["session_cost_usd"] = (result.get("session_cost_usd") or 0) + more[
+                "session_cost_usd"
+            ]
         job = _load_job(worktree, job_id)
-        _record_host(root, job_id, "merge", job)
     builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
-    live = live_usage(log_path, unit_prices(sorted(logs.glob("*.jsonl"))), builder_model=builder_id)
+    prices = unit_prices(sorted(logs.glob("*.jsonl")))
+    live = combine_usage(
+        [live_usage(log, prices, builder_model=builder_id) for log in session_logs]
+    )
     result["cost"] = job_cost(job, live)
     job_total = float(applied.get("job_total", 0) or 0)
     result["over_job_total"] = bool(job_total) and result["cost"]["total_usd"] > job_total
@@ -736,6 +716,109 @@ def run_job(
     if job["status"] == "MERGED" and not args.keep_merged:
         result["worktree_removed"] = _remove_worktree(root, worktree, result)
     return result
+
+
+def needs_continue(job: dict[str, Any]) -> bool:
+    """rebase 충돌로 새 base 위에 다시 펼쳐져 Builder를 기다리는 작업인가."""
+    failure = str(job.get("last_failure") or "")
+    return job["status"] == "RETRY_REQUIRED" and failure.startswith("CONFLICT")
+
+
+def _session(
+    root: Path,
+    worktree: Path,
+    job_id: str,
+    prompt: str,
+    args: argparse.Namespace,
+    docker: DockerJob | None,
+    log_path: Path,
+    session_cap: float,
+) -> dict[str, Any]:
+    """오케스트레이터 세션 하나를 돌리고 끝난 뒤를 처리한다 (상한 기록, 호스트 머지)."""
+    out: dict[str, Any] = {}
+    workdir = docker.workdir if docker else None
+    inner = agent_command(
+        worktree, prompt, args.model, agent=args.agent, workdir=workdir, budget_usd=session_cap
+    )
+    command = docker_session_command(docker, inner, keys=args.keys) if docker else inner
+    host_merge = merges_on_host(args.agent, docker is not None)
+    session_env = {**os.environ, **_agent_env(args), "FACTORY_AGENT_SESSION": "1"}
+    add, unset = session_auth_env(args.plan)
+    session_env.update(add)
+    for name in unset:
+        session_env.pop(name, None)
+    if host_merge:
+        session_env["FACTORY_MERGE_ON_HOST"] = "1"
+    err_path = log_path.with_suffix(".stderr")
+    with open(log_path, "wb") as log_out, open(err_path, "wb") as err:
+        proc = subprocess.Popen(
+            resolve_command(command),
+            cwd=worktree,
+            stdout=log_out,
+            stderr=err,
+            stdin=subprocess.DEVNULL,
+            env=session_env,
+            start_new_session=sys.platform != "win32",
+        )
+        try:
+            out["exit_code"] = proc.wait(timeout=args.wall_timeout * 60)
+            out["timed_out"] = False
+        except subprocess.TimeoutExpired:
+            if docker:
+                _docker("kill", docker.name)
+            _kill_tree(proc)
+            out["exit_code"] = None
+            out["timed_out"] = True
+
+    usage = session_usage(log_path)
+    out.update(session_cost_usd=usage["cost_usd"], session_tokens=usage["tokens"])
+    cost = usage["cost_usd"]
+    job = _load_job(worktree, job_id)
+    if job["status"] in ACTIVE - {"APPROVED"}:
+        reason = detail = None
+        if out["timed_out"]:
+            reason = "TIMEOUT"
+            detail = f"실행 래퍼 벽시계 상한 {args.wall_timeout}분 초과로 세션을 종료함"
+        elif cost is not None and cost >= session_cap:
+            reason = "BUDGET"
+            detail = f"세션 비용 ${cost:.2f}가 상한 ${session_cap:.2f}에 닿아 세션이 멈춤"
+        if reason and detail:
+            _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
+            job = _load_job(worktree, job_id)
+    if host_merge and job["status"] == "APPROVED":
+        # 세션은 머지하지 않는다. 호스트가 기본 checkout의 factory.py로 머지한다.
+        # 앞 작업의 컨테이너 재검증이 수 분 걸리므로 lock을 세션 상한만큼 기다린다
+        env = host_merge_env(docker, wait_s=args.wall_timeout * 60)
+        merged = _factory(root, worktree, "merge", job_id, env=env)
+        out["host_merge"] = merged.stdout.strip()[-500:]
+        job = _load_job(worktree, job_id)
+        _record_host(root, job_id, "merge", job)
+    return out
+
+
+def continue_session(
+    root: Path,
+    worktree: Path,
+    job_id: str,
+    args: argparse.Namespace,
+    docker: DockerJob | None,
+    session_cap: float,
+) -> dict[str, Any]:
+    """충돌로 새 base 위에 다시 펼쳐진 작업을 세션 하나로 이어서 처리한다.
+
+    로그는 `<ID>.r<n>.jsonl` (n = 2, 3, ...).
+    """
+    job = _load_job(worktree, job_id)
+    logs = _jobs_dir(root) / "logs"
+    n = 2 + len(list(logs.glob(f"{job_id}.r*.jsonl")))
+    files = ", ".join((job.get("replays") or [{}])[-1].get("files") or []) or "-"
+    template = CODEX_CONTINUE_PROMPT if args.agent == "codex" else CONTINUE_PROMPT
+    prompt = template.format(job_id=job_id, requirement=job["requirement"], files=files)
+    log_path = logs / f"{job_id}.r{n}.jsonl"
+    out = _session(root, worktree, job_id, prompt, args, docker, log_path, session_cap)
+    job = _load_job(worktree, job_id)
+    _record_host(root, job_id, "continue", job)
+    return {"round": n, "status": job["status"], "log": str(log_path), **out}
 
 
 def _force_remove(path: Path) -> bool:
@@ -802,18 +885,51 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
     try:
         env = host_merge_env(docker, wait_s=DEFAULT_WALL_TIMEOUT_MIN * 60)
         done = _factory(root, worktree, "approve", job_id, env=env)
+        print(done.stdout.strip()[-2000:])
+        job = _load_job(worktree, job_id)
+        _save_record(root, job_id, job)
+        _record_host(root, job_id, "approve", job)
+        if needs_continue(job):
+            # 승인 사이 base에 같은 줄이 먼저 머지됐다. 새 base 위에서 세션이 충돌을 푼다
+            args = _session_args(root, info, docker is not None)
+            cap = float((job.get("budgets_applied") or {}).get("session", DEFAULT_BUDGET_USD))
+            for _ in range(MAX_CONTINUE):
+                more = continue_session(root, worktree, job_id, args, docker, cap)
+                print(
+                    f"{job_id}: 충돌을 풀러 이어서 처리 (세션 {more['round']}) → {more['status']}"
+                )
+                job = _load_job(worktree, job_id)
+                if not needs_continue(job):
+                    break
+            _save_record(root, job_id, job)
+            if job["status"] == "APPROVAL_REQUIRED":
+                print(
+                    f"고친 변경을 다시 승인해 주세요: python scripts/dispatch.py --approve {job_id}"
+                )
     finally:
         if docker:
             _docker("volume", "rm", f"{docker.name}-node", f"{docker.name}-venv")
-    print(done.stdout.strip()[-2000:])
-    job = _load_job(worktree, job_id)
-    _save_record(root, job_id, job)
-    _record_host(root, job_id, "approve", job)
     if job["status"] == "MERGED" and not keep_merged:
         result: dict[str, Any] = {}
         if not _remove_worktree(root, worktree, result):
             print(f"worktree를 지우지 못했습니다: {result.get('cleanup_error')}")
     return 0 if job["status"] == "MERGED" else 1
+
+
+def _session_args(root: Path, info: dict[str, Any], docker: bool) -> argparse.Namespace:
+    """승인 뒤 이어서 처리하는 세션의 설정. 처음 dispatch가 남긴 세션 정보를 그대로 쓴다."""
+    agent = info.get("agent") or "claude"
+    review_agent = info.get("review_agent") or agent
+    plan = info.get("orchestrator") or orchestrator_plan(root, agent, None, None, docker)
+    real_docker = docker and not os.environ.get("FACTORY_AGENT_CMD")
+    return argparse.Namespace(
+        agent=agent,
+        review_agent=review_agent,
+        plan=plan,
+        model=plan["model"],
+        wall_timeout=float(info.get("wall_timeout") or DEFAULT_WALL_TIMEOUT_MIN),
+        keys=api_key_names([agent, review_agent]) if real_docker else None,
+    )
 
 
 def _agent_env(args: argparse.Namespace) -> dict[str, str]:

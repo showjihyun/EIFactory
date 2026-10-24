@@ -204,6 +204,19 @@ def live_usage(
     return out
 
 
+def combine_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """세션 여러 개(이어서 처리한 세션 포함)의 사용량을 합친다. 하나라도 추정이면 추정."""
+    if len(parts) == 1:
+        return parts[0]
+    known = [p["total"]["usd"] for p in parts if p["total"].get("usd") is not None]
+    total = {k: sum(int(p["total"].get(k) or 0) for p in parts) for k in ("in", "out", "cr", "cw")}
+    return {
+        **parts[0],
+        "estimated": any(p.get("estimated") for p in parts) or len(known) < len(parts),
+        "total": {**total, "usd": round(sum(known), 6) if known else None},
+    }
+
+
 def unit_prices(logs: list[Path], recent: int = 20) -> dict[str, float]:
     """모델별 보정 단가 = 확정 세션(결과 이벤트)의 Σ비용 / Σ토큰, 최근 recent개 (설계안 10.1).
 

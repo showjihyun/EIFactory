@@ -48,6 +48,24 @@ root = Path.cwd()
 print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FACTORY_AGENT"))
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
 job_id = state["active"]
+def factory(*args):
+    cmd = [sys.executable, "scripts/factory.py", *args]
+    out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    print(args[0], out.returncode, out.stdout.strip()[-200:], flush=True)
+    return out.returncode
+if state["jobs"][job_id]["status"] == "RETRY_REQUIRED":
+    # 이어서 처리하는 세션: 충돌 표시를 지우고 두 쪽을 모두 살린다 (Builder 흉내)
+    for rel in state["jobs"][job_id]["replays"][-1]["files"]:
+        path = root / rel
+        keep = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                if not ln.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
+        path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    factory("verify", job_id)
+    factory("validate", job_id)
+    factory("merge", job_id)
+    print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.25,
+                      "usage": {"input_tokens": 50, "output_tokens": 10}}))
+    sys.exit(0)
 contract = {
     "type": "feature", "size": "small", "risk": os.environ.get("FAKE_AGENT_RISK", "LOW"),
     "risk_reason": "새 모듈",
@@ -60,14 +78,12 @@ spec.parent.mkdir(parents=True, exist_ok=True)
 spec.write_text("```json\n" + json.dumps(contract) + "\n```\n", encoding="utf-8")
 test = root / contract["acceptance_tests"][0]
 test.write_text("def test_x():\n    assert False\n", encoding="utf-8")
-def factory(*args):
-    cmd = [sys.executable, "scripts/factory.py", *args]
-    out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-    print(args[0], out.returncode, out.stdout.strip()[-200:], flush=True)
-    return out.returncode
 factory("spec", job_id)
 factory("red", job_id)
 (root / f"backend/src/bookmarks/mod_{job_id}.py").write_text("VALUE = 1\n", encoding="utf-8")
+if os.environ.get("FAKE_AGENT_SHARED"):
+    # 모든 작업이 같은 파일의 같은 줄을 고친다 (먼저 머지된 쪽과 rebase 충돌)
+    (root / "backend/src/bookmarks/main.py").write_text(f"NAME = '{job_id}'\n", encoding="utf-8")
 factory("verify", job_id)
 factory("validate", job_id)
 factory("merge", job_id)
@@ -118,6 +134,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("FACTORY_MERGE_WAIT_S", "60")
     monkeypatch.delenv("FAKE_AGENT_MODE", raising=False)
     monkeypatch.delenv("FAKE_AGENT_RISK", raising=False)
+    monkeypatch.delenv("FAKE_AGENT_SHARED", raising=False)
     monkeypatch.delenv("FACTORY_UNTRUSTED_STATE", raising=False)
     return root
 
@@ -552,6 +569,51 @@ def test_reject_sends_job_back(repo: Path, monkeypatch: pytest.MonkeyPatch) -> N
     state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
     assert state["jobs"][job_id]["status"] == "RETRY_REQUIRED"
     assert state["jobs"][job_id]["approval"]["reason"] == "이름이 이상함"
+
+
+def test_approve_conflict_continues_session_on_new_base(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 승인 사이 다른 작업이 같은 줄을 먼저 머지했다 → 새 base 위에서 세션이 이어서 충돌을 푼다
+    monkeypatch.setenv("FAKE_AGENT_SHARED", "1")
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    (repo / "backend/src/bookmarks/main.py").write_text("NAME = 'main'\n", encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "다른 작업")
+    base = git(repo, "rev-parse", "main")
+    assert dispatch.main(["--approve", job_id], root=repo) == 1
+    worktree = Path(job["worktree"])
+    state = json.loads((worktree / "factory/state.json").read_text(encoding="utf-8"))
+    record = state["jobs"][job_id]
+    # 고친 결과는 MEDIUM이라 다시 사람 승인을 기다린다. base는 그대로
+    assert record["status"] == "APPROVAL_REQUIRED"
+    assert record["replays"][-1]["files"] == ["backend/src/bookmarks/main.py"]
+    assert git(repo, "rev-parse", "main") == base
+    text = (worktree / "backend/src/bookmarks/main.py").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in text and "'main'" in text and f"'{job_id}'" in text
+    events = [e["action"] for e in dispatch.host_record(repo, job_id)["events"]]
+    assert events[-2:] == ["approve", "continue"]
+    assert (repo.parent / f"{repo.name}.jobs" / "logs" / f"{job_id}.r2.jsonl").exists()
+    assert dispatch.main(["--approve", job_id], root=repo) == 0
+    assert f"'{job_id}'" in git(repo, "show", "main:backend/src/bookmarks/main.py")
+
+
+def test_host_merge_conflict_continues_and_merges(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 컨테이너·Codex 세션: 호스트 머지에서 충돌하면 이어서 처리하는 세션을 띄운다
+    monkeypatch.setattr(dispatch, "merges_on_host", lambda agent, docker: True)
+    monkeypatch.setenv("FAKE_AGENT_SHARED", "1")
+    code, report = run(repo, "--max-parallel", "2", "첫째", "둘째")
+    assert code == 0
+    assert [j["status"] for j in report["jobs"]] == ["MERGED", "MERGED"]
+    continued = [j for j in report["jobs"] if j.get("continued")]
+    assert len(continued) == 1
+    assert continued[0]["continued"][0]["status"] == "MERGED"
+    # 이어서 처리한 세션 비용도 작업 비용에 들어간다
+    assert continued[0]["session_cost_usd"] == pytest.approx(0.75)
+    final = git(repo, "show", "main:backend/src/bookmarks/main.py")
+    assert all(f"'{j['job_id']}'" in final for j in report["jobs"])
 
 
 def test_approve_unknown_job_fails(repo: Path) -> None:

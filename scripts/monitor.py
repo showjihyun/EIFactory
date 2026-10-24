@@ -15,10 +15,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import hmac
 import http.server
 import json
+import os
 import re
+import secrets
 import statistics
 import subprocess
 import sys
@@ -390,6 +394,14 @@ class Collector:
     def _log(self, job_id: str) -> Path:
         return self.jobs_dir / "logs" / f"{job_id}.jsonl"
 
+    def _session_logs(self, job_id: str) -> list[Path]:
+        """첫 세션 로그와 충돌을 풀러 이어서 처리한 세션 로그(`<ID>.r<n>.jsonl`, dispatch)."""
+        more = sorted(
+            (self.jobs_dir / "logs").glob(f"{job_id}.r*.jsonl"),
+            key=lambda p: int(p.name.split(".r")[1].split(".")[0] or 0),
+        )
+        return [self._log(job_id), *more]
+
     def prices(self) -> dict[str, float]:
         if self.now() - self._prices[0] > 30:
             logs = sorted((self.jobs_dir / "logs").glob("*.jsonl"))
@@ -401,17 +413,24 @@ class Collector:
             return None
         log = self._log(ref["id"])
         try:
-            st = log.stat()
+            stats = [
+                (p.stat().st_mtime_ns, p.stat().st_size) for p in self._session_logs(ref["id"])
+            ]
         except OSError:
             return None
         prices = self.prices()
         # 로그가 그대로여도 다른 세션이 끝나 단가가 바뀌면 다시 계산한다 (D17)
-        key = (st.st_mtime_ns, st.st_size, tuple(sorted(prices.items())))
+        key = (tuple(stats), tuple(sorted(prices.items())))
         cached = self._usage.get(log)
         if cached and cached[0] == key:
             return cached[1]
         builder = (((ref.get("job") or {}).get("models") or {}).get("builder") or {}).get("model")
-        value = report.live_usage(log, prices, builder_model=builder)
+        value = report.combine_usage(
+            [
+                report.live_usage(p, prices, builder_model=builder)
+                for p in self._session_logs(ref["id"])
+            ]
+        )
         self._usage[log] = (key, value)
         return value
 
@@ -822,13 +841,99 @@ AUTO_RULES = {
 }
 
 
-def settings_view(root: Path) -> dict[str, Any]:
-    """설정 패널 (읽기 전용): 단계별 모델·인증, 비용 상한, 자동 규칙."""
+# API 키 입력 (설정 화면). 대시보드가 바꾸는 것은 이것 하나다. 키는 사용자 환경변수에만 쓴다
+# (AGENTS.md: API 키는 환경변수로만). 값은 응답·로그·화면 어디에도 다시 내보내지 않는다
+API_KEY_PREFIX = {"ANTHROPIC_API_KEY": "sk-ant-", "CODEX_API_KEY": "sk-", "OPENAI_API_KEY": "sk-"}
+API_KEY_VALUE = re.compile(r"^[A-Za-z0-9_-]{20,300}$")
+API_KEY_BODY_LIMIT = 4096
+API_KEY_NOTE = (
+    "저장한 키는 다시 보여주지 않아요. 새로 연 터미널에서 실행한 dispatch부터 적용돼요 "
+    "(이미 열린 터미널·이 대시보드 프로세스에는 보이지 않음)."
+)
+
+
+class KeyStoreError(Exception):
+    """키를 저장할 수 없는 환경. 메시지에 키 값을 넣지 않는다."""
+
+
+class UserEnvKeyStore:
+    """Windows 사용자 환경변수(HKCU\\Environment). `setx`와 같은 곳이다."""
+
+    def _supported(self) -> bool:
+        return sys.platform == "win32"
+
+    def is_set(self, name: str) -> bool:
+        if not self._supported():
+            return False
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                value, _ = winreg.QueryValueEx(key, name)
+        except OSError:
+            return False
+        return bool(value)
+
+    def save(self, name: str, value: str) -> None:
+        if not self._supported():
+            raise KeyStoreError(
+                "이 OS에서는 화면 입력을 지원하지 않아요. 셸 설정에 환경변수로 넣어 주세요"
+            )
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+        self._announce()
+
+    def delete(self, name: str) -> None:
+        if not self._supported():
+            raise KeyStoreError("이 OS에서는 화면 입력을 지원하지 않아요")
+        import winreg
+
+        with (
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key,
+            contextlib.suppress(FileNotFoundError),
+        ):
+            winreg.DeleteValue(key, name)
+        self._announce()
+
+    def _announce(self) -> None:
+        """새로 여는 프로그램(탐색기에서 연 터미널)이 바뀐 환경변수를 보도록 알린다."""
+        import ctypes
+
+        result = ctypes.c_ulong()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, ctypes.byref(result)
+        )
+
+
+KEY_STORE: Any = UserEnvKeyStore()
+
+
+def key_is_set(name: str) -> bool:
+    return bool(KEY_STORE.is_set(name) or os.environ.get(name))
+
+
+def api_key_view(token: str) -> dict[str, Any]:
+    """키가 있는지만 보인다 (값은 일부도 내보내지 않는다)."""
+    return {
+        "token": token,
+        "where": "Windows 사용자 환경변수" if sys.platform == "win32" else None,
+        "keys": {name: {"set": key_is_set(name)} for name in API_KEY_PREFIX},
+        "note": API_KEY_NOTE,
+    }
+
+
+def settings_view(root: Path, token: str = "") -> dict[str, Any]:
+    """설정 패널: 단계별 모델·인증, 비용 상한, 자동 규칙 (읽기 전용) + API 키 입력."""
     try:
         cfg = load_config(root)
     except ConfigError as error:
-        return {"error": str(error)}
+        return {"error": str(error), "api_key_input": api_key_view(token)}
     return {
+        "api_key_input": api_key_view(token),
         "stages": cfg.stages,
         "budgets": cfg.budgets,
         "auto_rules": AUTO_RULES,
@@ -843,10 +948,11 @@ def settings_view(root: Path) -> dict[str, Any]:
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    """읽기 전용. GET·HEAD만, 정해진 경로만, 같은 출처만."""
+    """GET·HEAD만, 정해진 경로만, 같은 출처만. 쓰기는 API 키 입력(POST) 하나뿐이다."""
 
     collector: Collector
     root: Path
+    token: str = ""
     server_version = "factory-monitor"
     sys_version = ""
 
@@ -926,7 +1032,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._error(404, "없는 그림")
         elif name == "settings":
-            self._json(settings_view(self.root))
+            self._json(settings_view(self.root, self.token))
         elif name == "detail":
             detail = self.collector.detail(groups[0])
             if detail is None:
@@ -966,13 +1072,71 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
+    do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
+
+    def do_POST(self) -> None:  # noqa: N802
+        """API 키 입력만 받는다. 같은 출처 + 이 서버가 만든 토큰 + JSON 본문."""
+        if urllib.parse.urlsplit(self.path).path != "/api/settings/api-key":
+            self._method_not_allowed()
+            return
+        if not self._allowed():
+            return
+        port = self.server.server_port  # type: ignore[attr-defined]
+        origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        sent = self.headers.get("X-Factory-Token") or ""
+        if self.headers.get("Origin") not in origins or not hmac.compare_digest(sent, self.token):
+            self._error(403, "이 화면에서 보낸 요청만 받습니다")
+            return
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            self._error(415, "JSON만 받습니다")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 < length <= API_KEY_BODY_LIMIT:
+            self._error(400, "본문 크기가 맞지 않습니다")
+            return
+        try:
+            data = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        name = data.get("name") if isinstance(data, dict) else None
+        value = data.get("value") if isinstance(data, dict) else None
+        if name not in API_KEY_PREFIX:
+            self._error(400, f"키 이름은 {', '.join(API_KEY_PREFIX)} 중 하나입니다")
+            return
+        if value is not None and not (
+            isinstance(value, str)
+            and value.startswith(API_KEY_PREFIX[name])
+            and API_KEY_VALUE.match(value)
+        ):
+            self._error(400, f"{name} 형식이 아닙니다 ({API_KEY_PREFIX[name]}로 시작, 공백 없음)")
+            return
+        try:
+            if value is None:
+                KEY_STORE.delete(name)
+            else:
+                KEY_STORE.save(name, value)
+        except KeyStoreError as error:
+            self._error(501, str(error))
+            return
+        except Exception:  # noqa: BLE001 - 키 값이 담긴 예외를 내보내지 않는다
+            self._error(500, "저장하지 못했습니다")
+            return
+        self._send(200, json.dumps({"name": name, "set": key_is_set(name), "note": API_KEY_NOTE},
+                                   ensure_ascii=False).encode(),
+                   "application/json; charset=utf-8", etag=False)  # fmt: skip
 
 
 def make_server(root: Path, jobs_dir: Path, port: int = 8765) -> http.server.ThreadingHTTPServer:
     """127.0.0.1에만 연다 (바꾸는 옵션 없음). 포트가 쓰이면 다음 포트를 2개까지 시도."""
     collector = Collector(root, jobs_dir)
-    handler = type("BoundHandler", (Handler,), {"collector": collector, "root": root})
+    # API 키 입력 요청의 토큰. 서버를 띄울 때마다 새로 만든다 (화면이 /api/settings로 받음)
+    token = secrets.token_urlsafe(32)
+    handler = type(
+        "BoundHandler", (Handler,), {"collector": collector, "root": root, "token": token}
+    )
     last: OSError | None = None
     for candidate in [port] if port == 0 else [port, port + 1, port + 2]:
         try:

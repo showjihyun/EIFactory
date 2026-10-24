@@ -28,7 +28,7 @@ Builder는 오케스트레이터의 대화를 넘겨받지 않는다. 호출할 
 ```
 QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ──────────────────────→ APPROVED → MERGED
               ▲  (red 실패, 1회)      ▲      └─ (MEDIUM·HIGH) → APPROVAL_REQUIRED ─┘ (사람 approve)
-              └──────┘                └─ RETRY_REQUIRED (verify/validate 실패, 사람 반려)
+              └──────┘                └─ RETRY_REQUIRED (verify/validate 실패, 사람 반려, 머지 때 rebase 충돌)
 어느 단계에서든 → BLOCKED (사유 코드) → 사람이 resume 또는 drop
 ```
 
@@ -37,9 +37,9 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `new "<요구사항>"` | 진행 중 작업 없음, 작업 트리 깨끗함 | job ID 부여, 브랜치 `factory/<ID>` 생성 | QUEUED | - |
 | `spec <ID>` | QUEUED, SPEC_READY | `factory/specs/<ID>.md`의 contract 형식 검사 | SPEC_READY | 오류 출력, 상태 유지 |
 | `red <ID>` | SPEC_READY | 수락 테스트·바꾼 기존 테스트의 형식·린트 확인 → 수락 테스트 Red 확인 (refactor는 Green). 통과하면 파일 잠금 | BUILDING | 형식·린트 문제: SPEC_READY 유지 (재작성 횟수 안 씀). Red 실패 1회: SPEC_READY로 되돌림, 2회: BLOCKED(`SPEC_INVALID`) |
-| `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 → 검증한 변경의 지문 기록 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
+| `verify <ID>` | BUILDING, RETRY_REQUIRED | 잠긴 파일 대조 → 충돌 표시(`<<<<<<<`, `>>>>>>>`)가 남은 파일 확인 → 수락 테스트 Green → 전체 검증 → 위험 등급 계산 → 검증한 변경의 지문 기록 | VERIFYING | RETRY_REQUIRED 또는 BLOCKED |
 | `validate <ID>` | VERIFYING | 변경 지문 대조 → 리뷰어 3명 동시 실행 (하나라도 FAIL이면 FAIL, 판정을 못 읽으면 상태 유지) | LOW: APPROVED (자동 승인), 그 밖: APPROVAL_REQUIRED + 승인 요약 | RETRY_REQUIRED 또는 BLOCKED. verify 이후 변경이 있으면 BUILDING |
-| `merge <ID>` | APPROVED | 아래 "머지" 순서대로 base 브랜치에 머지 | MERGED | BLOCKED(`CONFLICT`, `MERGE_CHECK_FAILED`, `TREE_CHANGED`) 또는 상태 유지(lock 사용 중) |
+| `merge <ID>` | APPROVED | 아래 "머지" 순서대로 base 브랜치에 머지 | MERGED | RETRY_REQUIRED(rebase 충돌, 새 base 위에 다시 펼침), BLOCKED(`CONFLICT`, `MERGE_CHECK_FAILED`, `TREE_CHANGED`) 또는 상태 유지(lock 사용 중) |
 | `recover <ID>` | 진행 중, APPROVED | 끊긴 세션의 작업을 이어받는다 (아래 "세션 복구") | 같은 상태 (또는 MERGED) | 이전 세션이 5분 안에 활동했으면 거부 |
 | `block <ID> --reason <코드> --detail "..."` | 진행 중 | 수동 BLOCKED (수락 테스트가 틀렸다는 보고, 사람 결정이 필요한 요구사항) | BLOCKED | - |
 | `status [--json]` | 언제나 | 현재 상태 출력 | - | - |
@@ -48,15 +48,20 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
 | `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
-### 대시보드 (`scripts/monitor.py`, 읽기 전용)
+### 대시보드 (`scripts/monitor.py`, 읽기 전용 + API 키 입력)
 
 ```
 python scripts/monitor.py            # http://127.0.0.1:8765 를 브라우저로 연다
 python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 ```
 
-- 나를 기다리는 일(승인 대기·막힘·오류), 요약(성공률·개입률·리드타임·비용), 작업 레인(같은 파일 충돌 예고 ⚡), 보드, 작업 상세(다음 명령·검증 증거·호스트 기록·리뷰 원문·모델·인증·역할별 토큰과 비용·단계별 ≈·이력·최근 활동), ⚙ 설정(읽기 전용).
+- 나를 기다리는 일(승인 대기·막힘·오류), 요약(성공률·개입률·리드타임·비용), 작업 레인(같은 파일 충돌 예고 ⚡), 보드, 작업 상세(다음 명령·검증 증거·호스트 기록·리뷰 원문·모델·인증·역할별 토큰과 비용·단계별 ≈·이력·최근 활동), ⚙ 설정(모델·인증·상한은 읽기 전용, API 키 입력).
 - `127.0.0.1`에만 열고 GET만 받는다. 상태를 바꾸지 않고, 명령은 복사용 텍스트로만 보인다. 승인은 `dispatch.py --approve`, 설정은 `factory_settings.py`.
+- **API 키 입력** (⚙ 설정 → 🔑 API 키): 대시보드가 바꾸는 유일한 값. `ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `OPENAI_API_KEY`를 Windows 사용자 환경변수(`HKCU\Environment`, `setx`와 같은 곳)에 저장·삭제한다. 새로 연 터미널에서 실행한 dispatch부터 적용된다.
+  - `POST /api/settings/api-key`만 받는다: 같은 출처(`Origin`) + 서버를 띄울 때마다 새로 만드는 토큰(`X-Factory-Token`) + JSON 본문(4KB 이하). 이름은 세 가지만, 값은 접두어(`sk-ant-` / `sk-`)와 글자 종류·길이를 검사한다.
+  - 값은 응답·화면·로그 어디에도 다시 내보내지 않는다 ("설정됨 / 없음"만). 입력칸은 가려진 입력이고, 보낸 뒤 바로 비운다.
+  - Windows 밖에서는 저장하지 않고 셸 설정에 넣으라고 안내한다.
+  - 남은 위험: 같은 PC의 다른 프로세스도 127.0.0.1에서 토큰을 받아 키를 바꾸거나 지울 수 있다. 에이전트 세션의 허용 명령에는 HTTP 도구가 없지만, 호스트 격리에서는 에이전트가 쓴 테스트 코드가 `verify`로 호스트에서 돈다 (컨테이너 격리는 해당 없음). 대시보드는 키 값을 돌려주지 않으므로 읽어 가지는 못한다. 키 값은 평문 사용자 환경변수다 (`setx`와 같은 수준).
 - 값마다 출처를 표시한다: ⚠ 세션 기록(worktree 안, 위조 가능) / 🏠 호스트(`meta/`, dispatch) / ✓ Git 확인. 진행 중 비용은 ≈(추정), 끝나면 결과 이벤트의 확정값.
 - 화면 시험: `node scripts/ui/check_monitor.cjs` (`verify.py`의 `scripts ui` 단계, 작업 검증에서는 scripts 영역과 함께 건너뜀).
 - 설계: sw-factory `기획안/dashboard/` (설계안, DESIGN.md, 작업분해).
@@ -94,7 +99,7 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 | `TEST_INVALID` | Builder가 수락 테스트가 틀렸다고 보고 (`block`으로 기록) |
 | `NEEDS_DECISION` | 요구사항 자체가 사람의 결정을 요구함 (예: 검증 약화·테스트 건너뛰기 요청). `new` 직후 `block`으로 기록 |
 | `TREE_CHANGED` | 검증·승인한 변경과 머지하려는 변경이 다름 |
-| `CONFLICT` | base 브랜치 기준 rebase 또는 merge 충돌 |
+| `CONFLICT` | 잠긴 파일(spec·수락 테스트·기존 테스트·검증 설정)의 rebase 충돌, 또는 merge 실패. 잠기지 않은 파일의 충돌은 RETRY_REQUIRED로 Builder가 푼다 |
 | `MERGE_CHECK_FAILED` | rebase 후 재검증(수락 테스트 Green, 전체 검증) 실패 |
 | `MANUAL` | 그 밖의 수동 중단 |
 
@@ -104,7 +109,10 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 2. 작업 트리가 verify 때 기록한 변경 지문과 같은지 확인한다. 다르면 BLOCKED(`TREE_CHANGED`).
 3. 자동 승인이면 위험 등급을 diff로 **다시 계산**한다. LOW가 아니면 머지하지 않고 APPROVAL_REQUIRED로 돌린다 (상태 파일이 조작돼도 HIGH 경로는 자동 머지되지 않는다).
 4. 작업 브랜치에 변경을 커밋한다.
-5. base 브랜치가 앞서 있으면 그 위로 rebase하고 수락 테스트 Green과 전체 검증을 다시 실행한다. 충돌은 BLOCKED(`CONFLICT`), 재검증 실패는 BLOCKED(`MERGE_CHECK_FAILED`). base가 그대로면 검증한 트리와 같으므로 다시 실행하지 않는다.
+5. base 브랜치가 앞서 있으면 그 위로 rebase하고 수락 테스트 Green과 전체 검증을 다시 실행한다. 재검증 실패는 BLOCKED(`MERGE_CHECK_FAILED`). base가 그대로면 검증한 트리와 같으므로 다시 실행하지 않는다.
+   - **rebase 충돌** (먼저 머지된 작업이 같은 줄을 고침): rebase를 되돌리고, 작업 변경을 base 끝 위에 다시 펼친다 (커밋하지 않은 변경, 충돌 파일에는 충돌 표시). 승인·검증 기록은 무효가 되고 RETRY_REQUIRED가 된다 (실패 횟수 1회로 센다. 같은 파일이 다시 충돌하면 `REPEATED_FAILURE`). Builder가 두 변경을 모두 살려 충돌을 풀고 verify부터 다시 한다. 다시 펼치기 전 작업 커밋은 작업 기록 `replays`에 남는다.
+   - base가 깔끔하게 바꾼 잠긴 파일은 작업의 변경이 아니므로 다시 펼친 내용으로 다시 잠근다. 잠긴 파일 자체가 충돌하면 Builder가 고칠 수 없으므로 작업 브랜치를 되돌리고 BLOCKED(`CONFLICT`)로 사람에게 넘긴다.
+   - MEDIUM·HIGH 작업은 고친 뒤 다시 사람 승인을 받는다 (승인한 diff와 달라졌으므로).
 6. base 브랜치에 `--no-ff` 머지 커밋을 만든다. 커밋이 실제로 base에 들어간 것을 Git으로 확인한 뒤 MERGED로 바꾼다.
 7. 되돌릴 때는 출력된 머지 커밋으로 `git revert -m 1 <머지 커밋>` 한 번이면 된다 (사람이 실행).
 
@@ -124,12 +132,13 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
    - 비용 상한 (`--budget-usd`, 기본 $5, API 환산 임시값): Claude 세션에 `--max-budget-usd`로 건다. 상한에 닿아 세션이 작업 도중 멈추면 BLOCKED(`BUDGET`). 리뷰어 호출은 하나당 $1 (`FACTORY_REVIEW_BUDGET_USD`). Codex CLI에는 같은 옵션이 없어 벽시계 상한만 적용되고, 토큰 수는 기록한다.
    - 세션 비용·토큰은 결과 표와 `dispatch-<시각>.json`에 남는다.
-5. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다.
+5. 세션이 끝났는데 작업이 rebase 충돌로 RETRY_REQUIRED이면(호스트 머지, `--approve`, 세션이 멈춘 경우) 같은 worktree에서 세션을 이어서 띄운다 (최대 2회, 로그 `logs/<ID>.r<n>.jsonl`, 호스트 기록 `continue`). 이어서 처리한 세션 비용도 작업 비용에 들어간다.
+6. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다.
    - 승인 대기는 **기본 checkout에서** `python scripts/dispatch.py --approve <ID>` (반려 `--reject <ID> --reason "..."`). 작업 worktree의 `scripts/`와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 `factory.py approve`는 쓰지 않는다. 승인 요약(`factory/reviews/<ID>-approval.md`)도 세션이 쓴 파일이니 diff(`git -C <worktree> diff <base>`)를 직접 본다.
    - BLOCKED는 그 worktree에서 `resume`·`drop`을 실행한다.
    - 호스트 머지(컨테이너·Codex 세션)와 `--approve`는 상태 파일을 믿지 않는다 (`FACTORY_UNTRUSTED_STATE=1`): 설정은 기본 checkout에서 읽고, 수락 테스트 목록은 diff에서도 찾고, base가 그대로여도 수락 테스트 Green과 `verify`를 다시 돌린다 (컨테이너 작업이면 오프라인 컨테이너에서). 잠긴 파일(기존 테스트, 검증 설정)이 바뀐 자동 승인 작업은 머지하지 않고 사람 승인으로 돌린다.
    - 세션 정보(격리 방식, 이미지)는 worktree 밖 `../<레포>.jobs/meta/<ID>/session.json`에 둔다.
-6. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
+7. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.
 - 전체 상태: `python scripts/factory.py status --all` (모든 worktree의 작업을 한 표로).
 - 인증: `ANTHROPIC_API_KEY` 환경변수가 있으면 API 키, 없으면 로그인 세션(구독). `--require-api-key`로 API 키를 강제할 수 있다. 키 값은 출력·기록하지 않는다.
 - 세션에는 `FACTORY_AGENT_SESSION=1`이 들어가고, 그 세션 안에서는 `factory.py`가 사람 전용 명령을 거부한다 (hook과 별개).
@@ -231,6 +240,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - `BUILDING`으로 돌아오면 7번부터 다시
 9. `APPROVED`(자동 승인)면 `python scripts/factory.py merge <ID>`
    - 다른 작업이 머지 중이라 상태가 그대로면, 잠시 뒤 한 번 더 `merge`. 그래도 안 되면 멈추고 보고
+   - `RETRY_REQUIRED (CONFLICT)`면 출력된 충돌 파일과 원문을 Builder에게 전달해 6번부터 반복
 10. `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
 
 ## 위험 등급 계산 (verify가 diff로 계산, merge가 자동 승인 작업에 대해 다시 계산)

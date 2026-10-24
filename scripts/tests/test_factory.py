@@ -760,17 +760,100 @@ def test_merge_rebases_and_reverifies_when_base_moved(h: Harness) -> None:
     assert "return [1]" in (h.repo / MAIN_PY).read_text(encoding="utf-8")
 
 
-def test_merge_conflict_blocks_and_leaves_base_untouched(h: Harness) -> None:
+def test_merge_conflict_replays_job_on_new_base_for_builder(h: Harness) -> None:
+    # 먼저 머지된 작업과 같은 줄을 고쳤으면 사람에게 넘기지 않고 새 base 위에서 Builder가 푼다
     to_validated(h)
     main_head = advance_main(h, MAIN_PY, "def list_items():\n    return [9]\n")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "RETRY_REQUIRED"
+    assert job["last_failure"].startswith("CONFLICT")
+    assert job["approval"] is None
+    assert job["replays"][-1]["files"] == [MAIN_PY]
+    # 펼치기 전 작업 커밋을 남겨 둔다 (되돌릴 근거)
+    assert "return [1]" in git(h.repo, "show", f"{job['replays'][-1]['from']}:{MAIN_PY}")
+    assert git(h.repo, "rev-parse", "main") == main_head
+    assert git(h.repo, "branch", "--show-current") == "factory/J001"
+    assert git(h.repo, "rev-parse", "HEAD") == main_head  # 작업 브랜치는 새 base 끝
+    text = (h.repo / MAIN_PY).read_text(encoding="utf-8")
+    assert "<<<<<<<" in text and "return [1]" in text and "return [9]" in text
+    # 작업이 만든 파일(수락 테스트, spec)은 그대로 남는다
+    assert (h.repo / "backend/tests/acceptance/test_J001.py").exists()
+    assert (h.repo / "factory/specs/J001.md").exists()
+    assert not (h.repo / ".git" / "rebase-merge").exists()
+    assert not merge_lock(h).exists()
+
+
+def test_verify_rejects_leftover_conflict_markers(h: Harness) -> None:
+    test_merge_conflict_replays_job_on_new_base_for_builder(h)
+    verify_calls = len(h.calls("verify"))
+    assert h.run("verify", "J001") != 0
+    job = h.job()
+    assert job["status"] == "RETRY_REQUIRED"
+    assert "충돌 표시" in job["last_failure"] and MAIN_PY in job["last_failure"]
+    assert len(h.calls("verify")) == verify_calls
+
+
+def test_resolved_conflict_goes_through_verify_validate_and_merges(h: Harness) -> None:
+    test_merge_conflict_replays_job_on_new_base_for_builder(h)
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1, 9]\n", encoding="utf-8")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("verify", "J001") == 0
+    assert h.run("validate", "J001") == 0
+    assert h.job()["status"] == "APPROVED"
+    assert h.run("merge", "J001") == 0
+    job = h.job()
+    assert job["status"] == "MERGED"
+    assert "return [1, 9]" in git(h.repo, "show", f"main:{MAIN_PY}")
+
+
+def test_replay_relocks_files_that_base_changed_cleanly(h: Harness) -> None:
+    # base가 잠긴 기존 테스트를 고쳤어도(충돌 없음) 그것은 작업의 변경이 아니다
+    to_validated(h)
+    other = h.repo.parent / "other"
+    git(h.repo, "worktree", "add", "-q", str(other), "main")
+    (other / MAIN_PY).write_text("def list_items():\n    return [9]\n", encoding="utf-8")
+    (other / "backend/tests/test_existing.py").write_text(
+        "def test_existing():\n    assert 1\n", encoding="utf-8"
+    )
+    git(other, "add", "-A")
+    git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "다른 변경")
+    git(h.repo, "worktree", "remove", "--force", str(other))
+    assert h.run("merge", "J001") != 0
+    assert h.job()["status"] == "RETRY_REQUIRED"
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1, 9]\n", encoding="utf-8")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("verify", "J001") == 0, h.job().get("blocked")
+
+
+def test_merge_conflict_in_locked_file_still_blocks(h: Harness) -> None:
+    # 잠긴 파일(spec·수락 테스트·기존 테스트)은 Builder가 고칠 수 없으므로 사람에게 넘긴다
+    to_validated(h)
+    main_head = advance_main(h, "factory/specs/J001.md", "# 다른 작업이 같은 이름으로\n")
     assert h.run("merge", "J001") != 0
     job = h.job()
     assert job["status"] == "BLOCKED"
     assert job["blocked"]["reason"] == "CONFLICT"
     assert git(h.repo, "rev-parse", "main") == main_head
     assert git(h.repo, "branch", "--show-current") == "factory/J001"
+    assert "return [1]" in git(h.repo, "show", f"HEAD:{MAIN_PY}")
+    assert "return [1]" in (h.repo / MAIN_PY).read_text(encoding="utf-8")
+    assert "<<<<<<<" not in (h.repo / MAIN_PY).read_text(encoding="utf-8")
     assert not (h.repo / ".git" / "rebase-merge").exists()
     assert not merge_lock(h).exists()
+
+
+def test_repeated_conflict_on_same_files_blocks(h: Harness) -> None:
+    test_merge_conflict_replays_job_on_new_base_for_builder(h)
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1, 9]\n", encoding="utf-8")
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("verify", "J001") == 0
+    assert h.run("validate", "J001") == 0
+    advance_main(h, MAIN_PY, "def list_items():\n    return [7]\n")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"]["reason"] == "REPEATED_FAILURE"
 
 
 def test_merge_reverify_failure_blocks(h: Harness) -> None:
