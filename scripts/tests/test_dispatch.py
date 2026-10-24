@@ -39,6 +39,11 @@ import json, os, subprocess, sys, time
 from pathlib import Path
 if os.environ.get("FAKE_AGENT_MODE") == "sleep":
     time.sleep(120)
+if os.environ.get("FAKE_AGENT_MODE") == "quit":
+    # Builder를 백그라운드로 띄우고 기다리지 못한 채 끝난 세션처럼, 작업을 진행 중으로 두고 끝난다
+    print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.1,
+                      "usage": {"input_tokens": 10, "output_tokens": 5}}))
+    sys.exit(0)
 if os.environ.get("FAKE_AGENT_MODE") == "budget":
     # claude -p --max-budget-usd: 상한에 닿으면 작업 도중 결과 이벤트를 내고 끝난다
     print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
@@ -518,6 +523,17 @@ def test_budget_exhaustion_blocks_job(repo: Path, monkeypatch: pytest.MonkeyPatc
     state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
     assert "$5.20" in state["jobs"][job["job_id"]]["blocked"]["detail"]
     assert Path(job["worktree"]).exists()
+
+
+def test_session_that_ends_mid_job_blocks_it(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 세션이 끝났는데 작업이 진행 중 상태로 남으면 BLOCKED로 기록한다 (진행 중처럼 보이지 않게)
+    monkeypatch.setenv("FAKE_AGENT_MODE", "quit")
+    _, report = run(repo, "중간에 끝나는 세션")
+    job = report["jobs"][0]
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"] == "SESSION_ENDED"
+    state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
+    assert "QUEUED" in state["jobs"][job["job_id"]]["blocked"]["detail"]
 
 
 # ---------- 사람 승인 (--approve / --reject) ----------

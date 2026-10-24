@@ -18,18 +18,20 @@ function fail(message) {
 async function startServer(jobs) {
   const proc = spawn(python, [path.join(root, "scripts", "monitor.py"), "--port", "0", "--no-open", "--jobs-dir", jobs],
     { cwd: root, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+  const log = { out: "" };
   const url = await new Promise((resolve, reject) => {
     let out = "";
     const timer = setTimeout(() => reject(new Error(`서버가 뜨지 않음: ${out}`)), 20000);
     proc.stdout.on("data", (d) => {
       out += d.toString();
+      log.out = out;
       const m = out.match(/http:\/\/127\.0\.0\.1:\d+\//);
       if (m) { clearTimeout(timer); resolve(m[0]); }
     });
     proc.stderr.on("data", (d) => { out += d.toString(); });
     proc.on("exit", (code) => reject(new Error(`서버 종료 ${code}: ${out}`)));
   }).catch((e) => { proc.kill(); throw e; });
-  return { proc, url };
+  return { proc, url, log };
 }
 
 (async () => {
@@ -84,6 +86,12 @@ async function startServer(jobs) {
       const keyInputs = await page.locator("#drawer .keyrow input[type='password']").count();
       if (keyInputs !== 3) fail(`API 키 입력칸 ${keyInputs}개 (3개여야 함, 가려진 입력)`);
       if (!(await page.locator("#drawer").textContent()).includes("ANTHROPIC_API_KEY")) fail("API 키 이름이 없음");
+      if (!(await page.locator("#drawer input[aria-label^='입력 코드']").count())) fail("입력 코드 칸이 없음");
+      // 입력 코드는 터미널에만: 화면 어디에도 없어야 한다
+      for (let i = 0; i < 50 && !/입력 코드: \S+/.test(server.log.out); i++) await new Promise((r) => setTimeout(r, 100));
+      const m = server.log.out.match(/입력 코드: (\S+)/);
+      if (!m) fail("터미널에 입력 코드가 없음");
+      else if ((await page.content()).includes(m[1])) fail("입력 코드가 화면에 보임");
     }
     await page.keyboard.press("Escape");
 

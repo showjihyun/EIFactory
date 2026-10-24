@@ -439,11 +439,30 @@ def test_claude_builder_must_run_on_the_model_factory_chose(
     tmp_path: Path, builder_model: str, requested: str | None, ok: bool
 ) -> None:
     job = make_job("RETRY_REQUIRED", builder_model=builder_model, agent="claude")
-    tool_input: dict[str, Any] = {"subagent_type": "builder", "prompt": "job ID: J001"}
+    tool_input: dict[str, Any] = {
+        "subagent_type": "builder",
+        "prompt": "job ID: J001",
+        "run_in_background": False,
+    }
     if requested:
         tool_input["model"] = requested
     for tool in ("Agent", "Task"):
         assert allowed(call(tmp_path, tool, tool_input, job)) is ok
+
+
+def test_claude_builder_must_not_run_in_background(tmp_path: Path) -> None:
+    # Builder가 끝나기 전에 verify를 돌리면 시도 1회를 버린다 (Haiku 오케스트레이터 실험에서 발견).
+    # Claude Code 2.1.310은 값을 생략해도 백그라운드로 띄워, headless 세션이 Builder를 기다리지
+    # 못하고 끝난다 (Sonnet 함정 과제 실험). 그래서 false를 명시해야 통과시킨다
+    tool_input: dict[str, Any] = {"subagent_type": "builder", "prompt": "job ID: J001"}
+    for job in (make_job("BUILDING", builder_model="sonnet", agent="claude"), make_job("BUILDING")):
+        for tool in ("Agent", "Task"):
+            assert allowed(call(tmp_path, tool, {**tool_input, "run_in_background": False}, job))
+            assert not allowed(call(tmp_path, tool, {**tool_input, "run_in_background": True}, job))
+            assert not allowed(call(tmp_path, tool, tool_input, job))
+    # Builder가 아닌 서브에이전트는 막지 않는다
+    other = {"subagent_type": "Explore", "prompt": "x", "run_in_background": True}
+    assert allowed(call(tmp_path, "Agent", other, make_job("BUILDING")))
 
 
 @pytest.mark.parametrize(

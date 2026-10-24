@@ -1729,7 +1729,15 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     block.add_argument(
         "--reason",
         required=True,
-        choices=["TEST_INVALID", "SPEC_INVALID", "NEEDS_DECISION", "TIMEOUT", "BUDGET", "MANUAL"],
+        choices=[
+            "TEST_INVALID",
+            "SPEC_INVALID",
+            "NEEDS_DECISION",
+            "TIMEOUT",
+            "BUDGET",
+            "SESSION_ENDED",
+            "MANUAL",
+        ],
     )
     block.add_argument("--detail", required=True)
     status = sub.add_parser("status")

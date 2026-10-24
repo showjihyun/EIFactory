@@ -58,10 +58,11 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 - 나를 기다리는 일(승인 대기·막힘·오류), 요약(성공률·개입률·리드타임·비용), 작업 레인(같은 파일 충돌 예고 ⚡), 보드, 작업 상세(다음 명령·검증 증거·호스트 기록·리뷰 원문·모델·인증·역할별 토큰과 비용·단계별 ≈·이력·최근 활동), ⚙ 설정(모델·인증·상한은 읽기 전용, API 키 입력).
 - `127.0.0.1`에만 열고 GET만 받는다. 상태를 바꾸지 않고, 명령은 복사용 텍스트로만 보인다. 승인은 `dispatch.py --approve`, 설정은 `factory_settings.py`.
 - **API 키 입력** (⚙ 설정 → 🔑 API 키): 대시보드가 바꾸는 유일한 값. `ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `OPENAI_API_KEY`를 Windows 사용자 환경변수(`HKCU\Environment`, `setx`와 같은 곳)에 저장·삭제한다. 새로 연 터미널에서 실행한 dispatch부터 적용된다.
-  - `POST /api/settings/api-key`만 받는다: 같은 출처(`Origin`) + 서버를 띄울 때마다 새로 만드는 토큰(`X-Factory-Token`) + JSON 본문(4KB 이하). 이름은 세 가지만, 값은 접두어(`sk-ant-` / `sk-`)와 글자 종류·길이를 검사한다.
+  - `POST /api/settings/api-key`만 받는다: 같은 출처(`Origin`) + **입력 코드**(`X-Factory-Token`) + JSON 본문(4KB 이하). 이름은 세 가지만, 값은 접두어(`sk-ant-` / `sk-`)와 글자 종류·길이를 검사한다.
+  - 입력 코드는 `monitor.py`를 띄울 때마다 새로 만들어 **그 터미널에만** 출력한다 (`API 키 입력 코드: XXXXX-XXXXX`). 화면·API로는 내보내지 않는다. 다섯 번 틀리면 다시 켤 때까지 잠근다.
   - 값은 응답·화면·로그 어디에도 다시 내보내지 않는다 ("설정됨 / 없음"만). 입력칸은 가려진 입력이고, 보낸 뒤 바로 비운다.
   - Windows 밖에서는 저장하지 않고 셸 설정에 넣으라고 안내한다.
-  - 남은 위험: 같은 PC의 다른 프로세스도 127.0.0.1에서 토큰을 받아 키를 바꾸거나 지울 수 있다. 에이전트 세션의 허용 명령에는 HTTP 도구가 없지만, 호스트 격리에서는 에이전트가 쓴 테스트 코드가 `verify`로 호스트에서 돈다 (컨테이너 격리는 해당 없음). 대시보드는 키 값을 돌려주지 않으므로 읽어 가지는 못한다. 키 값은 평문 사용자 환경변수다 (`setx`와 같은 수준).
+  - 같은 PC의 다른 프로세스는 입력 코드를 HTTP로 받을 수 없으므로 화면처럼 요청을 만들어도 키를 바꾸거나 지울 수 없다 (코드 50비트, 5회 잠금). 남은 위험: 키 값은 평문 사용자 환경변수다 (`setx`와 같은 수준, 같은 사용자의 프로세스는 읽을 수 있음).
 - 값마다 출처를 표시한다: ⚠ 세션 기록(worktree 안, 위조 가능) / 🏠 호스트(`meta/`, dispatch) / ✓ Git 확인. 진행 중 비용은 ≈(추정), 끝나면 결과 이벤트의 확정값.
 - 화면 시험: `node scripts/ui/check_monitor.cjs` (`verify.py`의 `scripts ui` 단계, 작업 검증에서는 scripts 영역과 함께 건너뜀).
 - 설계: sw-factory `기획안/dashboard/` (설계안, DESIGN.md, 작업분해).
@@ -96,6 +97,7 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 | `PROTECTED_FILE_CHANGED` | 잠긴 파일(수락 테스트, contract, 기존 테스트, 검증 설정)이 바뀜 |
 | `TIMEOUT` | 시간 상한 초과, 또는 소프트 상한(80%) 이후 재시도가 필요해짐 |
 | `BUDGET` | 세션 비용이 상한에 닿아 세션이 멈춤 (dispatch가 기록) |
+| `SESSION_ENDED` | dispatch 세션이 끝났는데 작업이 진행 중 상태로 남음 (예: Builder를 기다리지 못하고 끝남). dispatch가 기록 |
 | `TEST_INVALID` | Builder가 수락 테스트가 틀렸다고 보고 (`block`으로 기록) |
 | `NEEDS_DECISION` | 요구사항 자체가 사람의 결정을 요구함 (예: 검증 약화·테스트 건너뛰기 요청). `new` 직후 `block`으로 기록 |
 | `TREE_CHANGED` | 검증·승인한 변경과 머지하려는 변경이 다름 |
@@ -231,7 +233,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - 형식·린트 문제가 출력되면 그 내용대로 테스트 파일을 고치고 다시 `red` (미리 확인하려면 `python scripts/check_style.py <테스트 경로들>`)
    - `SPEC_READY`로 돌아오면 출력된 이유를 보고 spec·수락 테스트를 **한 번만** 다시 써서 4번부터 반복
    - 이미 구현되어 있어 Red가 안 나는 요구사항이면 억지로 바꾸지 말고 그대로 두어 BLOCKED로 끝낸다
-6. Builder를 호출한다 (job ID, spec 경로, 수락 테스트 경로만 전달)
+6. Builder를 호출한다 (job ID, spec 경로, 수락 테스트 경로만 전달). Builder가 끝나 결과를 돌려줄 때까지 기다린다 (Claude Code는 `run_in_background: false`가 없는 Builder 호출을 hook이 막는다)
 7. `python scripts/factory.py verify <ID>`
    - `RETRY_REQUIRED`면 출력된 실패 내용을 Builder에게 전달해 6번부터 반복
    - Builder가 "수락 테스트가 틀렸다"고 보고하면 `block <ID> --reason TEST_INVALID --detail "..."`

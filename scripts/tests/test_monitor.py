@@ -533,7 +533,32 @@ def post_key(srv: Any, data: Any, token: str | None = None, origin: str | None =
 
 
 def key_token(srv: Any) -> str:
-    return str(json.loads(req(srv, "/api/settings")[2])["api_key_input"]["token"])
+    """입력 코드는 서버를 띄운 터미널에만 보인다 (화면·API로는 받을 수 없다)."""
+    return str(srv.RequestHandlerClass.key_code)
+
+
+def test_input_code_is_not_served_over_http(server: Any) -> None:
+    # 같은 PC의 다른 프로세스가 HTTP로 코드를 받아 키를 바꿀 수 없게 한다
+    code = key_token(server)
+    assert len(code.replace("-", "")) >= 8
+    for path in ("/", "/api/settings", "/api/snapshot"):
+        assert code.encode() not in req(server, path)[2]
+    assert json.loads(req(server, "/api/settings")[2])["api_key_input"]["needs_code"] is True
+
+
+def test_input_code_accepts_lowercase_without_dash(server: Any, keys: FakeKeyStore) -> None:
+    code = key_token(server).replace("-", "").lower()
+    status, _ = post_key(server, {"name": "ANTHROPIC_API_KEY", "value": FAKE_KEY}, token=code)
+    assert status == 200 and keys.is_set("ANTHROPIC_API_KEY")
+
+
+def test_input_code_locks_after_repeated_wrong_codes(server: Any, keys: FakeKeyStore) -> None:
+    data = {"name": "ANTHROPIC_API_KEY", "value": FAKE_KEY}
+    for _ in range(5):
+        assert post_key(server, data, token="WRONG-CODE")[0] == 403
+    # 다섯 번 틀리면 맞는 코드도 받지 않는다 (대시보드를 다시 켜면 새 코드)
+    assert post_key(server, data, token=key_token(server))[0] == 429
+    assert keys.values == {}
 
 
 def test_settings_shows_only_whether_keys_are_set(
