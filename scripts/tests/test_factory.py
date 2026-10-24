@@ -843,6 +843,68 @@ def test_merge_conflict_in_locked_file_still_blocks(h: Harness) -> None:
     assert not merge_lock(h).exists()
 
 
+EXISTING_TEST = "backend/tests/test_existing.py"
+
+
+def to_approved_with_changed_test(h: Harness) -> None:
+    """기존 테스트를 바꾼(changed_tests) LOW 작업을 자동 승인까지."""
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("new", "요구사항") == 0
+    h.write_spec(changed_tests=[EXISTING_TEST])
+    (h.repo / EXISTING_TEST).write_text(
+        "def test_existing():\n    assert 'job'\n", encoding="utf-8"
+    )
+    assert h.run("spec", "J001") == 0
+    assert h.run("red", "J001") == 0
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    assert h.run("validate", "J001") == 0
+    assert h.job()["status"] == "APPROVED"
+
+
+def test_conflict_in_jobs_own_changed_test_returns_to_spec(h: Harness) -> None:
+    # 잠근 기존 테스트는 Builder가 고칠 수 없다. 오케스트레이터가 새 base 위에서 Spec부터 다시 한다
+    to_approved_with_changed_test(h)
+    main_head = advance_main(h, EXISTING_TEST, "def test_existing():\n    assert 'main'\n")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "SPEC_READY"
+    assert job["last_failure"].startswith("CONFLICT")
+    assert job["replays"][-1]["mode"] == "spec"
+    assert job["replays"][-1]["files"] == [EXISTING_TEST]
+    assert job["locks"] == {} and job["approval"] is None
+    assert git(h.repo, "rev-parse", "main") == main_head
+    assert git(h.repo, "rev-parse", "HEAD") == main_head
+    # 구현과 기존 테스트 변경은 빠지고(새 base 그대로), spec·수락 테스트는 남는다
+    assert "return []" in (h.repo / MAIN_PY).read_text(encoding="utf-8")
+    assert "'main'" in (h.repo / EXISTING_TEST).read_text(encoding="utf-8")
+    assert (h.repo / "backend/tests/acceptance/test_J001.py").exists()
+    assert (h.repo / "factory/specs/J001.md").exists()
+    # 이전에 바꾼 내용은 기록된 커밋에서 볼 수 있다
+    old = git(h.repo, "show", f"{job['replays'][-1]['from']}:{EXISTING_TEST}")
+    assert "'job'" in old
+    # Spec 단계부터 다시: 기존 테스트를 새 base 기준으로 고치고 red → BUILDING
+    (h.repo / EXISTING_TEST).write_text(
+        "def test_existing():\n    assert 'main' and 'job'\n", encoding="utf-8"
+    )
+    assert h.run("spec", "J001") == 0
+    assert h.run("red", "J001") == 0
+    assert h.job()["status"] == "BUILDING"
+
+
+def test_second_changed_test_conflict_goes_to_human(h: Harness) -> None:
+    test_conflict_in_jobs_own_changed_test_returns_to_spec(h)
+    (h.repo / MAIN_PY).write_text("def list_items():\n    return [1]\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    assert h.run("validate", "J001") == 0
+    advance_main(h, EXISTING_TEST, "def test_existing():\n    assert 'again'\n")
+    assert h.run("merge", "J001") != 0
+    job = h.job()
+    assert job["status"] == "BLOCKED"
+    assert job["blocked"]["reason"] == "CONFLICT"
+    assert "return [1]" in git(h.repo, "show", f"HEAD:{MAIN_PY}")  # 작업 브랜치는 되돌림
+
+
 def test_repeated_conflict_on_same_files_blocks(h: Harness) -> None:
     test_merge_conflict_replays_job_on_new_base_for_builder(h)
     (h.repo / MAIN_PY).write_text("def list_items():\n    return [1, 9]\n", encoding="utf-8")

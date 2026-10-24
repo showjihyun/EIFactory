@@ -1,5 +1,5 @@
 {
-  "_설명": "팩토리 키트 레포별 설정. 값을 채운 뒤 `python scripts/factory_kit.py check .`로 확인한다. 이 파일은 잠금·HIGH 대상이라 팩토리 작업이 바꿀 수 없다.",
+  "_설명": "팩토리 키트 레포별 설정. 값을 채운 뒤 키트 원본 레포(EIFactory)에서 `python scripts/factory_kit.py check <이 레포>`로 확인한다 (키트 설치·점검 스크립트는 원본에만 있다). 이 파일은 잠금·HIGH 대상이라 팩토리 작업이 바꿀 수 없다.",
   "lock_patterns": [],
   "no_new_file_patterns": [],
   "high_paths": [],
