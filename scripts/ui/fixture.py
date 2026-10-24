@@ -89,8 +89,10 @@ def main(target: Path) -> None:
     write(
         target / "J001" / "factory" / "state.json", {"jobs": {"J001": job("J001", "BUILDING", now)}}
     )
+    reviews[1]["notes_for_human"] = ["토큰 비교가 상수 시간이 아니다 <b>굵게</b>"]
     j002 = job("J002", "APPROVAL_REQUIRED", now, risk="MEDIUM", reviews=reviews,
-               risk_reasons=["MEDIUM: DB 스키마 변경 (repository.py)"])  # fmt: skip
+               risk_reasons=["MEDIUM: DB 스키마 변경 (repository.py)"],
+               assumptions=["공백 본문은 빈 본문으로 보지 않는다"])  # fmt: skip
     write(target / "J002" / "factory" / "state.json", {"jobs": {"J002": j002}})
     (target / "J002" / "factory" / "reviews").mkdir(parents=True, exist_ok=True)
     (target / "J002" / "factory" / "reviews" / "J002-1-code.txt").write_text(

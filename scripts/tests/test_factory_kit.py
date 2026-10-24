@@ -344,7 +344,7 @@ def test_installed_kit_runs_a_job_in_another_layout(
         "type": "feature", "size": "small", "risk": "LOW", "risk_reason": "작은 변경",
         "acceptance_criteria": ["add가 정수를 돌려준다"],
         "acceptance_tests": ["tests/acceptance/test_J001.py"],
-        "changed_tests": [], "allowed_config_changes": [],
+        "changed_tests": [], "allowed_config_changes": [], "assumptions": [],
     }  # fmt: skip
     (target / "factory/specs").mkdir(parents=True, exist_ok=True)
     (target / "factory/specs/J001.md").write_text(

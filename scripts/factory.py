@@ -724,6 +724,12 @@ def parse_contract(text: str, job_id: str, cfg: Config) -> dict[str, Any]:
     for key in ("changed_tests", "allowed_config_changes"):
         if not isinstance(contract.get(key, []), list):
             errors.append(f"{key}는 목록")
+    # 가정: 요구사항 해석이 갈린 지점과 고른 쪽. 없으면 []로 명시한다 (승인 요약 "판단할 것", H2)
+    assumptions = contract.get("assumptions")
+    if not isinstance(assumptions, list) or not all(
+        isinstance(item, str) and item.strip() for item in assumptions
+    ):
+        errors.append("assumptions는 비어 있지 않은 문자열의 목록 (가정이 없으면 [])")
     # changed_tests는 명령 인자(형식·린트 확인)로 넘어가므로 기존 테스트 파일 경로만 받는다
     for test in contract.get("changed_tests") or []:
         if not cfg.changed_test.match(str(test)):
@@ -831,6 +837,7 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "acceptance_tests": [],
         "changed_tests": [],
         "allowed_config_changes": [],
+        "assumptions": [],
         "contract_version": 0,
         "locks": {},
         "red": [],
@@ -882,6 +889,7 @@ def cmd_spec(root: Path, state: State, job_id: str) -> str:
         acceptance_tests=contract["acceptance_tests"],
         changed_tests=contract["changed_tests"],
         allowed_config_changes=contract["allowed_config_changes"],
+        assumptions=contract["assumptions"],
         contract=contract,
     )
     job["contract_version"] += 1
@@ -1013,7 +1021,8 @@ DEFAULT_VALIDATOR_INSTRUCTIONS = """너는 AI SW Factory의 리뷰어다.
 구현자의 대화는 보지 못하고 아래 자료만 본다.
 필요하면 Read/Glob/Grep으로 레포 파일을 확인한다. 파일을 고치지 않는다.
 아래 '리뷰어' 절의 관점에서만 판정한다. 그 관점의 문제가 아니면 FAIL로 하지 않는다.
-마지막 줄에 JSON 한 줄로만 판정한다: {"verdict": "PASS" 또는 "FAIL", "issues": ["..."]}
+마지막 줄에 JSON 한 줄로만 판정한다: {"verdict": "PASS" 또는 "FAIL", "issues": ["..."],
+"notes_for_human": ["..."], "risk_up": null 또는 {"to": "MEDIUM"|"HIGH", "reason": "..."}}
 """
 
 DEFAULT_REVIEWER_FOCUS = {
@@ -1062,13 +1071,55 @@ def build_validator_prompt(root: Path, job: Job, reviewer: str = "code") -> str:
     )
 
 
+# 리뷰어 판정 형식. Claude는 --json-schema로 CLI가 강제하고, Codex는 지시문으로 같은 형식을 낸다
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+        "issues": {"type": "array", "items": {"type": "string"}},
+        # PASS여도 사람이 알아야 할 점 (승인 요약 "판단할 것", H3)
+        "notes_for_human": {"type": "array", "items": {"type": "string"}},
+        # 위험 등급 상향 제안. 올리는 방향만 반영한다 (H4)
+        "risk_up": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string", "enum": ["MEDIUM", "HIGH"]},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["to", "reason"],
+                    "additionalProperties": False,
+                },
+            ]
+        },
+    },
+    "required": ["verdict", "issues", "notes_for_human", "risk_up"],
+    "additionalProperties": False,
+}
+
+
 def _parse_verdict(text: str) -> dict[str, Any] | None:
-    for match in reversed(re.findall(r"\{[^{}]*\"verdict\"[^{}]*\}", text)):
+    """출력에서 마지막 판정 JSON을 찾는다. 중첩 객체(risk_up)가 있어도 읽는다."""
+    decoder = json.JSONDecoder()
+    for start in reversed([i for i, ch in enumerate(text) if ch == "{"]):
         try:
-            parsed: dict[str, Any] = json.loads(match)
+            parsed, _ = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
             continue
-        if parsed.get("verdict") in {"PASS", "FAIL"}:
+        if isinstance(parsed, dict) and parsed.get("verdict") in {"PASS", "FAIL"}:
+            notes = parsed.get("notes_for_human")
+            parsed["notes_for_human"] = (
+                [n for n in notes if isinstance(n, str) and n.strip()]
+                if isinstance(notes, list)
+                else []
+            )
+            up = parsed.get("risk_up")
+            valid = isinstance(up, dict) and up.get("to") in ("MEDIUM", "HIGH")
+            parsed["risk_up"] = (
+                {"to": up["to"], "reason": str(up.get("reason", ""))} if valid else None
+            )
             return parsed
     return None
 
@@ -1114,6 +1165,8 @@ def reviewer_command(
         "json",
         "--max-budget-usd",
         budget or reviewer_budget({}),
+        "--json-schema",
+        json.dumps(REVIEW_SCHEMA),
         "--allowedTools",
         "Read",
         "Glob",
@@ -1178,9 +1231,50 @@ def _run_reviewer(
             if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
                 text = envelope["result"]  # claude -p --output-format json
                 usage = _usage(envelope)
+                structured = envelope.get("structured_output")
+                if isinstance(structured, dict):  # --json-schema: CLI가 형식을 확인한 판정
+                    text += "\n" + json.dumps(structured, ensure_ascii=False)
         except json.JSONDecodeError:
             pass
     return text, proc.stderr, usage
+
+
+def judgement_lines(job: Job) -> list[str]:
+    """사람이 코드를 읽지 않고 판단할 논점 (H3): spec의 가정, 리뷰어 의견, 등급 상향 제안."""
+    assumptions = job.get("assumptions") or []
+    lines = [f"- 가정: {item}" for item in assumptions] or [
+        "- 가정 없음 (spec에 AI가 혼자 정한 해석이 없다고 적음)"
+    ]
+    last_round = max((int(r.get("round", 0)) for r in job["reviews"]), default=0)
+    for review in job["reviews"]:
+        if int(review.get("round", 0)) != last_round:
+            continue
+        lines += [
+            f"- [{review['reviewer']}] {note}" for note in review.get("notes_for_human") or []
+        ]
+        if review.get("risk_up"):
+            up = review["risk_up"]
+            lines.append(f"- [{review['reviewer']}] 위험 등급 {up['to']}로 상향: {up['reason']}")
+    return lines
+
+
+def screenshot_paths(root: Path, patterns: list[str], limit: int = 10) -> list[str]:
+    """사용자 흐름 테스트가 남긴 스크린샷 (레포 기준 경로, 최대 limit개)."""
+    found = {
+        path.relative_to(root).as_posix()
+        for pattern in patterns
+        for path in root.glob(pattern)
+        if path.is_file()
+    }
+    return sorted(found)[:limit]
+
+
+def _screenshot_lines(root: Path, cfg: Config) -> list[str]:
+    if not cfg.screenshots:
+        return []
+    shots = screenshot_paths(root, cfg.screenshots)
+    body = [f"- {s}" for s in shots] or ["- 스크린샷 없음 (사용자 흐름 테스트가 남긴 파일이 없음)"]
+    return ["## 화면 스크린샷", *body, ""]
 
 
 def write_approval_brief(root: Path, job: Job) -> str:
@@ -1195,12 +1289,16 @@ def write_approval_brief(root: Path, job: Job) -> str:
         *[f"  - {reason}" for reason in job["risk_reasons"]],
         f"- 활성 시간: {_fmt_minutes(active_seconds(job, now()))}, 재시도 {job['attempts']}회",
         "",
+        "## 판단할 것",
+        *judgement_lines(job),
+        "",
         "## 리뷰 결과",
         *[f"- {r['reviewer']}: {r['verdict']} ({r['path']})" for r in reviews],
         "",
         "## 바뀐 파일",
         *[f"- {path} (+{len(a)} -{len(d)})" for path, (a, d) in sorted(files.items())],
         "",
+        *_screenshot_lines(root, _config(root)),
         "## 사람의 다음 명령",
         "dispatch로 만든 작업은 기본 checkout에서 실행한다 (작업 worktree의 scripts/와 상태 "
         "파일은 세션이 바꿀 수 있다):",
@@ -1267,6 +1365,8 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
                 "path": paths[name].relative_to(root).as_posix(),
                 "verdict": verdict["verdict"] if verdict else None,
                 "issues": verdict.get("issues", []) if verdict else [],
+                "notes_for_human": verdict["notes_for_human"] if verdict else [],
+                "risk_up": verdict["risk_up"] if verdict else None,
                 **usage,
                 "at": now(),
             }
@@ -1295,6 +1395,12 @@ def cmd_validate(root: Path, state: State, job_id: str) -> tuple[int, str]:
         }
     )
     if passed:
+        # 리뷰어의 등급 상향 제안은 받아들인다. 낮추는 제안은 형식상 받지 않는다 (H4, 기획안 8.2)
+        for name, v in verdicts.items():
+            up = v["risk_up"] if v else None
+            if up and RISKS.index(up["to"]) > RISKS.index(job["risk"]):
+                job["risk"] = up["to"]
+                job["risk_reasons"].append(f"{up['to']}: 리뷰어 {name} 상향 제안 ({up['reason']})")
         # Approver: 승인 결정은 규칙으로 한다. 모델은 안전 판정을 뒤집을 수 없다 (기획안 8.2)
         _stop_clock(job, now())
         if job["risk"] in AUTO_MERGE_RISKS:

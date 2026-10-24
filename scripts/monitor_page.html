@@ -96,6 +96,11 @@ h2 .count { background: var(--s-approval-bg); color: var(--s-approval); border-r
 
 /* 주의 줄 */
 .attention { display: flex; gap: 12px; flex-wrap: wrap; }
+.judge { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; }
+.judge li { margin: 2px 0; }
+.recommend { font-size: 12.5px; margin-top: 6px; }
+.notify-btn { font-size: 12px; margin-left: 8px; padding: 2px 8px; border-radius: 8px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
+.notify-btn[aria-pressed="true"] { opacity: .7; }
 .acard { background: var(--surface); border-radius: 16px; box-shadow: var(--shadow); padding: 14px; width: 340px;
   border: 1px solid var(--border); cursor: pointer; animation: drop .35s cubic-bezier(.3,1.6,.5,1) both; }
 .acard:hover { transform: translateY(-1px); }
@@ -275,7 +280,7 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
 <header class="topbar"><div class="wrap" id="top"></div></header>
 <main class="wrap">
   <div id="banners"></div>
-  <h2 id="att-h">🙋 나를 기다리는 일 <span class="count" id="att-count"></span></h2>
+  <h2 id="att-h">🙋 나를 기다리는 일 <span class="count" id="att-count"></span> <button type="button" class="notify-btn" id="notify-btn" aria-label="새 항목 알림 켜기">🔔 알림 켜기</button></h2>
   <div class="attention" id="attention" aria-live="polite"></div>
   <h2>📊 요약</h2>
   <div class="stats" id="stats"></div>
@@ -381,7 +386,7 @@ async function getJSON(url, etag) {
 }
 
 // ---------------------------------------------------------------- 상태
-const S = { snap: null, etag: null, fails: 0, lastOk: 0, open: null, detail: null, detailEtag: null, activity: [], after: 0, settings: null, mergedOpen: false };
+const S = { seen: null, notify: false, snap: null, etag: null, fails: 0, lastOk: 0, open: null, detail: null, detailEtag: null, activity: [], after: 0, settings: null, mergedOpen: false };
 
 // ---------------------------------------------------------------- 그리기
 function renderTop() {
@@ -424,9 +429,18 @@ function firstCommand(c) {
 function renderAttention() {
   const box = $("attention"); box.replaceChildren();
   const items = ((S.snap && S.snap.attention) || []).map((a) => cardOf(a.key)).filter(Boolean);
-  $("att-count").textContent = items.length ? String(items.length) : "";
-  document.title = (items.length ? `(${items.length}) ` : "") + "팩토리 대시보드";
-  if (!items.length) { box.append(el("div", { class: "empty-att" }, bolt("MERGED", 40), "할 일이 없어요. 로봇들이 일하는 중 (｡•̀ᴗ-)✧")); return; }
+  const B = (S.snap && S.snap.brief) || { by_key: {}, extra: [] };
+  const total = items.length + B.extra.length;
+  $("att-count").textContent = total ? String(total) : "";
+  document.title = (total ? `(${total}) ` : "") + "팩토리 대시보드";
+  notifyNew([...items.map((c) => `${c.key}:${c.status}`), ...B.extra.map((x) => `push:${x.id}`)], items, B.extra);
+  for (const x of B.extra) {
+    box.append(el("div", { class: "acard k-blocked" },
+      el("div", { class: "ahead" }, el("div", {}, el("div", { class: "atitle", text: x.title }))),
+      el("div", { class: "aline" }, trust(x.trust)),
+      ...x.commands.map((cmd) => command(cmd))));
+  }
+  if (!total) { box.append(el("div", { class: "empty-att" }, bolt("MERGED", 40), "할 일이 없어요. 로봇들이 일하는 중 (｡•̀ᴗ-)✧")); return; }
   for (const c of items) {
     const st = STATUS[c.status] || { say: c.status };
     const kind = c.status === "APPROVAL_REQUIRED" ? "approval" : c.status === "BLOCKED" ? "blocked" : "error";
@@ -441,8 +455,43 @@ function renderAttention() {
         c.blocked ? el("span", { class: "blocked-code", text: c.blocked.reason }) : null,
         rv.length ? el("span", { text: `리뷰 ${rv.map((v) => (v === "PASS" ? "✓" : v === "FAIL" ? "✗" : "?")).join("")}` }) : null,
         trust(c.trust), w != null ? el("span", { class: "muted", text: `기다린 지 ${w}분` }) : null),
+      judge(B.by_key[c.key]),
       c.column === "error" ? null : command(firstCommand(c))));
   }
+}
+// 브리핑의 "판단할 것"(가정·리뷰어 의견·위험 근거)과 BLOCKED 추천 처리. 글자로만 넣는다
+function judge(b) {
+  if (!b) return null;
+  const lines = (b.lines || []).filter(Boolean).slice(0, 5);
+  return el("div", {},
+    lines.length ? el("ul", { class: "judge" }, ...lines.map((l) => el("li", { text: l }))) : null,
+    b.recommendation ? el("div", { class: "recommend" }, el("b", { text: "추천: " }), el("span", { text: b.recommendation })) : null);
+}
+// 새 항목이 생기면 브라우저 알림 (처음 불러올 때는 알리지 않는다)
+function notifyNew(keys, items, extra) {
+  if (!S.snap) return; // 첫 스냅샷 전에는 '본 것'을 정하지 않는다
+  const now = new Set(keys);
+  const fresh = S.seen ? keys.filter((k) => !S.seen.has(k)) : [];
+  S.seen = now;
+  if (!fresh.length || !S.notify || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const names = [...items.filter((c) => fresh.includes(`${c.key}:${c.status}`)).map((c) => `${c.id} ${(STATUS[c.status] || { say: c.status }).say}`),
+    ...extra.filter((x) => fresh.includes(`push:${x.id}`)).map((x) => x.title)];
+  try { new Notification("팩토리: 나를 기다리는 일", { body: names.join(" · ") }); } catch (e) { /* 알림 불가 */ }
+}
+function setupNotify() {
+  const btn = $("notify-btn");
+  if (typeof Notification === "undefined") { btn.hidden = true; return; }
+  try { S.notify = localStorage.getItem("factory-notify") === "on" && Notification.permission === "granted"; } catch (e) { S.notify = false; }
+  const show = () => { btn.textContent = S.notify ? "🔔 알림 켜짐" : "🔔 알림 켜기"; btn.setAttribute("aria-pressed", String(S.notify)); };
+  btn.onclick = async () => {
+    if (S.notify) { S.notify = false; } else {
+      const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+      S.notify = permission === "granted";
+    }
+    try { localStorage.setItem("factory-notify", S.notify ? "on" : "off"); } catch (e) { /* 무시 */ }
+    show();
+  };
+  show();
 }
 function renderStats() {
   const k = S.snap && S.snap.kpi; const s = $("stats"); s.replaceChildren();
@@ -750,7 +799,7 @@ async function poll() {
   }
   setTimeout(poll, document.hidden ? 10000 : 2000);
 }
-applyTheme(); render(); poll();
+applyTheme(); setupNotify(); render(); poll();
 </script>
 </body>
 </html>

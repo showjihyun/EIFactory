@@ -207,7 +207,8 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
   "acceptance_criteria": ["빈 목록에서 '첫 북마크를 추가해 보세요'가 보인다"],
   "acceptance_tests": ["frontend/src/components/BookmarkList.J001.accept.test.tsx"],
   "changed_tests": ["frontend/src/components/BookmarkList.test.tsx"],
-  "allowed_config_changes": []
+  "allowed_config_changes": [],
+  "assumptions": ["북마크가 하나라도 있으면 안내 문구를 숨긴다 (요구사항에 없어 이렇게 정함)"]
 }
 ```
 
@@ -219,6 +220,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 | `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx`, 사용자 흐름 `frontend/e2e/<name>.<ID>.accept.e2e.ts` (Playwright) |
 | `changed_tests` | Spec 단계에서 바꾼 기존 테스트 파일 (없으면 `[]`) |
 | `allowed_config_changes` | 바꿔도 되는 설정 파일 (예: 의존성 추가 시 `backend/pyproject.toml`). 있으면 위험 등급 MEDIUM 이상 |
+| `assumptions` | **필수.** 요구사항이 정하지 않아 내가 해석을 고른 지점과 고른 쪽을 한 줄씩 (예: "공백만 있는 본문은 빈 본문으로 보지 않는다"). 없으면 `[]`. 승인 요약의 "판단할 것"에 그대로 나오므로, 사람이 코드를 읽지 않고도 알아야 할 해석을 적는다. 결정이 꼭 필요한 문제(검증 약화 등)는 가정으로 넘기지 말고 `NEEDS_DECISION`으로 멈춘다 |
 
 ## 오케스트레이터 진행 순서
 
@@ -228,7 +230,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - `recover`가 "5분이 지난 뒤"라며 거부하면 멈추고 보고한다.
 1. 요구사항이 검증을 약하게 하거나(테스트 건너뛰기, 검사 끄기) 그 밖에 사람이 정해야 하는 내용이면, `new` 후 바로 `block <ID> --reason NEEDS_DECISION --detail "<이유>"`로 기록하고 멈춘다.
 2. `python scripts/factory.py new "<요구사항>"` → job ID 확인
-3. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. **구현 코드는 쓰지 않는다.**
+3. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. 요구사항이 정하지 않아 해석을 고른 지점은 `assumptions`에 적는다 (없으면 `[]`). **구현 코드는 쓰지 않는다.**
 4. `python scripts/factory.py spec <ID>` → 형식 오류가 있으면 고친다
 5. `python scripts/factory.py red <ID>`
    - `BUILDING`이면 다음 단계
@@ -300,6 +302,24 @@ python scripts/factory_kit.py upgrade <대상 레포> --engine factory-vN [--yes
 - `factory/config.json`: 검증 설정 파일(`lock_patterns`, `medium_paths`), 위험 경로(`high_paths`), 기존 테스트 위치(`test_patterns`, `changed_test`), 수락 테스트 경로 규칙(`acceptance_tests`, `{id}` 자리표시), 의존성 설치(`setup`), 컨테이너 경로(`docker`).
 - 대상 레포는 **검증 계약** 세 스크립트(`scripts/verify.py`, `scripts/check_red.py --json`, `scripts/check_style.py`)를 직접 만든다. 형식은 `factory/templates/AGENTS.md`.
 - 컨테이너 격리를 쓰려면 대상 레포에 `.devcontainer/Dockerfile`(Claude Code·Codex CLI 포함 이미지)도 필요하다.
+
+## 브리핑과 알림 (`scripts/brief.py`, factory-v2)
+
+사람에게 오는 단일 목록 "나를 기다리는 일"이다. 모델이 요약하지 않고, 대시보드와 같은 로더·명령 규칙을 쓴다.
+
+```
+python scripts/brief.py            # 목록 (승인 대기 → BLOCKED → push 대기 → 경고)
+python scripts/brief.py --counts   # 상태줄용 한 줄: 승인 1 · BLOCKED 1 · push 1
+python scripts/brief.py --json
+```
+
+- 승인 대기에는 **판단할 것**이 붙는다: spec의 `assumptions`, 리뷰어의 `notes_for_human`, 리뷰어의 등급 상향(`risk_up`), 위험 근거, 화면 스크린샷. 승인 요약(`<ID>-approval.md`)의 "판단할 것" 절과 같다.
+- BLOCKED에는 사유 코드별 추천 처리가 붙는다 (예: `TIMEOUT`이면 `resume --extend`, 연장을 이미 썼으면 split·drop). 고르는 것은 사람이다.
+- 작업 상태 파일 값은 "세션 값"으로 표시한다 (세션이 쓸 수 있는 데이터).
+- 대시보드의 "나를 기다리는 일"도 같은 목록이다. "🔔 알림 켜기"를 누르면 새 항목이 생길 때 브라우저 알림을 띄운다 (처음 불러올 때는 알리지 않는다).
+- dispatch가 끝나면 결과 요약을 Windows 알림으로 띄운다. `factory/config.json`의 `"notify": {"toast": false}`로 끈다.
+- 사용자 흐름 테스트가 남긴 스크린샷은 `factory/config.json`의 `"screenshots"`(레포 기준 glob, 예: `["frontend/test-results/**/*.png"]`)로 모아 승인 요약·브리핑에 붙인다. Playwright 설정에 `screenshot: "on"`이 있어야 파일이 생긴다.
+- 상위 세션(사람과 대화하는 Claude Code)에 붙이는 SessionStart hook·상태줄 예시: `factory/templates/upper-session.example.json`. 사용자 설정이라 사람이 넣는다.
 
 ## 운영 기록 (`factory/learnings.md`)
 

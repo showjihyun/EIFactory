@@ -87,6 +87,10 @@ class Config:
     # 단계별 모델·인증 {단계: {"model": auto|haiku|sonnet|opus, "auth": auto|subscription|api}}
     stages: dict[str, dict[str, str]] = field(default_factory=dict)
     budgets: dict[str, float] = field(default_factory=lambda: dict(BUDGET_DEFAULTS))
+    # dispatch 종료 Windows 알림 (기획안 6.9 P2, 기본 켬)
+    notify_toast: bool = True
+    # 사용자 흐름 테스트가 남긴 화면 스크린샷 (레포 기준 glob). 승인 요약·브리핑에 붙인다
+    screenshots: list[str] = field(default_factory=list)
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -156,6 +160,27 @@ def _budgets(raw: Any) -> dict[str, float]:
     return out
 
 
+def _notify_toast(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{CONFIG_PATH}: notify는 객체여야 합니다")
+    unknown = sorted(k for k in raw if k != "toast" and not str(k).startswith("_"))
+    if unknown:
+        raise ConfigError(f"{CONFIG_PATH}: 모르는 알림 설정 {unknown} (가능: toast)")
+    toast = raw.get("toast", True)
+    if not isinstance(toast, bool):
+        raise ConfigError(f"{CONFIG_PATH}: notify.toast={toast!r}는 true 또는 false")
+    return toast
+
+
+def _screenshots(raw: Any) -> list[str]:
+    if not isinstance(raw, list) or not all(isinstance(p, str) and p for p in raw):
+        raise ConfigError(f"{CONFIG_PATH}: screenshots는 경로 규칙(glob) 문자열의 목록")
+    for pattern in raw:
+        if pattern.startswith(("/", "\\")) or ".." in pattern.replace("\\", "/").split("/"):
+            raise ConfigError(f"{CONFIG_PATH}: screenshots는 레포 안 경로만 ({pattern})")
+    return list(raw)
+
+
 def load_config(root: Path) -> Config:
     path = root / CONFIG_PATH
     data: dict[str, Any] = {}
@@ -184,6 +209,8 @@ def load_config(root: Path) -> Config:
             },
             stages=_stages(data.get("stages") or {}),
             budgets=_budgets(data.get("budgets") or {}),
+            notify_toast=_notify_toast(data.get("notify", {})),
+            screenshots=_screenshots(data.get("screenshots", [])),
             job_verify_args=[str(a) for a in job_verify.get("args", [])],
             # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
             job_verify_full_if_changed=_merge(

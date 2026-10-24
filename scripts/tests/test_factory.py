@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 import factory  # noqa: E402
 
 REPO_CONFIG = Path(__file__).resolve().parents[2] / "factory" / "config.json"
+DROP = object()  # write_spec에서 contract 필드를 빼라는 표시
 CFG = factory.load_config(Path(__file__).resolve().parents[2])
 
 FAKE_CMD = r"""
@@ -58,7 +59,10 @@ if kind == "verify":
     sys.exit(result["exit"])
 if kind == "validator":
     usage = {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 20}
-    envelope = {"type": "result", "result": take("validator"), "total_cost_usd": 0.01}
+    answer = take("validator")
+    envelope = {"type": "result", "result": answer, "total_cost_usd": 0.01}
+    if answer.startswith("STRUCTURED:"):  # claude -p --json-schema: 판정은 structured_output에
+        envelope.update(result="설명만 있는 응답", structured_output=json.loads(answer[11:]))
     print(json.dumps({**envelope, "usage": usage}))
 """
 
@@ -133,8 +137,10 @@ class Harness:
             "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
             "changed_tests": [],
             "allowed_config_changes": [],
+            "assumptions": [],
         }
         contract.update(overrides)
+        contract = {k: v for k, v in contract.items() if v is not DROP}
         spec = self.repo / "factory" / "specs" / f"{job_id}.md"
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text(
@@ -146,10 +152,10 @@ class Harness:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("def test_new():\n    assert False\n", encoding="utf-8")
 
-    def to_building(self, risk: str = "LOW") -> None:
+    def to_building(self, risk: str = "LOW", **spec: Any) -> None:
         self.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
         assert self.run("new", "요구사항") == 0
-        self.write_spec(risk=risk)
+        self.write_spec(risk=risk, **spec)
         assert self.run("spec", "J001") == 0
         assert self.run("red", "J001") == 0
         assert self.job()["status"] == "BUILDING"
@@ -247,6 +253,11 @@ def test_spec_accepts_valid_contract(h: Harness) -> None:
         {"changed_tests": ["backend/tests/../../secret.py"]},
         {"changed_tests": ["backend/src/bookmarks/main.py"]},
         {"changed_tests": ["backend/tests/test_missing.py"]},
+        # 가정(해석이 갈린 지점과 고른 쪽)은 없으면 빈 목록으로라도 명시한다 (H2)
+        {"assumptions": DROP},
+        {"assumptions": "공백 본문 허용"},
+        {"assumptions": [""]},
+        {"assumptions": [1]},
     ],
 )
 def test_spec_rejects_invalid_contract(h: Harness, overrides: dict[str, Any]) -> None:
@@ -254,6 +265,13 @@ def test_spec_rejects_invalid_contract(h: Harness, overrides: dict[str, Any]) ->
     h.write_spec(**overrides)
     assert h.run("spec", "J001") != 0
     assert h.job()["status"] == "QUEUED"
+
+
+def test_spec_records_assumptions(h: Harness) -> None:
+    h.run("new", "요구사항")
+    h.write_spec(assumptions=["공백만 있는 본문은 빈 본문으로 보지 않는다"])
+    assert h.run("spec", "J001") == 0
+    assert h.job()["assumptions"] == ["공백만 있는 본문은 빈 본문으로 보지 않는다"]
 
 
 def test_spec_requires_a_json_contract_block(h: Harness) -> None:
@@ -1110,6 +1128,7 @@ def wt_to_approved(h: Harness, wt: Path, filename: str) -> str:
         "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
         "changed_tests": [],
         "allowed_config_changes": [],
+        "assumptions": [],
     }
     spec = wt / "factory" / "specs" / f"{job_id}.md"
     spec.parent.mkdir(parents=True, exist_ok=True)
@@ -1338,6 +1357,123 @@ def test_approver_writes_brief_for_human_approval(h: Harness) -> None:
     for reviewer in ("code", "security", "test"):
         assert f"{reviewer}: PASS" in brief
     assert "approve J001" in brief
+
+
+def test_approval_brief_lists_assumptions_to_judge(h: Harness) -> None:
+    # 사람이 코드를 읽지 않고도 AI가 혼자 정한 해석을 볼 수 있다 (H3)
+    h.to_building(assumptions=["토큰은 대소문자를 구분한다", "만료된 토큰은 401"])
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    judge = brief.split("## 판단할 것")[1].split("## ")[0]
+    assert "가정: 토큰은 대소문자를 구분한다" in judge
+    assert "가정: 만료된 토큰은 401" in judge
+
+
+def test_approval_brief_says_when_there_is_nothing_to_judge(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    assert "## 판단할 것" in brief
+    assert "가정 없음" in brief.split("## 판단할 것")[1]
+
+
+def verdict(**fields: Any) -> str:
+    return json.dumps({"verdict": "PASS", "issues": [], **fields}, ensure_ascii=False)
+
+
+def test_claude_reviewer_is_asked_for_the_verdict_schema() -> None:
+    cmd = factory.reviewer_command("claude", Path("last.txt"))
+    schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+    assert set(schema["required"]) == {"verdict", "issues", "notes_for_human", "risk_up"}
+    assert "--json-schema" not in factory.reviewer_command("codex", Path("last.txt"))
+
+
+def test_structured_verdict_is_used_when_text_has_no_json(h: Harness) -> None:
+    to_verifying(h)
+    answer = "STRUCTURED:" + verdict(notes_for_human=["입력 길이 제한이 없다"], risk_up=None)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=answer)
+    assert h.run("validate", "J001") == 0
+    review = h.job()["reviews"][-1]
+    assert review["verdict"] == "PASS"
+    assert review["notes_for_human"] == ["입력 길이 제한이 없다"]
+
+
+def test_verdict_with_nested_risk_up_object_is_read_from_text(h: Harness) -> None:
+    # Codex처럼 텍스트로만 답해도 중첩 객체가 있는 판정을 읽는다
+    to_verifying(h)
+    text = "설명\n" + verdict(notes_for_human=[], risk_up={"to": "MEDIUM", "reason": "API 추가"})
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=text)
+    assert h.run("validate", "J001") == 0
+    assert h.job()["status"] == "APPROVAL_REQUIRED"
+
+
+def test_reviewer_risk_up_sends_auto_merge_to_human_approval(h: Harness) -> None:
+    # 등급 상향 제안은 받아들이되 낮추지는 못한다 (H4, 기획안 8.2)
+    to_verifying(h)
+    assert h.job()["risk"] == "LOW"
+    up = verdict(risk_up={"to": "MEDIUM", "reason": "공개 API 응답 형식이 바뀜"})
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": up, "test": PASS},
+    )
+    assert h.run("validate", "J001") == 0
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    assert job["risk"] == "MEDIUM"
+    assert any("리뷰어 security" in r and "공개 API" in r for r in job["risk_reasons"])
+
+
+@pytest.mark.parametrize("to", ["LOW", "NONE", None])
+def test_reviewer_cannot_lower_or_garble_the_risk(h: Harness, to: str | None) -> None:
+    to_verifying(h)
+    answer = verdict(risk_up={"to": to, "reason": "낮춰도 된다"})
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=answer)
+    assert h.run("validate", "J001") == 0
+    assert h.job()["risk"] == "LOW"
+    assert h.job()["status"] == "APPROVED"
+
+
+def test_approval_brief_lists_screenshots_from_user_flow_tests(h: Harness) -> None:
+    # 화면 작업은 사람이 스크린샷을 바로 볼 수 있게 한다 (시각 검증 1단계)
+    h.to_building()
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    shot = h.repo / "frontend/test-results/list-empty/test-finished-1.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"\x89PNG")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    section = brief.split("## 화면 스크린샷")[1].split("## ")[0]
+    assert "frontend/test-results/list-empty/test-finished-1.png" in section
+
+
+def test_approval_brief_says_when_no_screenshot_was_taken(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    assert "스크린샷 없음" in brief.split("## 화면 스크린샷")[1]
+
+
+def test_approval_brief_shows_reviewer_notes_and_risk_up(h: Harness) -> None:
+    h.to_building(assumptions=["만료된 토큰은 401"])
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    noted = verdict(notes_for_human=["토큰 비교가 상수 시간이 아니다"])
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": noted, "test": PASS},
+    )
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    judge = brief.split("## 판단할 것")[1].split("## ")[0]
+    assert "가정: 만료된 토큰은 401" in judge
+    assert "[security] 토큰 비교가 상수 시간이 아니다" in judge
 
 
 def test_builder_model_is_promoted_after_two_failures(

@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -1022,6 +1023,56 @@ def _summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Windows 알림 (WinRT, Windows PowerShell 5.1 내장). 문구는 환경변수로만 받는다 (명령에 넣지 않음)
+TOAST_SCRIPT = (
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+    "ContentType = WindowsRuntime] > $null; "
+    "$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
+    "[Windows.UI.Notifications.ToastTemplateType]::ToastText02); "
+    "$n = $t.GetElementsByTagName('text'); "
+    "$n.Item(0).AppendChild($t.CreateTextNode($env:FACTORY_TOAST_TITLE)) > $null; "
+    "$n.Item(1).AppendChild($t.CreateTextNode($env:FACTORY_TOAST_BODY)) > $null; "
+    "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'; "
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show("
+    "[Windows.UI.Notifications.ToastNotification]::new($t))"
+)
+STATUS_SAY = {"MERGED": "MERGED", "APPROVAL_REQUIRED": "승인 대기", "BLOCKED": "BLOCKED"}
+
+
+def toast_text(report: dict[str, Any]) -> tuple[str, str]:
+    counts: dict[str, int] = {}
+    for job in report["jobs"]:
+        say = STATUS_SAY.get(str(job.get("status")), str(job.get("status")))
+        counts[say] = counts.get(say, 0) + 1
+    body = " · ".join(f"{say} {n}" for say, n in counts.items())
+    return f"팩토리 dispatch 끝 ({len(report['jobs'])}건)", body
+
+
+def notify_done(root: Path, report: dict[str, Any]) -> None:
+    """dispatch 종료 알림 (기획안 6.9 P2). 알림이 실패해도 dispatch 결과는 바꾸지 않는다."""
+    try:
+        if not load_config(root).notify_toast:
+            return
+    except ConfigError:
+        return
+    raw = os.environ.get("FACTORY_NOTIFY_CMD")
+    if raw:
+        cmd = [str(a) for a in json.loads(raw)]
+    elif sys.platform == "win32":
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT]
+    else:
+        return
+    title, body = toast_text(report)
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            resolve_command(cmd),
+            env={**os.environ, "FACTORY_TOAST_TITLE": title, "FACTORY_TOAST_BODY": body},
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+
+
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
     root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
@@ -1141,6 +1192,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(_summary(report))
+    notify_done(root, report)
     return 0 if all(j["status"] not in {"ERROR", "SETUP_FAILED"} for j in jobs) else 1
 
 

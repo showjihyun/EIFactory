@@ -569,6 +569,7 @@ class Collector:
                 "tokens": {k: totals[k] for k in ("in", "out", "cr", "cw")},
             },
             "attention": self._attention(cards),
+            "brief": self._brief(),
             "jobs": cards,
             "lanes": lane_list,
             "conflicts": conflicts,
@@ -618,6 +619,15 @@ class Collector:
             "last_transition_at": history[-1]["at"] if history else None,
             "trust": "session" if job else "host",
         }
+
+    def _brief(self) -> dict[str, Any]:
+        """brief.py와 같은 목록 (기획안 6.9 P2). 카드에 붙일 것은 키로, 나머지는 extra로."""
+        import brief  # brief가 이 모듈을 쓰므로 여기서 불러온다
+
+        data = brief.collect(self.root, self.jobs_dir, collector=self)
+        by_key = {i["key"]: i for i in data["items"] if i.get("key")}
+        extra = [i for i in data["items"] if i["kind"] == "push"]
+        return {"counts": data["counts"], "by_key": by_key, "extra": extra}
 
     @staticmethod
     def _attention(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:

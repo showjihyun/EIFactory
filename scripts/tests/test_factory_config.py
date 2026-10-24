@@ -143,3 +143,40 @@ def test_invalid_budgets(tmp_path: Path, budgets: dict[str, object]) -> None:
     write(tmp_path, {"budgets": budgets})
     with pytest.raises(factory_config.ConfigError):
         factory_config.load_config(tmp_path)
+
+
+# ---------- 화면 스크린샷 (screenshots, 기획안 11장 시각 검증 1단계) ----------
+
+
+def test_screenshots_default_empty(tmp_path: Path) -> None:
+    assert factory_config.load_config(tmp_path).screenshots == []
+
+
+def test_sample_repo_collects_playwright_screenshots() -> None:
+    assert factory_config.load_config(REPO).screenshots == ["frontend/test-results/**/*.png"]
+
+
+@pytest.mark.parametrize("screenshots", ["frontend/*.png", [1], ["../outside/*.png"]])
+def test_invalid_screenshots(tmp_path: Path, screenshots: object) -> None:
+    write(tmp_path, {"screenshots": screenshots})
+    with pytest.raises(factory_config.ConfigError):
+        factory_config.load_config(tmp_path)
+
+
+# ---------- 알림 (notify, 기획안 6.9 P2) ----------
+
+
+def test_toast_is_on_by_default(tmp_path: Path) -> None:
+    assert factory_config.load_config(tmp_path).notify_toast is True
+
+
+def test_toast_can_be_turned_off(tmp_path: Path) -> None:
+    write(tmp_path, {"notify": {"toast": False}})
+    assert factory_config.load_config(tmp_path).notify_toast is False
+
+
+@pytest.mark.parametrize("notify", [{"toast": "off"}, {"toast": 0}, {"sound": True}, "켜기"])
+def test_invalid_notify(tmp_path: Path, notify: object) -> None:
+    write(tmp_path, {"notify": notify})
+    with pytest.raises(factory_config.ConfigError):
+        factory_config.load_config(tmp_path)
