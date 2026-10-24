@@ -101,7 +101,7 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 | `TEST_INVALID` | Builder가 수락 테스트가 틀렸다고 보고 (`block`으로 기록) |
 | `NEEDS_DECISION` | 요구사항 자체가 사람의 결정을 요구함 (예: 검증 약화·테스트 건너뛰기 요청). `new` 직후 `block`으로 기록 |
 | `TREE_CHANGED` | 검증·승인한 변경과 머지하려는 변경이 다름 |
-| `CONFLICT` | 잠긴 파일(spec·수락 테스트·기존 테스트·검증 설정)의 rebase 충돌, 또는 merge 실패. 잠기지 않은 파일의 충돌은 RETRY_REQUIRED로 Builder가 푼다 |
+| `CONFLICT` | 잠긴 파일(spec·수락 테스트·검증 설정)의 rebase 충돌, 작업이 바꾼 기존 테스트의 두 번째 충돌, 또는 merge 실패. 잠기지 않은 파일의 충돌은 RETRY_REQUIRED로 Builder가, 작업이 바꾼 기존 테스트의 첫 충돌은 SPEC_READY로 오케스트레이터가 다시 한다 |
 | `MERGE_CHECK_FAILED` | rebase 후 재검증(수락 테스트 Green, 전체 검증) 실패 |
 | `MANUAL` | 그 밖의 수동 중단 |
 
@@ -113,7 +113,9 @@ python scripts/monitor.py --no-open --port 8800 --jobs-dir ../<레포>.jobs
 4. 작업 브랜치에 변경을 커밋한다.
 5. base 브랜치가 앞서 있으면 그 위로 rebase하고 수락 테스트 Green과 전체 검증을 다시 실행한다. 재검증 실패는 BLOCKED(`MERGE_CHECK_FAILED`). base가 그대로면 검증한 트리와 같으므로 다시 실행하지 않는다.
    - **rebase 충돌** (먼저 머지된 작업이 같은 줄을 고침): rebase를 되돌리고, 작업 변경을 base 끝 위에 다시 펼친다 (커밋하지 않은 변경, 충돌 파일에는 충돌 표시). 승인·검증 기록은 무효가 되고 RETRY_REQUIRED가 된다 (실패 횟수 1회로 센다. 같은 파일이 다시 충돌하면 `REPEATED_FAILURE`). Builder가 두 변경을 모두 살려 충돌을 풀고 verify부터 다시 한다. 다시 펼치기 전 작업 커밋은 작업 기록 `replays`에 남는다.
-   - base가 깔끔하게 바꾼 잠긴 파일은 작업의 변경이 아니므로 다시 펼친 내용으로 다시 잠근다. 잠긴 파일 자체가 충돌하면 Builder가 고칠 수 없으므로 작업 브랜치를 되돌리고 BLOCKED(`CONFLICT`)로 사람에게 넘긴다.
+   - base가 깔끔하게 바꾼 잠긴 파일은 작업의 변경이 아니므로 다시 펼친 내용으로 다시 잠근다.
+   - **이 작업이 바꾼 기존 테스트(`changed_tests`)만 충돌하면** Spec 단계부터 다시 한다: 새 base 끝 위에 spec·수락 테스트만 남기고 구현과 기존 테스트 변경은 뺀다 → SPEC_READY. 오케스트레이터가 기존 테스트를 새 base 기준으로 다시 바꾸고(이전 변경은 출력된 `git diff` 명령으로 본다) `spec` → `red`(새 base에서 Red 다시 확인) → Builder. 잠긴 테스트를 Builder가 고치지 않는 원칙은 그대로다. 한 작업에 한 번만, 다시 충돌하면 BLOCKED(`CONFLICT`).
+   - 그 밖의 잠긴 파일(spec, 수락 테스트, 검증 설정)이 충돌하면 작업 브랜치를 되돌리고 BLOCKED(`CONFLICT`)로 사람에게 넘긴다.
    - MEDIUM·HIGH 작업은 고친 뒤 다시 사람 승인을 받는다 (승인한 diff와 달라졌으므로).
 6. base 브랜치에 `--no-ff` 머지 커밋을 만든다. 커밋이 실제로 base에 들어간 것을 Git으로 확인한 뒤 MERGED로 바꾼다.
 7. 되돌릴 때는 출력된 머지 커밋으로 `git revert -m 1 <머지 커밋>` 한 번이면 된다 (사람이 실행).
@@ -243,6 +245,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 9. `APPROVED`(자동 승인)면 `python scripts/factory.py merge <ID>`
    - 다른 작업이 머지 중이라 상태가 그대로면, 잠시 뒤 한 번 더 `merge`. 그래도 안 되면 멈추고 보고
    - `RETRY_REQUIRED (CONFLICT)`면 출력된 충돌 파일과 원문을 Builder에게 전달해 6번부터 반복
+   - `SPEC_READY (CONFLICT)`면 출력된 `git diff`로 이전에 바꾼 기존 테스트를 보고, 새 base 기준으로 다시 바꾼 뒤 4번(`spec`)부터 반복
 10. `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
 
 ## 위험 등급 계산 (verify가 diff로 계산, merge가 자동 승인 작업에 대해 다시 계산)
@@ -285,7 +288,9 @@ python scripts/factory_kit.py install <대상 레포> [--force]
 python scripts/factory_kit.py check <대상 레포>
 ```
 
-- 키트 공통 보호(정책·절차 파일, 도구 래퍼, `scripts/`, 격리 환경, `factory/config.json`)는 코드에 있어 설정이 없어도 적용된다.
+- **설치·점검은 원본 레포(EIFactory)에서만 한다.** `factory_kit.py`는 대상에 복사하지 않는다 (설치된 레포가 또 다른 레포에 복사본을 퍼뜨리지 않게, 기획안 12.1).
+- 설치 기록 `factory/kit.lock`: 원본 커밋(`source_commit`, 안 올린 변경이 있으면 `+dirty`)과 키트 파일별 해시. `check`가 해시를 대조해 손으로 고쳤거나 다른 버전인 키트 파일을 알려 준다. 고친 키트를 반영하려면 원본에서 `install --force` (설치 기록도 새로 씀). 잠금·HIGH 대상.
+- 키트 공통 보호(정책·절차 파일, 도구 래퍼, `scripts/`, 격리 환경, `factory/config.json`, `factory/kit.lock`)는 코드에 있어 설정이 없어도 적용된다.
 - `factory/config.json`: 검증 설정 파일(`lock_patterns`, `medium_paths`), 위험 경로(`high_paths`), 기존 테스트 위치(`test_patterns`, `changed_test`), 수락 테스트 경로 규칙(`acceptance_tests`, `{id}` 자리표시), 의존성 설치(`setup`), 컨테이너 경로(`docker`).
 - 대상 레포는 **검증 계약** 세 스크립트(`scripts/verify.py`, `scripts/check_red.py --json`, `scripts/check_style.py`)를 직접 만든다. 형식은 `factory/templates/AGENTS.md`.
 - 컨테이너 격리를 쓰려면 대상 레포에 `.devcontainer/Dockerfile`(Claude Code·Codex CLI 포함 이미지)도 필요하다.

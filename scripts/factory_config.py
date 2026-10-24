@@ -38,6 +38,7 @@ KIT_POLICY = [
     "factory/prompts/*",
     "factory/templates/*",
     CONFIG_PATH,
+    "factory/kit.lock",
     ".claude/*",
     ".codex/*",
     ".agents/*",

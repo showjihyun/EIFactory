@@ -69,6 +69,41 @@ def test_install_copies_kit_and_creates_templates(target: Path) -> None:
     assert not (target / "scripts/verify.py").exists()
 
 
+def test_installed_repo_cannot_install_the_kit_further(target: Path) -> None:
+    # 설치된 레포가 또 다른 레포에 복사본의 복사본을 퍼뜨리지 않는다 (설치는 원본 레포에서만)
+    factory_kit.main(["install", str(target)])
+    assert "scripts/factory_kit.py" not in factory_kit.KIT_FILES
+    assert not (target / "scripts/factory_kit.py").exists()
+
+
+def test_install_records_engine_version_and_hashes(target: Path) -> None:
+    factory_kit.main(["install", str(target)])
+    lock = json.loads((target / "factory/kit.lock").read_text(encoding="utf-8"))
+    head = git(factory_kit.SOURCE, "rev-parse", "HEAD")
+    assert lock["source_commit"].split("+")[0] == head  # 원본에 안 올린 변경이 있으면 +dirty
+    assert set(lock["files"]) == set(factory_kit.KIT_FILES)
+    assert all(len(v) == 64 for v in lock["files"].values())
+    # 설치 기록은 잠그고 HIGH로 본다 (작업이 바꾸면 사람 승인)
+    cfg = factory_kit.load_target_config(target)
+    assert "factory/kit.lock" in cfg.high_paths or any(
+        p == "factory/kit.lock" for p in cfg.lock_patterns
+    )
+
+
+def test_check_reports_kit_files_changed_since_install(
+    target: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    factory_kit.main(["install", str(target)])
+    configure(target)
+    capsys.readouterr()
+    assert factory_kit.main(["check", str(target)]) == 0
+    (target / "scripts/factory.py").write_text("# 손으로 고침\n", encoding="utf-8")
+    capsys.readouterr()
+    assert factory_kit.main(["check", str(target)]) == 1
+    out = capsys.readouterr().out
+    assert "scripts/factory.py" in out and "설치 기록과 다름" in out
+
+
 def test_install_does_not_overwrite_without_force(target: Path) -> None:
     factory_kit.main(["install", str(target)])
     (target / "factory/PROCESS.md").write_text("바꾼 절차\n", encoding="utf-8")

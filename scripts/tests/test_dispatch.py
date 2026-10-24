@@ -525,6 +525,20 @@ def test_budget_exhaustion_blocks_job(repo: Path, monkeypatch: pytest.MonkeyPatc
     assert Path(job["worktree"]).exists()
 
 
+def test_spec_replay_is_continued_from_spec_stage() -> None:
+    # 바꾼 기존 테스트가 충돌해 Spec부터 다시 하는 작업도 이어서 처리한다 (프롬프트는 Spec부터)
+    job = {"status": "SPEC_READY", "last_failure": "CONFLICT (spec): a.test.tsx",
+           "requirement": "문구",
+           "replays": [{"files": ["a.test.tsx"], "mode": "spec"}]}  # fmt: skip
+    assert dispatch.needs_continue(job)
+    prompt = dispatch.continue_prompt(job, "J001", "claude")
+    assert "4번" in prompt and "a.test.tsx" in prompt and "red" in prompt
+    builder = {**job, "status": "RETRY_REQUIRED", "last_failure": "CONFLICT: a.tsx",
+               "replays": [{"files": ["a.tsx"]}]}  # fmt: skip
+    assert "6번" in dispatch.continue_prompt(builder, "J001", "claude")
+    assert not dispatch.needs_continue({**job, "last_failure": None})
+
+
 def test_session_that_ends_mid_job_blocks_it(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # 세션이 끝났는데 작업이 진행 중 상태로 남으면 BLOCKED로 기록한다 (진행 중처럼 보이지 않게)
     monkeypatch.setenv("FAKE_AGENT_MODE", "quit")

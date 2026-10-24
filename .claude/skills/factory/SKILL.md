@@ -38,6 +38,8 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 - 상태가 `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 즉시 멈추고, `python scripts/factory.py status` 결과와 함께 요약을 보고한다.
 - `APPROVED`(자동 승인)는 멈추는 상태가 아니다. `python scripts/factory.py merge <ID>`를 실행한다.
 - merge가 `RETRY_REQUIRED (CONFLICT)`를 출력하면 멈추지 않는다. 출력된 충돌 파일과 원문을 Builder에게 전달해 6번부터 반복한다.
+- merge가 `SPEC_READY (CONFLICT)`를 출력하면 멈추지 않는다. 출력된 `git diff`로 이전 변경을 보고 기존 테스트를 새 base 기준으로 다시 바꾼 뒤 4번(`spec`)부터 반복한다 (이 단계의 테스트 수정은 오케스트레이터가 한다).
+- 프롬프트가 충돌로 SPEC_READY가 된 작업을 이어서 처리하라고 하면, recover 없이 PROCESS.md 4번부터 진행한다.
 - `approve`, `resume`, `drop`, `recover --force`는 사람 전용이다. 실행하지 말고 사람에게 안내만 한다.
 - hook이 도구 호출을 막으면 우회하지 말고, 막힌 이유를 보고에 포함한다.
 

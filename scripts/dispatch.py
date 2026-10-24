@@ -114,13 +114,18 @@ CONTINUE_TASK = (
     "recover 없이 factory/PROCESS.md 6번(Builder 호출)부터 진행해. "
     "Builder에게 이 파일들과 '두 변경을 모두 살려 충돌을 푼다'는 점을 전달해."
 )
-CONTINUE_PROMPT = (
-    "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n" + CONTINUE_TASK
+# 작업이 바꾼 기존 테스트가 충돌해 Spec 단계부터 다시 하는 경우 (잠긴 테스트는 Builder가 못 고침)
+CONTINUE_SPEC_TASK = (
+    "작업 {job_id}는 이 작업이 바꾼 기존 테스트({files})가 base에 먼저 머지된 변경과 충돌해 "
+    "SPEC_READY로 돌아왔다. factory.py가 새 base 끝 위에 spec·수락 테스트만 남기고 구현과 기존 "
+    "테스트 변경은 뺐다. recover 없이 factory/PROCESS.md 4번부터 진행해: 기존 테스트를 새 base "
+    "기준으로 다시 바꾸고(이전에 바꾼 내용: {diffs}) spec → red → Builder 순서로."
 )
-CODEX_CONTINUE_PROMPT = (
-    "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 작업 {job_id}를 이어서 "
-    "처리해. 요구사항: {requirement}\n" + CONTINUE_TASK
-)
+CONTINUE_HEAD = {
+    "claude": "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n",
+    "codex": "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 작업 {job_id}를 "
+    "이어서 처리해. 요구사항: {requirement}\n",
+}
 # 충돌을 풀러 세션을 다시 띄우는 최대 횟수. 같은 파일이 다시 충돌하면 factory.py가 BLOCKED로 막는다
 MAX_CONTINUE = 2
 
@@ -721,7 +726,22 @@ def run_job(
 def needs_continue(job: dict[str, Any]) -> bool:
     """rebase 충돌로 새 base 위에 다시 펼쳐져 Builder를 기다리는 작업인가."""
     failure = str(job.get("last_failure") or "")
-    return job["status"] == "RETRY_REQUIRED" and failure.startswith("CONFLICT")
+    return job["status"] in {"RETRY_REQUIRED", "SPEC_READY"} and failure.startswith("CONFLICT")
+
+
+def continue_prompt(job: dict[str, Any], job_id: str, agent: str) -> str:
+    """이어서 처리하는 세션의 프롬프트. Builder부터(충돌 표시) 또는 Spec부터(기존 테스트 충돌)."""
+    last = (job.get("replays") or [{}])[-1]
+    files = ", ".join(last.get("files") or []) or "-"
+    diffs = " / ".join(
+        f"`git diff {str(last.get('onto'))[:7]} {str(last.get('from'))[:7]} -- {f}`"
+        for f in last.get("files") or []
+    )
+    task = CONTINUE_SPEC_TASK if job["status"] == "SPEC_READY" else CONTINUE_TASK
+    head = CONTINUE_HEAD["codex" if agent == "codex" else "claude"]
+    return (head + task).format(
+        job_id=job_id, requirement=job["requirement"], files=files, diffs=diffs or "-"
+    )
 
 
 def _session(
@@ -816,9 +836,7 @@ def continue_session(
     job = _load_job(worktree, job_id)
     logs = _jobs_dir(root) / "logs"
     n = 2 + len(list(logs.glob(f"{job_id}.r*.jsonl")))
-    files = ", ".join((job.get("replays") or [{}])[-1].get("files") or []) or "-"
-    template = CODEX_CONTINUE_PROMPT if args.agent == "codex" else CONTINUE_PROMPT
-    prompt = template.format(job_id=job_id, requirement=job["requirement"], files=files)
+    prompt = continue_prompt(job, job_id, args.agent)
     log_path = logs / f"{job_id}.r{n}.jsonl"
     out = _session(root, worktree, job_id, prompt, args, docker, log_path, session_cap)
     job = _load_job(worktree, job_id)

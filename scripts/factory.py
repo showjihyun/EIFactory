@@ -1388,6 +1388,37 @@ def _mark_merged(root: Path, state: State, job: Job) -> None:
     _close_job(root, state, job, "MERGED")
 
 
+def _replay_from_spec(root: Path, job: Job, head: str, files: list[str]) -> tuple[int, str]:
+    """작업이 바꾼 기존 테스트(changed_tests)가 충돌: 새 base 위에서 Spec 단계부터 다시 한다.
+
+    잠긴 테스트는 Builder가 고칠 수 없다. 구현과 기존 테스트 변경을 빼고 spec·수락 테스트만
+    새 base 위에 남긴다. 오케스트레이터가 기존 테스트를 새 base 기준으로 다시 바꾸고 spec → red
+    (수락 테스트 Red를 새 base에서 다시 확인) → Builder 순서로 간다. 한 작업에 한 번만.
+    """
+    job_id, base = job["id"], job["base_branch"]
+    _git(root, "reset", "-q", "--hard", base)
+    own = [job["spec_path"], *(t.split("::")[0] for t in job["acceptance_tests"])]
+    _git(root, "checkout", head, "--", *own)
+    _git(root, "reset", "-q")  # 작업 파일은 커밋하지 않은 새 파일로 둔다
+    onto = _git(root, "rev-parse", base).strip()
+    job.setdefault("replays", []).append(
+        {"from": head, "onto": onto, "files": files, "mode": "spec", "at": now()}
+    )
+    job.update(approval=None, verified_tree=None, locks={})
+    job["last_failure"] = f"CONFLICT (spec): {', '.join(files)}"
+    _set_status(job, "SPEC_READY")
+    _start_clock(job, now())
+    _clear_heartbeat(root)
+    listed = ", ".join(files)
+    diffs = " / ".join(f"git diff {onto[:7]} {head[:7]} -- {f}" for f in files)
+    return 1, (
+        f"{job_id}: SPEC_READY (CONFLICT). 이 작업이 바꾼 기존 테스트({listed})가 {base}에 먼저 "
+        f"머지된 변경과 충돌했습니다. {base} 끝({onto[:7]}) 위에서 Spec 단계부터 다시 합니다: "
+        f"spec·수락 테스트는 남기고 구현과 기존 테스트 변경은 뺐습니다. 이전에 바꾼 내용: {diffs}. "
+        f"기존 테스트를 새 base 기준으로 다시 바꾼 뒤 spec {job_id} → red {job_id} → Builder."
+    )
+
+
 def _replay_on_base(root: Path, job: Job, rebase_output: str) -> tuple[int, str]:
     """rebase 충돌: 작업 변경을 base 끝 위에 다시 펼치고 Builder가 충돌을 풀게 한다 (기획안 8.3).
 
@@ -1406,6 +1437,10 @@ def _replay_on_base(root: Path, job: Job, rebase_output: str) -> tuple[int, str]
         n for n in _git(root, "diff", "--name-only", "--diff-filter=U").splitlines() if n
     )
     locked = [f for f in files if f in job["locks"]]
+    own_tests = bool(locked) and set(locked) <= set(job["changed_tests"])
+    spec_replays = [r for r in job.get("replays", []) if r.get("mode") == "spec"]
+    if own_tests and not spec_replays:
+        return _replay_from_spec(root, job, head, locked)
     if locked or not files:
         _git(root, "reset", "-q", "--hard", head)
         detail = f"잠긴 파일 충돌: {', '.join(locked)}" if locked else "rebase 충돌"
