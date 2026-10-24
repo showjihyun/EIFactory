@@ -92,6 +92,13 @@ MEDIUM_CONTENT = [
         "테스트 skip·xfail·only 추가",
     ),
 ]
+# 계획 단계(아직 코드가 없음)의 변경 표시 → 위 내용 규칙과 같은 등급·사유 (기획안 6.9 P1)
+RISK_TOUCHES = {
+    "data_delete": ("HIGH", HIGH_CONTENT[0][1]),
+    "db_schema": ("MEDIUM", MEDIUM_CONTENT[0][1]),
+    "api": ("MEDIUM", MEDIUM_CONTENT[1][1]),
+    "test_skip": ("MEDIUM", MEDIUM_CONTENT[2][1]),
+}
 MAX_LINES = 400
 MAX_FILES = 15
 
@@ -417,6 +424,19 @@ def _diff(root: Path, base: str) -> tuple[str, dict[str, tuple[list[str], list[s
     return raw + "\n".join(extra), files
 
 
+def path_risk(cfg: Config, path: str) -> tuple[str, str] | None:
+    """경로 규칙 하나. verify(실제 diff)와 계획 검사(예상 경로)가 같이 쓴다."""
+    if _matches(path, cfg.high_paths):
+        return "HIGH", f"{path} 변경"
+    if _matches(path, cfg.medium_paths):
+        return "MEDIUM", f"{path} 변경"
+    return None
+
+
+def type_risk(job_type: str) -> tuple[str, str] | None:
+    return ("MEDIUM", "refactor 유형") if job_type == "refactor" else None
+
+
 def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
     cfg = _config(root)
     _, files = _diff(root, job["base_commit"])
@@ -428,17 +448,15 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
         reasons.append(f"{target}: {reason}")
         level = max(level, RISKS.index(target))
 
-    if job["type"] == "refactor":
-        raise_to("MEDIUM", "refactor 유형")
+    if rule := type_risk(job["type"]):
+        raise_to(*rule)
     if job["allowed_config_changes"]:
         raise_to("MEDIUM", "설정 파일 변경 허용")
     total_lines = 0
     for path, (added, removed) in files.items():
         total_lines += len(added) + len(removed)
-        if _matches(path, cfg.high_paths):
-            raise_to("HIGH", f"{path} 변경")
-        elif _matches(path, cfg.medium_paths):
-            raise_to("MEDIUM", f"{path} 변경")
+        if rule := path_risk(cfg, path):
+            raise_to(*rule)
         for pattern, reason in HIGH_CONTENT:
             if any(pattern.search(ln) for ln in added):
                 raise_to("HIGH", f"{reason} ({path})")
