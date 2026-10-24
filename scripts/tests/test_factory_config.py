@@ -100,12 +100,22 @@ def test_stage_settings_from_config(tmp_path: Path) -> None:
     assert cfg.stages["orchestrator"] == {"model": "auto", "auth": "auto"}
 
 
+def test_planner_stage_can_be_set(tmp_path: Path) -> None:
+    # 계획자 단계 (기획안 6.9 P1). 설정이 없으면 auto
+    assert factory_config.load_config(tmp_path).stages["planner"] == {
+        "model": "auto",
+        "auth": "auto",
+    }
+    write(tmp_path, {"stages": {"planner": {"model": "sonnet"}}})
+    assert factory_config.load_config(tmp_path).stages["planner"]["model"] == "sonnet"
+
+
 @pytest.mark.parametrize(
     "stages",
     [
         {"reviewer_code": {"model": "claude-3-opus"}},  # 최신 세 모델 별칭만
         {"reviewer_code": {"auth": "free"}},
-        {"planner": {"model": "opus"}},  # 모르는 단계
+        {"deployer": {"model": "opus"}},  # 모르는 단계 (planner는 v0.37에 단계가 됨)
         {"builder": {"auth": "api"}},  # Builder는 오케스트레이터 세션의 인증을 따른다
     ],
 )

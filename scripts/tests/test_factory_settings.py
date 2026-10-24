@@ -55,7 +55,7 @@ def test_set_model_and_auth(repo: Path) -> None:
     "argv",
     [
         ["set", "reviewer_test", "model", "gpt-4"],
-        ["set", "planner", "model", "opus"],
+        ["set", "deployer", "model", "opus"],  # 모르는 단계 (planner는 v0.37에 단계가 됨)
         ["set", "builder", "auth", "api"],
         ["set", "reviewer_code", "color", "red"],
     ],

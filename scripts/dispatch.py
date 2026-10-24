@@ -59,6 +59,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import plan  # noqa: E402
 from factory_config import CLAUDE_MODELS, DEFAULT_WORKDIR, ConfigError, load_config  # noqa: E402
 from proc import resolve_command, use_utf8_output  # noqa: E402
 from report import combine_usage, job_cost, live_usage, session_usage, unit_prices  # noqa: E402
@@ -1079,6 +1080,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dispatch", description="팩토리 병렬 실행")
     parser.add_argument("requirements", nargs="*")
     parser.add_argument("--approve", metavar="ID", help="승인 대기 작업을 승인하고 머지")
+    parser.add_argument(
+        "--plan", metavar="목표", help="계획자로 목표를 작업 초안으로 나눔 (기획안 6.9 P1)"
+    )
     parser.add_argument("--reject", metavar="ID", help="승인 대기 작업을 반려")
     parser.add_argument("--reason", help="--reject 이유")
     parser.add_argument("--max-parallel", type=int, default=3)
@@ -1098,6 +1102,14 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("--require-api-key", action="store_true")
     parser.add_argument("--keep-merged", action="store_true", help="머지된 worktree도 남김")
     args = parser.parse_args(argv)
+    if args.plan:
+        try:
+            plan_id = plan.draft_plan(root, args.plan)
+        except plan.PlanError as error:
+            print(f"오류: {error}")
+            return 1
+        print(f"계획 초안: {plan.PLANS_DIR}/{plan_id}.md (계획자, 사람이 확인)")
+        return plan.main(["check", plan_id], root=root)
     if args.approve or args.reject:
         if args.reject and not args.reason:
             print("오류: --reject에는 --reason이 필요합니다")

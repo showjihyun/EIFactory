@@ -186,6 +186,94 @@ def test_check_prints_a_table_for_the_human(root: Path, capsys: pytest.CaptureFi
     assert "dispatch.py --run-plan P001" in out
 
 
+# ---------- 계획자 세션 (dispatch.py --plan, 6단계) ----------
+
+FAKE_PLANNER = r"""
+import json, os, sys
+sys.stdin.reconfigure(encoding="utf-8")
+prompt = sys.stdin.read()
+with open(os.environ["FAKE_PLANNER_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps({"argv": sys.argv[1:], "prompt": prompt}, ensure_ascii=False) + "\n")
+mode = os.environ.get("FAKE_PLANNER_MODE", "ok")
+if mode == "crash":
+    sys.exit(1)
+plan = json.loads(os.environ["FAKE_PLANNER_PLAN"])
+print(json.dumps({"type": "result", "result": "계획을 세웠다", "structured_output": plan,
+                  "total_cost_usd": 0.3}, ensure_ascii=False))
+"""
+
+
+@pytest.fixture
+def planner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    script = tmp_path / "planner.py"
+    script.write_text(FAKE_PLANNER, encoding="utf-8")
+    log = tmp_path / "planner.log"
+    monkeypatch.setenv("FACTORY_PLANNER_CMD", json.dumps([sys.executable, str(script)]))
+    monkeypatch.setenv("FAKE_PLANNER_LOG", str(log))
+    return log
+
+
+def set_planner_output(monkeypatch: pytest.MonkeyPatch, jobs: list[dict[str, Any]]) -> None:
+    monkeypatch.setenv("FAKE_PLANNER_PLAN", json.dumps({"goal": "목표", "jobs": jobs}))
+
+
+def test_dispatch_plan_writes_a_checked_plan(
+    root: Path, planner: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    import dispatch
+
+    set_planner_output(monkeypatch, [draft("A"), draft("B", depends_on=["A"])])
+    assert dispatch.main(["--plan", "노트 정리 흐름 완성"], root=root) == 0
+    out = capsys.readouterr().out
+    assert (root / "factory" / "plans" / "P001.md").is_file()
+    assert state(root)["status"] == "CHECKED"
+    assert "dispatch.py --run-plan P001" in out
+    call = json.loads(planner.read_text(encoding="utf-8").splitlines()[0])
+    # 계획자는 목표와 규칙을 받는다. 코드를 쓰지 않고 읽기만 한다 (6.8의 9번)
+    assert "노트 정리 흐름 완성" in call["prompt"]
+    assert "data_delete" in call["prompt"] and "design" in call["prompt"]
+    set_planner_output(monkeypatch, [draft("A")])
+    assert dispatch.main(["--plan", "두 번째 목표"], root=root) == 0
+    assert (root / "factory" / "plans" / "P002.md").is_file()
+
+
+def test_planner_command_is_read_only_with_schema(root: Path) -> None:
+    cmd = plan.planner_command(root)
+    assert cmd[:2] == ["claude", "-p"]
+    schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+    assert set(schema["properties"]["jobs"]["items"]["required"]) == set(plan.FIELDS)
+    tools = cmd[cmd.index("--allowedTools") + 1 :]
+    assert tools == ["Read", "Glob", "Grep"]
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"  # 계획자 기본 (사람 결정)
+    assert cmd[cmd.index("--max-budget-usd") + 1] == "1.0"
+
+
+def test_bad_planner_draft_is_kept_for_the_human_but_not_checked(
+    root: Path, planner: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    import dispatch
+
+    set_planner_output(monkeypatch, [draft("A", size="large")])
+    assert dispatch.main(["--plan", "목표"], root=root) == 1
+    assert "분할" in capsys.readouterr().out
+    assert (root / "factory" / "plans" / "P001.md").is_file()  # 사람이 고쳐서 plan.py check
+    assert not state_path(root).exists()
+
+
+def test_planner_failure_writes_nothing(
+    root: Path, planner: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    import dispatch
+
+    monkeypatch.setenv("FAKE_PLANNER_MODE", "crash")
+    assert dispatch.main(["--plan", "목표"], root=root) == 1
+    assert "계획자" in capsys.readouterr().out
+    assert not (root / "factory" / "plans").exists()
+
+
 def test_missing_plan_is_an_error(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out = check(root, capsys)
     assert code == 2

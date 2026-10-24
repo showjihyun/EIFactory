@@ -5,7 +5,7 @@
     python scripts/factory_settings.py set <단계> model <auto|haiku|sonnet|opus>
     python scripts/factory_settings.py set <단계> auth <auto|subscription|api>
 
-단계: orchestrator, builder, reviewer_code, reviewer_security, reviewer_test.
+단계: orchestrator, builder, reviewer_code, reviewer_security, reviewer_test, planner.
 기본 checkout의 `factory/config.json`만 바꾼다. 이 파일은 잠금·HIGH 대상이라 팩토리 작업은 바꿀 수
 없고, 에이전트 세션(FACTORY_AGENT_SESSION=1)에서는 이 명령도 거부한다. 이미 만든 작업의 Builder
 모델은 바뀌지 않는다 (`new` 때 정해짐). 리뷰어·오케스트레이터는 다음 실행부터 적용된다.
@@ -42,6 +42,7 @@ AUTO_RULES = {
     "reviewer_code": "sonnet",
     "reviewer_security": "sonnet (HIGH 위험이면 opus)",
     "reviewer_test": "sonnet",
+    "planner": "opus",
 }
 AUTH_NOTE = {
     "auto": "ANTHROPIC_API_KEY가 있으면 API, 없으면 구독",

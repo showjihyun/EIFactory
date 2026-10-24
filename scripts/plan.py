@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -39,17 +40,53 @@ from factory import (  # noqa: E402
     RISKS,
     SIZE_CAPS,
     TYPES,
+    _instructions,
     _matches,
     path_risk,
+    stage_auth,
+    stage_model,
     type_risk,
 )
 from factory_config import Config, ConfigError, load_config  # noqa: E402
-from proc import use_utf8_output  # noqa: E402
+from proc import resolve_command, use_utf8_output  # noqa: E402
 
 PLAN_ID = re.compile(r"^P\d{3,}$")
 PLANS_DIR = "factory/plans"
 FIELDS = ("id", "requirement", "type", "size", "paths", "touches", "depends_on",
           "assumptions", "design", "acceptance_hints")  # fmt: skip
+PLANNER_PROMPT = "factory/prompts/planner.md"
+PLANNER_BUDGET_USD = "1.0"  # 호출당 상한 (임시값, 사람 결정)
+_STRINGS = {"type": "array", "items": {"type": "string"}}
+# 계획자 출력 형식. Claude는 --json-schema로 CLI가 강제한다
+PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "goal": {"type": "string"},
+        "jobs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "requirement": {"type": "string"},
+                    "type": {"type": "string", "enum": sorted(TYPES)},
+                    "size": {"type": "string", "enum": sorted(SIZE_CAPS)},
+                    "paths": _STRINGS,
+                    "touches": {"type": "array", "items": {"type": "string",
+                                                            "enum": sorted(RISK_TOUCHES)}},
+                    "depends_on": _STRINGS,
+                    "assumptions": _STRINGS,
+                    "design": {"anyOf": [{"type": "null"}, {"type": "string"}]},
+                    "acceptance_hints": _STRINGS,
+                },
+                "required": list(FIELDS),
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["goal", "jobs"],
+    "additionalProperties": False,
+}  # fmt: skip
 
 
 class PlanError(Exception):
@@ -204,6 +241,84 @@ def check_plan(root: Path, plan_id: str) -> dict[str, Any]:
                         "route": where, "route_reason": why})  # fmt: skip
     return {"id": plan_id, "goal": body.get("goal", ""), "status": "CHECKED",
             "checked_at": time.time(), "jobs": checked}  # fmt: skip
+
+
+def planner_command(root: Path) -> list[str]:
+    """읽기 전용 계획자 프로세스 (리뷰어와 같은 방식). 지시문은 stdin으로 넘긴다."""
+    model = stage_model(root, "planner", {"agent": "claude"})["model"]
+    return [
+        "claude", "-p",
+        "--model", model,
+        "--output-format", "json",
+        "--max-budget-usd", os.environ.get("FACTORY_PLANNER_BUDGET_USD") or PLANNER_BUDGET_USD,
+        "--json-schema", json.dumps(PLAN_SCHEMA),
+        "--allowedTools", "Read", "Glob", "Grep",
+    ]  # fmt: skip
+
+
+def planner_prompt(root: Path, goal: str) -> str:
+    cfg = load_config(root)
+    locked = [p for p in cfg.lock_patterns if not _matches(p, cfg.test_patterns)]
+    touches = ", ".join(f"{k}({reason})" for k, (_, reason) in RISK_TOUCHES.items())
+    rules = [
+        f"- HIGH 경로: {', '.join(cfg.high_paths)}",
+        f"- MEDIUM 경로: {', '.join(cfg.medium_paths)}",
+        f"- 팩토리 작업이 바꿀 수 없는 잠긴 경로(기존 테스트 제외): {', '.join(locked)}",
+        f"- touches 표시: {touches}",
+        "- 중형(medium)에는 design(설계 결정)이 필요하다. 크기 상한: small 15분, medium 30분",
+    ]
+    default = "목표를 팩토리 작업 초안으로 나눈다. JSON으로만 답한다."
+    return "\n\n".join([
+        _instructions(root, PLANNER_PROMPT, default),
+        f"## 목표\n{goal}",
+        "## 이 레포의 규칙 (factory/config.json)\n" + "\n".join(rules),
+    ])  # fmt: skip
+
+
+def next_plan_id(root: Path) -> str:
+    used = [int(p.stem[1:]) for p in (root / PLANS_DIR).glob("P*.md") if PLAN_ID.match(p.stem)]
+    return f"P{max(used, default=0) + 1:03d}"
+
+
+def draft_plan(root: Path, goal: str) -> str:
+    """계획자를 한 번 불러 계획 문서를 쓰고 ID를 돌려준다. 검사는 따로 한다 (check)."""
+    raw = os.environ.get("FACTORY_PLANNER_CMD")
+    cmd = [str(a) for a in json.loads(raw)] if raw else planner_command(root)
+    _, add, unset = stage_auth(root, "planner")
+    env = {k: v for k, v in os.environ.items() if k not in unset} | add
+    try:
+        done = subprocess.run(
+            resolve_command(cmd), input=planner_prompt(root, goal), cwd=root, env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=900, check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PlanError(f"계획자를 실행하지 못했습니다: {error}") from error
+    body = None
+    try:
+        envelope = json.loads(done.stdout)
+        structured = envelope.get("structured_output") if isinstance(envelope, dict) else None
+        body = structured if isinstance(structured, dict) else json.loads(envelope["result"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("jobs"), list):
+        raise PlanError(
+            f"계획자 출력에서 계획 JSON을 찾지 못했습니다 (exit {done.returncode}): "
+            f"{done.stderr[-300:]}"
+        )
+    plan_id = next_plan_id(root)
+    path = root / PLANS_DIR / f"{plan_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps({"goal": body.get("goal") or goal, "jobs": body["jobs"]},
+                      ensure_ascii=False, indent=2)  # fmt: skip
+    path.write_text(
+        f"# {plan_id} 계획 (계획자 초안, 사람이 확인·수정)\n\n"
+        f"목표: {goal}\n\n"
+        f"작업 초안을 고친 뒤 `python scripts/plan.py check {plan_id}`로 다시 검사한다.\n\n"
+        f"```json\n{text}\n```\n",
+        encoding="utf-8",
+    )
+    return plan_id
 
 
 def render(state: dict[str, Any]) -> str:

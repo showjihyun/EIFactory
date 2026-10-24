@@ -24,7 +24,9 @@ CLAUDE_MODELS = {
 }
 # 모델·인증을 따로 정할 수 있는 단위. 오케스트레이터 세션 하나가 spec~validate를 진행하므로
 # 그 안의 단계마다 모델을 바꿀 수는 없다. Builder는 같은 세션의 서브에이전트라 인증을 따른다
-STAGES = ("orchestrator", "builder", "reviewer_code", "reviewer_security", "reviewer_test")
+STAGES = (
+    "orchestrator", "builder", "reviewer_code", "reviewer_security", "reviewer_test", "planner",
+)  # fmt: skip
 MODEL_CHOICES = ("auto", *CLAUDE_MODELS)
 AUTH_CHOICES = ("auto", "subscription", "api")
 # 비용 상한 (API 환산 USD, 임시값. 기획안 7.4, 대시보드 설계안 4장 P2). `new` 때 작업에 고정된다

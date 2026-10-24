@@ -86,6 +86,7 @@ ENGINE_FILES = [
     "factory/prompts/review-security.md",
     "factory/prompts/review-test.md",
     "factory/templates/upper-session.example.json",
+    "factory/prompts/planner.md",
     "docker/proxy/Dockerfile",
     "docker/proxy/tinyproxy.conf",
     "docker/proxy/filter",

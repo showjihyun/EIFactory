@@ -648,6 +648,8 @@ def stage_model(root: Path, stage: str, job: Job) -> dict[str, str]:
             alias, reason = "opus", "HIGH 위험의 보안 리뷰"
         elif stage == "orchestrator":
             alias, reason = "opus", "오케스트레이터 기본"
+        elif stage == "planner":
+            alias, reason = "opus", "계획자 기본 (기획안 6.9, 사람 결정)"
         else:
             alias, reason = "sonnet", "리뷰어 기본"
     return {"alias": alias, "model": CLAUDE_MODELS[alias], "source": source, "reason": reason}
