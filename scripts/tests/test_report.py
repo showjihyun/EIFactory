@@ -329,3 +329,146 @@ def test_live_usage_infers_builder_model_from_stream(tmp_path: Path) -> None:
     roles = report.live_usage(log, {})["roles"]
     assert roles["builder"]["model"] == SONNET and roles["builder"]["usd"] == 0.1
     assert roles["orchestrator"]["usd"] == 0.7
+
+
+# ---------- 계획 KPI (기획안 3장, 6.9 P1) ----------
+
+
+def test_expected_risk_hit_rate_counts_only_planned_jobs_with_a_risk() -> None:
+    jobs = [
+        job("J010", [("QUEUED", 0), ("MERGED", 60)], expected_risk="LOW", risk="LOW"),
+        job("J011", [("QUEUED", 0), ("APPROVAL_REQUIRED", 60)], expected_risk="LOW",
+            risk="MEDIUM"),
+        job("J012", [("QUEUED", 0), ("MERGED", 60)], expected_risk="MEDIUM", risk="MEDIUM"),
+        job("J013", [("QUEUED", 0), ("BUILDING", 60)], expected_risk="LOW", risk=None),  # 아직
+        job("J014", [("QUEUED", 0), ("MERGED", 60)], risk="LOW"),  # 계획 없이 만든 작업
+    ]  # fmt: skip
+    hit = report.metrics(jobs)["expected_risk"]
+    assert (hit["n"], hit["hits"]) == (3, 2)
+    assert hit["misses"] == [{"id": "J011", "expected": "LOW", "actual": "MEDIUM"}]
+
+
+def test_approval_wait_from_approval_required_to_the_human_decision() -> None:
+    jobs = [
+        job("J020", [("QUEUED", 0), ("APPROVAL_REQUIRED", 300), ("APPROVED", 3900),
+                     ("MERGED", 3910)]),  # 60분
+        job("J021", [("QUEUED", 0), ("APPROVAL_REQUIRED", 0), ("RETRY_REQUIRED", 1800),
+                     ("APPROVAL_REQUIRED", 2400), ("APPROVED", 2400 + 2700)]),  # 30분, 45분
+        job("J022", [("QUEUED", 0), ("APPROVAL_REQUIRED", 420)]),  # 아직 대기 중
+    ]  # fmt: skip
+    m = report.metrics(jobs)
+    assert m["approval_wait_min"] == {"n": 3, "min": 30.0, "median": 45.0, "max": 60.0}
+    assert m["approval_waiting"] == ["J022"]
+
+
+def test_render_shows_plan_kpis() -> None:
+    jobs = [
+        *JOBS,
+        job("J011", [("QUEUED", 0), ("APPROVAL_REQUIRED", 60), ("APPROVED", 660)],
+            expected_risk="LOW", risk="MEDIUM"),
+    ]  # fmt: skip
+    text = report.render(report.metrics(jobs), defects=None, merged=0)
+    assert "예상 등급 적중률 | 0% (0/1)" in text
+    assert "J011 예상 LOW → 실제 MEDIUM" in text
+    assert "승인 대기 체류 시간" in text and "10.0" in text
+    assert "J002" in text  # 아직 승인 대기
+
+
+# ---------- 코드 건강 추세 (기획안 3장, 1.2의 5) ----------
+
+CODE_CFG = {
+    "test_patterns": ["backend/tests/*", "frontend/src/*.test.tsx"],
+    "lock_patterns": ["scripts/*"],
+}
+
+
+def commit_at(repo: Path, files: dict[str, str], when: str) -> None:
+    for rel, text in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    env = {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", when],
+        cwd=repo, check=True, env={**__import__("os").environ, **env},
+    )  # fmt: skip
+
+
+BRANCHY = "def f(x):\n" + "".join(
+    f"    if x == {i}:\n        return {i}\n" for i in range(12)
+) + "    return -1\n"  # 복잡도 13
+
+
+def test_code_health_snapshot(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    block = "".join(f"value_{i} = compute({i})\n" for i in range(8))
+    commit_at(repo, {
+        "backend/src/app/a.py": block + BRANCHY,
+        "backend/src/app/b.py": block,  # a.py와 8줄이 같다 (중복)
+        "backend/tests/test_a.py": "def test_a():\n    assert True\n",
+        "frontend/src/App.tsx": "export const A = () => {\n  return 1;\n};\n",
+        "scripts/engine.py": "x = 1\n" * 500,  # 잠긴 경로(키트)는 세지 않는다
+        "README.md": "# 문서\n",
+    }, "2026-10-01T12:00:00")  # fmt: skip
+    health = report.code_health(repo, "main", CODE_CFG)
+    code_lines = 8 + len(BRANCHY.splitlines()) + 8 + 3
+    assert health["code_lines"] == code_lines
+    assert health["test_lines"] == 2
+    assert health["test_ratio"] == round(2 / code_lines, 3)
+    assert health["dup_lines"] == 16
+    assert health["max_complexity"] == 13
+    assert health["complex_functions"] == 1
+    assert health["large_files"] == 0
+    assert health["largest"] == ["backend/src/app/a.py", 8 + len(BRANCHY.splitlines())]
+
+
+def test_code_health_trend_is_weekly_and_flags_worsening(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commit_at(repo, {"backend/src/app/a.py": "A = 1\n",
+                     "backend/tests/test_a.py": "def test_a():\n    assert True\n"},
+              "2026-10-01T12:00:00")  # fmt: skip
+    big = "".join(f"x_{i} = {i}\n" for i in range(400))
+    commit_at(repo, {"backend/src/app/b.py": BRANCHY + big},
+              "2026-10-15T12:00:00")  # fmt: skip
+    now = 1_792_843_200.0  # 2026-10-24 12:00 UTC
+    rows = report.health_trend(repo, "main", CODE_CFG, weeks=3, now=now)
+    assert [r["week"] for r in rows] == ["2026-10-03", "2026-10-10", "2026-10-17", "2026-10-24"]
+    assert rows[0]["code_lines"] == rows[1]["code_lines"] == 1
+    assert rows[-1]["large_files"] == 1 and rows[-1]["complex_functions"] == 1
+    assert set(report.worsening(rows)) == {"큰 파일", "복잡한 함수", "테스트 비율"}
+
+
+def test_trend_skips_weeks_before_the_first_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commit_at(repo, {"backend/src/app/a.py": "A = 1\n"}, "2026-10-20T12:00:00")
+    rows = report.health_trend(repo, "main", CODE_CFG, weeks=3, now=1_792_843_200.0)
+    assert [r["week"] for r in rows] == ["2026-10-24"]
+    assert report.worsening(rows) == []
+
+
+def test_main_includes_code_health_trend(tmp_path: Path, capsys: Any) -> None:
+    repo = tmp_path / "repo"
+    (repo / "factory").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    commit_at(repo, {"backend/src/app/a.py": "A = 1\n"}, "2026-10-20T12:00:00")
+    assert report.main(["--jobs-dir", str(tmp_path / "jobs")], root=repo) == 0
+    out = capsys.readouterr().out
+    assert "## 코드 건강 추세" in out
+
+
+def test_tests_under_locked_paths_are_not_product_tests(tmp_path: Path) -> None:
+    # 엔진(키트)의 자체 테스트는 잠긴 경로라 제품 테스트로 세지 않는다
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commit_at(repo, {"backend/src/app/a.py": "A = 1\n",
+                     "scripts/tests/test_engine.py": "def test_e():\n    assert True\n"},
+              "2026-10-01T12:00:00")  # fmt: skip
+    assert report.code_health(repo, "main", CODE_CFG)["test_lines"] == 0
