@@ -1,5 +1,7 @@
+import importlib.util
 import json
 import os
+import py_compile
 import shutil
 import stat
 import subprocess
@@ -210,6 +212,25 @@ def test_shim_refuses_a_changed_engine(source: Path, target: Path) -> None:
     done = run(target, "scripts/factory.py", "status")
     assert done.returncode != 0
     assert "엔진" in done.stdout + done.stderr
+
+
+def test_shim_ignores_planted_bytecode_cache(source: Path, target: Path, tmp_path: Path) -> None:
+    # 해시를 대조하지 않고 읽히는 .pyc를 엔진 옆에 심어도 엔진 원본이 실행된다
+    install(target)
+    configure(target)
+    module = engine_dir() / "scripts/factory_config.py"
+    evil = tmp_path / "evil.py"
+    evil.write_text("print('PLANTED'); raise SystemExit(0)\n", encoding="utf-8")
+    cfile = importlib.util.cache_from_source(str(module))
+    py_compile.compile(
+        str(evil), cfile=cfile, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH
+    )
+    done = run(target, "scripts/factory.py", "status")
+    assert "PLANTED" not in done.stdout
+    assert done.returncode == 0, done.stderr
+    shutil.rmtree(Path(cfile).parent)
+    run(target, "scripts/factory.py", "status")
+    assert not Path(cfile).parent.exists()  # 엔진 폴더에 캐시를 쓰지 않는다
 
 
 def test_hook_shim_runs_the_engine_guard_on_this_repo(source: Path, target: Path) -> None:
