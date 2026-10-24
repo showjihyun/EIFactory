@@ -1239,7 +1239,7 @@ def _run_reviewer(
     return text, proc.stderr, usage
 
 
-def _judgement_lines(job: Job) -> list[str]:
+def judgement_lines(job: Job) -> list[str]:
     """사람이 코드를 읽지 않고 판단할 논점 (H3): spec의 가정, 리뷰어 의견, 등급 상향 제안."""
     assumptions = job.get("assumptions") or []
     lines = [f"- 가정: {item}" for item in assumptions] or [
@@ -1271,7 +1271,7 @@ def write_approval_brief(root: Path, job: Job) -> str:
         f"- 활성 시간: {_fmt_minutes(active_seconds(job, now()))}, 재시도 {job['attempts']}회",
         "",
         "## 판단할 것",
-        *_judgement_lines(job),
+        *judgement_lines(job),
         "",
         "## 리뷰 결과",
         *[f"- {r['reviewer']}: {r['verdict']} ({r['path']})" for r in reviews],

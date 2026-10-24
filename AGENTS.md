@@ -19,6 +19,7 @@ AI SW Factory를 검증하기 위한 샘플 레포다. 북마크 관리 웹앱(�
 | `scripts/monitor.py` | 로컬 대시보드 (읽기 전용, 127.0.0.1). 화면은 `monitor_page.html`, 마스코트 `monitor_assets/`, 화면 시험 `scripts/ui/` |
 | `scripts/factory_settings.py` | 단계별 모델(Claude 최신 haiku·sonnet·opus 5.5)·인증(구독·API) 설정 보기·바꾸기 (사람 전용) |
 | `scripts/report.py` | 운영 보고서: KPI와 개선 후보 |
+| `scripts/brief.py` | 브리핑: 나를 기다리는 일 (승인 대기·판단할 것, BLOCKED·추천 처리, push 대기, 경고). `--counts`는 상태줄용 한 줄 |
 | `scripts/factory_kit.py`, `scripts/factory_config.py` | 팩토리 키트 설치·점검·업그레이드 (얇은 설치, 엔진은 `factory-vN` 태그로 레포 밖에), 레포별 설정 읽기 |
 | `scripts/factory_engine.py` | 설치된 레포의 shim이 레포 밖 엔진을 찾아 해시 대조 후 실행 (원본 레포에서는 쓰지 않음) |
 | `factory/config.json` | 레포별 설정: 잠금·위험 경로, 테스트·수락 테스트 경로 규칙, 설치 명령, 컨테이너 경로 (잠금·HIGH) |
