@@ -724,6 +724,12 @@ def parse_contract(text: str, job_id: str, cfg: Config) -> dict[str, Any]:
     for key in ("changed_tests", "allowed_config_changes"):
         if not isinstance(contract.get(key, []), list):
             errors.append(f"{key}는 목록")
+    # 가정: 요구사항 해석이 갈린 지점과 고른 쪽. 없으면 []로 명시한다 (승인 요약 "판단할 것", H2)
+    assumptions = contract.get("assumptions")
+    if not isinstance(assumptions, list) or not all(
+        isinstance(item, str) and item.strip() for item in assumptions
+    ):
+        errors.append("assumptions는 비어 있지 않은 문자열의 목록 (가정이 없으면 [])")
     # changed_tests는 명령 인자(형식·린트 확인)로 넘어가므로 기존 테스트 파일 경로만 받는다
     for test in contract.get("changed_tests") or []:
         if not cfg.changed_test.match(str(test)):
@@ -831,6 +837,7 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "acceptance_tests": [],
         "changed_tests": [],
         "allowed_config_changes": [],
+        "assumptions": [],
         "contract_version": 0,
         "locks": {},
         "red": [],
@@ -882,6 +889,7 @@ def cmd_spec(root: Path, state: State, job_id: str) -> str:
         acceptance_tests=contract["acceptance_tests"],
         changed_tests=contract["changed_tests"],
         allowed_config_changes=contract["allowed_config_changes"],
+        assumptions=contract["assumptions"],
         contract=contract,
     )
     job["contract_version"] += 1
@@ -1183,6 +1191,14 @@ def _run_reviewer(
     return text, proc.stderr, usage
 
 
+def _judgement_lines(job: Job) -> list[str]:
+    """사람이 코드를 읽지 않고 판단할 논점 (H3). 지금은 spec의 가정, 이후 리뷰어 의견이 붙는다."""
+    assumptions = job.get("assumptions") or []
+    if not assumptions:
+        return ["- 가정 없음 (spec에 AI가 혼자 정한 해석이 없다고 적음)"]
+    return [f"- 가정: {item}" for item in assumptions]
+
+
 def write_approval_brief(root: Path, job: Job) -> str:
     """사람 승인용 요약 (Approver). 승인 여부는 사람이 정한다."""
     _, files = _diff(root, job["base_commit"])
@@ -1194,6 +1210,9 @@ def write_approval_brief(root: Path, job: Job) -> str:
         f"- 위험 등급: **{job['risk']}** (선언 {job.get('risk_declared')})",
         *[f"  - {reason}" for reason in job["risk_reasons"]],
         f"- 활성 시간: {_fmt_minutes(active_seconds(job, now()))}, 재시도 {job['attempts']}회",
+        "",
+        "## 판단할 것",
+        *_judgement_lines(job),
         "",
         "## 리뷰 결과",
         *[f"- {r['reviewer']}: {r['verdict']} ({r['path']})" for r in reviews],

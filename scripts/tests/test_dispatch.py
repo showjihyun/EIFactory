@@ -76,7 +76,7 @@ contract = {
     "risk_reason": "새 모듈",
     "acceptance_criteria": ["모듈이 있다"],
     "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
-    "changed_tests": [], "allowed_config_changes": [],
+    "changed_tests": [], "allowed_config_changes": [], "assumptions": [],
 }
 spec = root / f"factory/specs/{job_id}.md"
 spec.parent.mkdir(parents=True, exist_ok=True)

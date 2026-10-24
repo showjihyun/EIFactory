@@ -207,7 +207,8 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
   "acceptance_criteria": ["빈 목록에서 '첫 북마크를 추가해 보세요'가 보인다"],
   "acceptance_tests": ["frontend/src/components/BookmarkList.J001.accept.test.tsx"],
   "changed_tests": ["frontend/src/components/BookmarkList.test.tsx"],
-  "allowed_config_changes": []
+  "allowed_config_changes": [],
+  "assumptions": ["북마크가 하나라도 있으면 안내 문구를 숨긴다 (요구사항에 없어 이렇게 정함)"]
 }
 ```
 
@@ -219,6 +220,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 | `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx`, 사용자 흐름 `frontend/e2e/<name>.<ID>.accept.e2e.ts` (Playwright) |
 | `changed_tests` | Spec 단계에서 바꾼 기존 테스트 파일 (없으면 `[]`) |
 | `allowed_config_changes` | 바꿔도 되는 설정 파일 (예: 의존성 추가 시 `backend/pyproject.toml`). 있으면 위험 등급 MEDIUM 이상 |
+| `assumptions` | **필수.** 요구사항이 정하지 않아 내가 해석을 고른 지점과 고른 쪽을 한 줄씩 (예: "공백만 있는 본문은 빈 본문으로 보지 않는다"). 없으면 `[]`. 승인 요약의 "판단할 것"에 그대로 나오므로, 사람이 코드를 읽지 않고도 알아야 할 해석을 적는다. 결정이 꼭 필요한 문제(검증 약화 등)는 가정으로 넘기지 말고 `NEEDS_DECISION`으로 멈춘다 |
 
 ## 오케스트레이터 진행 순서
 
@@ -228,7 +230,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - `recover`가 "5분이 지난 뒤"라며 거부하면 멈추고 보고한다.
 1. 요구사항이 검증을 약하게 하거나(테스트 건너뛰기, 검사 끄기) 그 밖에 사람이 정해야 하는 내용이면, `new` 후 바로 `block <ID> --reason NEEDS_DECISION --detail "<이유>"`로 기록하고 멈춘다.
 2. `python scripts/factory.py new "<요구사항>"` → job ID 확인
-3. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. **구현 코드는 쓰지 않는다.**
+3. 코드를 읽고 spec 파일과 수락 테스트를 쓴다. 기존 테스트를 바꿔야 하면 지금 바꾸고 `changed_tests`에 적는다. 요구사항이 정하지 않아 해석을 고른 지점은 `assumptions`에 적는다 (없으면 `[]`). **구현 코드는 쓰지 않는다.**
 4. `python scripts/factory.py spec <ID>` → 형식 오류가 있으면 고친다
 5. `python scripts/factory.py red <ID>`
    - `BUILDING`이면 다음 단계

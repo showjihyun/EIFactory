@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 import factory  # noqa: E402
 
 REPO_CONFIG = Path(__file__).resolve().parents[2] / "factory" / "config.json"
+DROP = object()  # write_spec에서 contract 필드를 빼라는 표시
 CFG = factory.load_config(Path(__file__).resolve().parents[2])
 
 FAKE_CMD = r"""
@@ -133,8 +134,10 @@ class Harness:
             "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
             "changed_tests": [],
             "allowed_config_changes": [],
+            "assumptions": [],
         }
         contract.update(overrides)
+        contract = {k: v for k, v in contract.items() if v is not DROP}
         spec = self.repo / "factory" / "specs" / f"{job_id}.md"
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text(
@@ -146,10 +149,10 @@ class Harness:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("def test_new():\n    assert False\n", encoding="utf-8")
 
-    def to_building(self, risk: str = "LOW") -> None:
+    def to_building(self, risk: str = "LOW", **spec: Any) -> None:
         self.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
         assert self.run("new", "요구사항") == 0
-        self.write_spec(risk=risk)
+        self.write_spec(risk=risk, **spec)
         assert self.run("spec", "J001") == 0
         assert self.run("red", "J001") == 0
         assert self.job()["status"] == "BUILDING"
@@ -247,6 +250,11 @@ def test_spec_accepts_valid_contract(h: Harness) -> None:
         {"changed_tests": ["backend/tests/../../secret.py"]},
         {"changed_tests": ["backend/src/bookmarks/main.py"]},
         {"changed_tests": ["backend/tests/test_missing.py"]},
+        # 가정(해석이 갈린 지점과 고른 쪽)은 없으면 빈 목록으로라도 명시한다 (H2)
+        {"assumptions": DROP},
+        {"assumptions": "공백 본문 허용"},
+        {"assumptions": [""]},
+        {"assumptions": [1]},
     ],
 )
 def test_spec_rejects_invalid_contract(h: Harness, overrides: dict[str, Any]) -> None:
@@ -254,6 +262,13 @@ def test_spec_rejects_invalid_contract(h: Harness, overrides: dict[str, Any]) ->
     h.write_spec(**overrides)
     assert h.run("spec", "J001") != 0
     assert h.job()["status"] == "QUEUED"
+
+
+def test_spec_records_assumptions(h: Harness) -> None:
+    h.run("new", "요구사항")
+    h.write_spec(assumptions=["공백만 있는 본문은 빈 본문으로 보지 않는다"])
+    assert h.run("spec", "J001") == 0
+    assert h.job()["assumptions"] == ["공백만 있는 본문은 빈 본문으로 보지 않는다"]
 
 
 def test_spec_requires_a_json_contract_block(h: Harness) -> None:
@@ -1110,6 +1125,7 @@ def wt_to_approved(h: Harness, wt: Path, filename: str) -> str:
         "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
         "changed_tests": [],
         "allowed_config_changes": [],
+        "assumptions": [],
     }
     spec = wt / "factory" / "specs" / f"{job_id}.md"
     spec.parent.mkdir(parents=True, exist_ok=True)
@@ -1338,6 +1354,26 @@ def test_approver_writes_brief_for_human_approval(h: Harness) -> None:
     for reviewer in ("code", "security", "test"):
         assert f"{reviewer}: PASS" in brief
     assert "approve J001" in brief
+
+
+def test_approval_brief_lists_assumptions_to_judge(h: Harness) -> None:
+    # 사람이 코드를 읽지 않고도 AI가 혼자 정한 해석을 볼 수 있다 (H3)
+    h.to_building(assumptions=["토큰은 대소문자를 구분한다", "만료된 토큰은 401"])
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    judge = brief.split("## 판단할 것")[1].split("## ")[0]
+    assert "가정: 토큰은 대소문자를 구분한다" in judge
+    assert "가정: 만료된 토큰은 401" in judge
+
+
+def test_approval_brief_says_when_there_is_nothing_to_judge(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    assert "## 판단할 것" in brief
+    assert "가정 없음" in brief.split("## 판단할 것")[1]
 
 
 def test_builder_model_is_promoted_after_two_failures(
