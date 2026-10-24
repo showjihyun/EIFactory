@@ -7,6 +7,8 @@
                                "<요구사항>" ...
     python scripts/dispatch.py --approve <작업 ID>
     python scripts/dispatch.py --reject <작업 ID> --reason "<이유>"
+    python scripts/dispatch.py --plan "<목표>"          # 계획 초안 + 검사 (기획안 6.9 P1)
+    python scripts/dispatch.py --run-plan <계획 ID>     # 사람 전용, 실행 = 계획 승인
 
 요구사항마다:
 1. 기본 checkout의 base 브랜치 끝에서 worktree를 만들고 `factory.py new --base <base>`로
@@ -21,6 +23,10 @@
 작업 worktree의 scripts/와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 factory.py를 쓰지
 않는다. 승인하면 상태의 검증 기록을 믿지 않고(FACTORY_UNTRUSTED_STATE) 다시 검증한 뒤 머지하며,
 컨테이너 작업이면 재검증도 오프라인 컨테이너에서 돌린다.
+
+계획 실행 (`--run-plan`): `plan.py check`를 통과한 계획을 depends_on 순서로 돌린다. 경로가 겹치지
+않는 독립 작업은 동시에, 승인 대기에 기대는 작업만 기다린다. BLOCKED에 기대는 작업이 있으면 계획은
+STOPPED. 다시 실행하면 남은 작업만 한다. 검사 뒤 계획 문서가 바뀌었으면 거부한다.
 
 격리 (`--isolation`):
 - host: 세션이 호스트에서 돈다. 머지는 각 세션의 `factory.py merge`가 한다.
@@ -52,7 +58,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -651,7 +657,9 @@ def run_job(
     args: argparse.Namespace,
     stamp: str,
     image: str | None = None,
+    plan_job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """plan_job: 계획 실행이면 검사된 계획 작업 ({"plan_id", 초안 필드, "expected_risk"})."""
     jobs_dir = root.parent / f"{root.name}.jobs"
     logs = jobs_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -660,7 +668,12 @@ def run_job(
     started = time.time()
     with _git_lock:
         _git(root, "worktree", "add", "-q", "--detach", str(slot), base)
-    created = _factory(root, slot, "new", requirement, "--base", base, env=_agent_env(args))
+    plan_args = []
+    if plan_job:
+        plan_args = ["--plan", f"{plan_job['plan_id']}:{plan_job['id']}",
+                     "--expected-risk", plan_job["expected_risk"]]  # fmt: skip
+    created = _factory(root, slot, "new", requirement, "--base", base, *plan_args,
+                       env=_agent_env(args))  # fmt: skip
     if created.returncode != 0:
         result["error"] = f"new 실패: {created.stdout.strip()[-500:]}"
         result["worktree"] = str(slot)
@@ -674,15 +687,16 @@ def run_job(
     docker = _docker_job(root, worktree, job_id, stamp, image) if image else None
     info = session_info_path(root, job_id)
     info.parent.mkdir(parents=True, exist_ok=True)
-    info.write_text(
-        json.dumps(
-            {"isolation": "docker" if docker else "host", "image": image, "stamp": stamp,
-             "agent": args.agent, "review_agent": args.review_agent, "orchestrator": args.plan,
-             "wall_timeout": args.wall_timeout},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )  # fmt: skip
+    session = {"isolation": "docker" if docker else "host", "image": image, "stamp": stamp,
+               "agent": args.agent, "review_agent": args.review_agent, "orchestrator": args.plan,
+               "wall_timeout": args.wall_timeout}  # fmt: skip
+    extra = ""
+    if plan_job:
+        extra = plan.plan_context(plan_job["plan_id"], plan_job)
+        session["plan"] = {"id": plan_job["plan_id"], "job": plan_job["id"],
+                           "expected_risk": plan_job["expected_risk"]}  # fmt: skip
+        session["prompt_plan"] = extra
+    info.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
 
     # 가상환경은 절대 경로를 품으므로 worktree를 옮긴 뒤에 설치한다
     if docker:
@@ -706,6 +720,8 @@ def run_job(
     result["session_budget_usd"] = session_cap
     template = CODEX_PROMPT if args.agent == "codex" else PROMPT
     prompt = template.format(job_id=job_id, requirement=requirement)
+    if extra:
+        prompt = f"{prompt}\n\n{extra}"
     log_path = logs / f"{job_id}.jsonl"
     result.update(_session(root, worktree, job_id, prompt, args, docker, log_path, session_cap))
     job = _load_job(worktree, job_id)
@@ -960,7 +976,109 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
         result: dict[str, Any] = {}
         if not _remove_worktree(root, worktree, result):
             print(f"worktree를 지우지 못했습니다: {result.get('cleanup_error')}")
+    if job["status"] == "MERGED" and job.get("plan_id"):
+        print(
+            f"계획 {job['plan_id']}의 남은 작업 이어서 (사람 전용): "
+            f"python scripts/dispatch.py --run-plan {job['plan_id']}"
+        )
     return 0 if job["status"] == "MERGED" else 1
+
+
+def plan_statuses(root: Path, state: dict[str, Any]) -> dict[str, str | None]:
+    """계획 작업 → 연결된 팩토리 작업의 지금 상태.
+
+    worktree가 있으면 그 상태(사람이 resume·drop했을 수 있음), 지워졌으면 호스트 작업 기록.
+    """
+    out: dict[str, str | None] = {}
+    for name, run in (state.get("runs") or {}).items():
+        status, job_id = run.get("status"), run.get("job_id")
+        if job_id:
+            worktree = _jobs_dir(root) / job_id
+            record = _jobs_dir(root) / "records" / f"{job_id}.json"
+            if (worktree / "factory/state.json").exists():
+                status = _load_job(worktree, job_id)["status"]
+            elif record.exists():
+                status = json.loads(record.read_text(encoding="utf-8"))["status"]
+        out[name] = status
+    return out
+
+
+def run_plan(
+    root: Path, state: dict[str, Any], args: argparse.Namespace, base: str, stamp: str,
+    image: str | None,
+) -> list[dict[str, Any]]:  # fmt: skip
+    """검사된 계획을 depends_on 순서로 실행한다 (기획안 6.9 P1).
+
+    선행 작업이 모두 MERGED인 작업만 시작하고, 하나가 끝날 때마다 다시 고른다. 승인 대기·BLOCKED에
+    기대는 작업은 기다리고 독립 작업은 계속 돈다. 사람이 승인·처리한 뒤 다시 실행하면 남은 작업만
+    한다.
+    """
+    items = {j["id"]: j for j in state["jobs"]}
+    runs = state.setdefault("runs", {})
+    state["status"] = "RUNNING"
+    plan.save_state(root, state)
+    results: list[dict[str, Any]] = []
+    attempted: set[str] = set()
+    running: dict[Future[dict[str, Any]], str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
+        while True:
+            statuses = plan_statuses(root, state)
+            start, _ = plan.schedule(state, statuses, set(running.values()) | attempted)
+            for name in start[: max(0, args.max_parallel - len(running))]:
+                attempted.add(name)
+                item = {**items[name], "plan_id": state["id"]}
+                future = pool.submit(run_job, root, base, item["requirement"], len(attempted),
+                                     args, stamp, image, item)  # fmt: skip
+                running[future] = name
+            if not running:
+                break
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                name = running.pop(future)
+                try:
+                    result = future.result()
+                except DispatchError as error:
+                    result = {"requirement": items[name]["requirement"], "job_id": None,
+                              "status": "ERROR", "error": str(error)}  # fmt: skip
+                result["plan_job"] = name
+                results.append(result)
+                runs[name] = {"job_id": result.get("job_id"), "status": result["status"],
+                              "at": time.time()}  # fmt: skip
+                plan.save_state(root, state)
+    statuses = plan_statuses(root, state)
+    _, waiting = plan.schedule(state, statuses, set())
+    state["status"] = plan.plan_status(state, statuses)
+    state["waiting"] = waiting
+    plan.save_state(root, state)
+    return results
+
+
+def plan_summary(state: dict[str, Any], statuses: dict[str, str | None]) -> str:
+    say = {"dispatch": "", "human": "사람 직접", "needs_decision": "결정 필요"}
+    lines = [
+        f"계획 {state['id']}: {state['status']}",
+        "",
+        "| 계획 작업 | 팩토리 작업 | 상태 | 예상 등급 | 대기 사유 |",
+        "|---|---|---|---|---|",
+    ]
+    for item in state["jobs"]:
+        name = item["id"]
+        run = (state.get("runs") or {}).get(name) or {}
+        status = say[item["route"]] or statuses.get(name) or "-"
+        if name in state.get("waiting", {}):
+            status = "PLAN_WAITING"
+        lines.append(
+            f"| {name} | {run.get('job_id') or '-'} | {status} | {item['expected_risk']} "
+            f"| {state.get('waiting', {}).get(name, '')} |"
+        )
+    again = "python scripts/dispatch.py --run-plan {id}"
+    hint = {
+        "RUNNING": f"승인 대기를 처리한 뒤 다시: {again}",
+        "STOPPED": f"BLOCKED·사람 직접 항목을 처리한 뒤 다시: {again}",
+        "DONE": "계획의 팩토리 작업이 모두 머지됐습니다",
+    }
+    lines += ["", hint[state["status"]].format(id=state["id"])]
+    return "\n".join(lines)
 
 
 def _session_args(root: Path, info: dict[str, Any], docker: bool) -> argparse.Namespace:
@@ -1083,6 +1201,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument(
         "--plan", metavar="목표", help="계획자로 목표를 작업 초안으로 나눔 (기획안 6.9 P1)"
     )
+    parser.add_argument(
+        "--run-plan", metavar="ID", help="검사된 계획을 실행 (사람 전용, 실행 = 계획 승인)"
+    )
     parser.add_argument("--reject", metavar="ID", help="승인 대기 작업을 반려")
     parser.add_argument("--reason", help="--reject 이유")
     parser.add_argument("--max-parallel", type=int, default=3)
@@ -1120,8 +1241,18 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         except DispatchError as error:
             print(f"오류: {error}")
             return 2
-    if not args.requirements:
-        print("오류: 요구사항이 필요합니다 (또는 --approve / --reject)")
+    plan_state = None
+    if args.run_plan:
+        if args.requirements:
+            print("오류: --run-plan에는 요구사항을 함께 줄 수 없습니다 (계획에서 읽음)")
+            return 2
+        try:
+            plan_state = plan.load_checked(root, args.run_plan)
+        except plan.PlanError as error:
+            print(f"오류: {error}")
+            return 2
+    elif not args.requirements:
+        print("오류: 요구사항이 필요합니다 (또는 --approve / --reject / --run-plan)")
         return 2
     args.review_agent = args.review_agent or args.agent
     args.keys = None
@@ -1166,26 +1297,31 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         return 2
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    count = f"계획 {args.run_plan}" if plan_state else f"작업 {len(args.requirements)}개"
     print(
         f"도구: {args.agent}, 오케스트레이터 {args.plan['alias']} ({args.plan['source']}), "
         f"인증: {auth_label(args.plan)}, 격리 {args.isolation}, "
-        f"작업 {len(args.requirements)}개, 동시 {args.max_parallel}개"
+        f"{count}, 동시 {args.max_parallel}개"
     )
-    with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
-        futures = [
-            pool.submit(run_job, root, base, req, i, args, stamp, image)
-            for i, req in enumerate(args.requirements)
-        ]
-        jobs = []
-        for future, req in zip(futures, args.requirements, strict=True):
-            try:
-                jobs.append(future.result())
-            except DispatchError as error:
-                jobs.append(
-                    {"requirement": req, "job_id": None, "status": "ERROR", "error": str(error)}
-                )
+    if plan_state:
+        jobs = run_plan(root, plan_state, args, base, stamp, image)
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, args.max_parallel)) as pool:
+            futures = [
+                pool.submit(run_job, root, base, req, i, args, stamp, image)
+                for i, req in enumerate(args.requirements)
+            ]
+            jobs = []
+            for future, req in zip(futures, args.requirements, strict=True):
+                try:
+                    jobs.append(future.result())
+                except DispatchError as error:
+                    jobs.append(
+                        {"requirement": req, "job_id": None, "status": "ERROR", "error": str(error)}
+                    )
     report = {
         "started": stamp,
+        "plan_id": args.run_plan,
         "agent": args.agent,
         "review_agent": args.review_agent,
         "auth": auth_label(args.plan),
@@ -1204,7 +1340,13 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(_summary(report))
-    notify_done(root, report)
+    if plan_state:
+        print()
+        print(plan_summary(plan_state, plan_statuses(root, plan_state)))
+    if jobs:
+        notify_done(root, report)
+    if plan_state:
+        return 1 if plan_state["status"] == "STOPPED" else 0
     return 0 if all(j["status"] not in {"ERROR", "SETUP_FAILED"} for j in jobs) else 1
 
 

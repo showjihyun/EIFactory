@@ -2,6 +2,7 @@
 
 사용법:
     python scripts/plan.py check <계획 ID>      # 예: P001
+    (실행은 사람이 python scripts/dispatch.py --run-plan <계획 ID>)
 
 계획 문서는 `factory/plans/<ID>.md`에 ```json 블록 하나로 둔다 (계획자가 쓰고 사람이 고친다):
     {"goal": "...", "jobs": [{"id", "requirement", "type", "size", "paths", "touches",
@@ -17,12 +18,19 @@
 - `depends_on`: 있는 작업만, 순환 금지.
 
 결과(작업별 예상 등급·근거·실행 경로)는 호스트 기록 `../<레포>.jobs/plans/<ID>.json`에
-CHECKED로 남긴다 (레포 안이 아니라서 세션이 바꾸지 못한다, 기획안 9장).
+CHECKED로 남긴다 (레포 안이 아니라서 세션이 바꾸지 못한다, 기획안 9장). 검사한 문서의 해시도
+남겨서, 검사 뒤 문서를 고치면 다시 검사해야 실행할 수 있다.
+
+실행 순서(`schedule`)도 규칙이다. 선행 작업이 모두 MERGED인 작업만 시작하고, 예상 변경 경로가
+겹치는 작업은 동시에 돌리지 않는다. 승인 대기·BLOCKED·사람 직접 항목에 기대는 작업은 사유와 함께
+기다린다(PLAN_WAITING). 계획 상태는 CHECKED → RUNNING → DONE / STOPPED이고 작업 상태와 따로 둔다.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -101,13 +109,21 @@ def state_path(root: Path, plan_id: str) -> Path:
     return jobs_dir(root) / "plans" / f"{plan_id}.json"
 
 
-def load_plan(root: Path, plan_id: str) -> dict[str, Any]:
+def _doc(root: Path, plan_id: str) -> str:
     if not PLAN_ID.match(plan_id):
         raise PlanError(f"계획 ID는 P001 형식입니다: {plan_id}")
     path = root / PLANS_DIR / f"{plan_id}.md"
     if not path.is_file():
         raise PlanError(f"계획 문서가 없습니다: {PLANS_DIR}/{plan_id}.md")
-    blocks = re.findall(r"```json\s*\n(.*?)\n```", path.read_text(encoding="utf-8"), re.S)
+    return path.read_text(encoding="utf-8")
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def load_plan(root: Path, plan_id: str) -> dict[str, Any]:
+    blocks = re.findall(r"```json\s*\n(.*?)\n```", _doc(root, plan_id), re.S)
     if len(blocks) != 1:
         raise PlanError(f"{plan_id}.md에 ```json 블록이 정확히 하나 있어야 합니다")
     try:
@@ -240,7 +256,132 @@ def check_plan(root: Path, plan_id: str) -> dict[str, Any]:
         checked.append({**item, "expected_risk": risk, "risk_reasons": reasons,
                         "route": where, "route_reason": why})  # fmt: skip
     return {"id": plan_id, "goal": body.get("goal", ""), "status": "CHECKED",
-            "checked_at": time.time(), "jobs": checked}  # fmt: skip
+            "checked_at": time.time(), "doc_sha": _sha(_doc(root, plan_id)),
+            "jobs": checked}  # fmt: skip
+
+
+def load_state(root: Path, plan_id: str) -> dict[str, Any] | None:
+    path = state_path(root, plan_id)
+    if not path.is_file():
+        return None
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def save_state(root: Path, state: dict[str, Any]) -> None:
+    path = state_path(root, state["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_checked(root: Path, plan_id: str) -> dict[str, Any]:
+    """실행할 계획 상태. 검사 기록이 없거나 검사 뒤 문서가 바뀌었으면 거부한다."""
+    text = _doc(root, plan_id)
+    state = load_state(root, plan_id)
+    again = f"python scripts/plan.py check {plan_id}"
+    if state is None:
+        raise PlanError(f"{plan_id} 검사 기록이 없습니다. 먼저 {again}")
+    if state.get("doc_sha") != _sha(text):
+        raise PlanError(f"{plan_id}.md가 검사 뒤 바뀌었습니다. {again}로 다시 검사")
+    return state
+
+
+# ---------------------------------------------------------------- 실행 순서 (--run-plan)
+
+STOP_STATUSES = {"BLOCKED", "SETUP_FAILED", "ERROR"}
+# 처음부터 새 작업으로 다시 맡길 수 있는 상태 (아직 안 함, 사람이 버림, 시작 실패)
+RESTART_STATUSES = {None, "DROPPED", "SETUP_FAILED", "ERROR"}
+
+
+def _overlap(a: list[str], b: list[str]) -> bool:
+    """예상 변경 경로가 겹치나 (같은 파일, 글롭, 폴더 포함)."""
+    for x in a:
+        for y in b:
+            if x == y or fnmatch.fnmatch(x, y) or fnmatch.fnmatch(y, x):
+                return True
+            if x.startswith(y.rstrip("/") + "/") or y.startswith(x.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _held(item: dict[str, Any], jobs: dict[str, dict[str, Any]],
+          statuses: dict[str, str | None]) -> str:  # fmt: skip
+    reasons = []
+    for dep in item["depends_on"]:
+        status = statuses.get(dep)
+        if status == "MERGED":
+            continue
+        if jobs[dep]["route"] != "dispatch":
+            reasons.append(f"{dep} 사람 직접 항목")
+        elif status == "APPROVAL_REQUIRED":
+            reasons.append(f"{dep} 승인 대기")
+        elif status in STOP_STATUSES:
+            reasons.append(f"{dep} {status}")
+        elif status is None or status == "DROPPED":
+            reasons.append(f"{dep} 진행 전")
+        else:
+            reasons.append(f"{dep} 진행 중 ({status})")
+    return ", ".join(reasons)
+
+
+def schedule(
+    state: dict[str, Any], statuses: dict[str, str | None], skip: set[str]
+) -> tuple[list[str], dict[str, str]]:
+    """지금 시작할 계획 작업과, 선행 작업 때문에 기다리는 작업(사유).
+
+    statuses: 계획 작업 → 연결된 팩토리 작업 상태 (안 했으면 없음).
+    skip: 지금 도는 작업과 이번 실행에서 이미 시도한 작업 (같은 실행에서 다시 시작하지 않음).
+    """
+    jobs = {j["id"]: j for j in state["jobs"]}
+    ready, waiting = [], {}
+    for item in state["jobs"]:
+        name = item["id"]
+        if item["route"] != "dispatch" or name in skip:
+            continue
+        if statuses.get(name) not in RESTART_STATUSES:
+            continue
+        held = _held(item, jobs, statuses)
+        if held:
+            waiting[name] = held
+        else:
+            ready.append(name)
+    start: list[str] = []
+    # 지금 도는 작업 (skip 가운데 아직 결과가 없는 것)
+    busy = [jobs[n]["paths"] for n in skip if n in jobs and statuses.get(n) in RESTART_STATUSES]
+    for name in ready:
+        if any(_overlap(jobs[name]["paths"], paths) for paths in busy):
+            continue  # 경로가 겹치면 순서대로 (앞 작업이 끝난 뒤 시작)
+        start.append(name)
+        busy.append(jobs[name]["paths"])
+    return start, waiting
+
+
+def plan_status(state: dict[str, Any], statuses: dict[str, str | None]) -> str:
+    jobs = {j["id"]: j for j in state["jobs"]}
+    left = [
+        j for j in state["jobs"] if j["route"] == "dispatch" and statuses.get(j["id"]) != "MERGED"
+    ]
+    if not left:
+        return "DONE"
+    if any(statuses.get(j["id"]) in STOP_STATUSES for j in left) or any(
+        jobs[d]["route"] != "dispatch" for j in left for d in j["depends_on"]
+    ):
+        return "STOPPED"
+    return "RUNNING"
+
+
+def plan_context(plan_id: str, item: dict[str, Any]) -> str:
+    """세션 프롬프트에 붙일 계획 내용. 사람이 계획을 실행했으므로 설계 결정은 합의된 것이다."""
+    lines = [f"이 작업은 계획 {plan_id}의 작업 {item['id']}다 (사람이 계획을 확인하고 실행함)."]
+    if item.get("design"):
+        lines.append(
+            f"설계 결정 (사람이 합의함. spec은 이를 따르고, 다르게 해야 하면 assumptions에 "
+            f"이유를 적는다): {item['design']}"
+        )
+    lines += [f"계획의 가정: {a}" for a in item.get("assumptions") or []]
+    lines += [f"수락 기준 힌트: {h}" for h in item.get("acceptance_hints") or []]
+    lines.append(f"예상 변경 경로: {', '.join(item['paths'])} (예상 등급 {item['expected_risk']})")
+    return "\n".join(lines)
 
 
 def planner_command(root: Path) -> list[str]:
@@ -358,9 +499,13 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     except PlanError as error:
         print(f"오류: {error}")
         return 2 if "없습니다" in str(error) and "계획 문서" in str(error) else 1
-    path = state_path(root, args.plan_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    previous = load_state(root, args.plan_id) or {}
+    # 다시 검사해도 이미 실행한 작업의 연결은 남긴다 (계획에 남아 있는 작업만)
+    ids = {j["id"] for j in state["jobs"]}
+    runs = {k: v for k, v in (previous.get("runs") or {}).items() if k in ids}
+    if runs:
+        state["runs"] = runs
+    save_state(root, state)
     print(render(state))
     return 0
 

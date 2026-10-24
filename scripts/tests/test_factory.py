@@ -215,6 +215,25 @@ def test_new_creates_job_branch_and_state_files(h: Harness) -> None:
     assert "J001" in (h.repo / "factory-state.md").read_text(encoding="utf-8")
 
 
+def test_new_records_the_plan_it_came_from(h: Harness) -> None:
+    # 계획 실행(--run-plan)이 만든 작업은 계획 ID와 예상 등급을 남긴다 (기획안 6.5, KPI 적중률)
+    assert h.run("new", "계획 작업", "--plan", "P001:A", "--expected-risk", "MEDIUM") == 0
+    job = h.job()
+    assert (job["plan_id"], job["plan_job"], job["expected_risk"]) == ("P001", "A", "MEDIUM")
+
+
+def test_new_without_a_plan_leaves_plan_fields_empty(h: Harness) -> None:
+    assert h.run("new", "그냥 작업") == 0
+    assert (h.job()["plan_id"], h.job()["plan_job"], h.job()["expected_risk"]) == (None,) * 3
+
+
+@pytest.mark.parametrize(
+    "extra", [["--plan", "A"], ["--plan", "P001:A", "--expected-risk", "SEVERE"]]
+)
+def test_new_refuses_a_bad_plan_reference(h: Harness, extra: list[str]) -> None:
+    assert h.run("new", "계획 작업", *extra) != 0
+
+
 def test_new_refuses_while_a_job_is_active(h: Harness) -> None:
     assert h.run("new", "첫 번째") == 0
     assert h.run("new", "두 번째") != 0

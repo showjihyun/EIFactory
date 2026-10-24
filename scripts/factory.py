@@ -817,7 +817,21 @@ def _create_job_branch(root: Path, state: State) -> tuple[str, str]:
     raise FactoryError("새 작업 브랜치를 만들지 못했습니다 (factory/J* 번호 충돌)")
 
 
-def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None = None) -> str:
+def cmd_new(
+    root: Path,
+    state: State,
+    requirement: str,
+    base_branch: str | None = None,
+    plan_ref: str | None = None,
+    expected_risk: str | None = None,
+) -> str:
+    plan_id = plan_job = None
+    if plan_ref is not None:
+        # 계획 실행(dispatch.py --run-plan)이 넘긴다: "P001:A" (기획안 6.5, 6.9)
+        found = re.fullmatch(r"(P\d{3,}):(\S+)", plan_ref)
+        if not found or expected_risk not in RISKS:
+            raise FactoryError(f"--plan은 P001:A 형식, --expected-risk는 {RISKS} 중 하나입니다")
+        plan_id, plan_job = found.groups()
     active = state["active"]
     if active and state["jobs"][active]["status"] not in CLOSED_STATUSES:
         raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (checkout 하나에 한 작업)")
@@ -868,6 +882,9 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "last_failure": None,
         "approval": None,
         "approval_brief": None,
+        "plan_id": plan_id,
+        "plan_job": plan_job,
+        "expected_risk": expected_risk if plan_id else None,
         "agent": agent,
         "builder_model": None,
         "models": {},
@@ -1888,6 +1905,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     new = sub.add_parser("new")
     new.add_argument("requirement")
     new.add_argument("--base", help="머지 대상 브랜치 (detached worktree에서 필요)")
+    new.add_argument("--plan", help="계획 작업 P001:A (dispatch.py --run-plan이 넘김)")
+    new.add_argument("--expected-risk", help="계획 단계의 예상 등급")
     for name in ("spec", "red", "verify", "validate", "merge", "drop"):
         sub.add_parser(name).add_argument("job_id")
     block = sub.add_parser("block")
@@ -1931,7 +1950,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     code = 0
     try:
         if args.command == "new":
-            message = cmd_new(root, state, args.requirement, args.base)
+            message = cmd_new(root, state, args.requirement, args.base, args.plan,
+                              args.expected_risk)  # fmt: skip
         elif args.command == "spec":
             message = cmd_spec(root, state, args.job_id)
         elif args.command == "red":

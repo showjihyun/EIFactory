@@ -278,3 +278,138 @@ def test_missing_plan_is_an_error(root: Path, capsys: pytest.CaptureFixture[str]
     code, out = check(root, capsys)
     assert code == 2
     assert "P001" in out
+
+
+# ---------- 실행 순서 (--run-plan의 결정 규칙, 기획안 6.9) ----------
+
+
+def checked(*jobs: dict[str, Any]) -> dict[str, Any]:
+    """검사된 계획 상태 (route 기본 dispatch)."""
+    items = [{"route": "dispatch", "expected_risk": "LOW", **j} for j in jobs]
+    return {"id": "P001", "status": "CHECKED", "jobs": items}
+
+
+def test_schedule_starts_only_jobs_whose_dependencies_merged() -> None:
+    state = checked(draft("A"), draft("B", depends_on=["A"], paths=["b.py"]),
+                    draft("C", paths=["c.py"]))  # fmt: skip
+    start, waiting = plan.schedule(state, {}, set())
+    assert start == ["A", "C"]
+    assert waiting == {"B": "A 진행 전"}
+    start, waiting = plan.schedule(state, {"A": "MERGED", "C": "MERGED"}, set())
+    assert start == ["B"] and waiting == {}
+
+
+def test_schedule_waits_only_for_dependents_of_a_job_awaiting_approval() -> None:
+    state = checked(draft("A"), draft("B", depends_on=["A"], paths=["b.py"]),
+                    draft("C", paths=["c.py"]))  # fmt: skip
+    start, waiting = plan.schedule(state, {"A": "APPROVAL_REQUIRED"}, set())
+    assert start == ["C"]
+    assert waiting == {"B": "A 승인 대기"}
+
+
+def test_schedule_never_restarts_running_merged_or_waiting_jobs() -> None:
+    state = checked(draft("A"), draft("B", paths=["b.py"]), draft("C", paths=["c.py"]),
+                    draft("D", paths=["d.py"]))  # fmt: skip
+    statuses = {"A": "MERGED", "B": "APPROVAL_REQUIRED", "C": "BLOCKED"}
+    assert plan.schedule(state, statuses, {"D"}) == ([], {})
+
+
+def test_schedule_restarts_dropped_or_failed_jobs_unless_tried_this_run() -> None:
+    state = checked(draft("A"), draft("B", paths=["b.py"]))
+    statuses = {"A": "DROPPED", "B": "SETUP_FAILED"}
+    assert plan.schedule(state, statuses, set())[0] == ["A", "B"]
+    assert plan.schedule(state, statuses, {"A", "B"})[0] == []
+
+
+def test_schedule_runs_jobs_with_overlapping_paths_one_at_a_time() -> None:
+    state = checked(
+        draft("A", paths=["frontend/src/App.tsx"]),
+        draft("B", paths=["frontend/src/App.tsx", "frontend/src/x.ts"]),
+        draft("C", paths=["frontend/src/components/*.tsx"]),
+        draft("D", paths=["frontend/src/components/List.tsx"]),
+    )
+    assert plan.schedule(state, {}, set())[0] == ["A", "C"]
+    # A가 도는 동안 B는 기다리고, A가 끝나면 시작한다
+    assert plan.schedule(state, {}, {"A", "C"})[0] == []
+    assert plan.schedule(state, {"A": "MERGED", "C": "MERGED"}, set())[0] == ["B", "D"]
+
+
+def test_schedule_does_not_dispatch_human_items_and_holds_their_dependents() -> None:
+    state = checked(
+        {**draft("H", paths=["scripts/eval.py"]), "route": "human"},
+        draft("A", depends_on=["H"]),
+    )
+    start, waiting = plan.schedule(state, {}, set())
+    assert start == []
+    assert waiting == {"A": "H 사람 직접 항목"}
+
+
+def test_schedule_reports_blocked_upstream() -> None:
+    state = checked(draft("A"), draft("B", depends_on=["A"], paths=["b.py"]))
+    assert plan.schedule(state, {"A": "BLOCKED"}, set()) == ([], {"B": "A BLOCKED"})
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ({"A": "MERGED", "B": "MERGED"}, "DONE"),
+        ({"A": "APPROVAL_REQUIRED"}, "RUNNING"),
+        ({"A": "BLOCKED"}, "STOPPED"),
+        ({"A": "MERGED", "B": "SETUP_FAILED"}, "STOPPED"),
+    ],
+)
+def test_plan_status(statuses: dict[str, str], expected: str) -> None:
+    state = checked(draft("A"), draft("B", depends_on=["A"], paths=["b.py"]))
+    assert plan.plan_status(state, statuses) == expected
+
+
+def test_plan_with_a_human_item_holding_dependents_is_stopped() -> None:
+    state = checked({**draft("H"), "route": "human"}, draft("A", depends_on=["H"]))
+    assert plan.plan_status(state, {}) == "STOPPED"
+    # 사람 직접 항목에 기대는 작업이 없으면, 팩토리 작업이 다 머지됐을 때 DONE
+    state = checked({**draft("H"), "route": "human"}, draft("A"))
+    assert plan.plan_status(state, {"A": "MERGED"}) == "DONE"
+
+
+# ---------- 실행 전 확인 ----------
+
+
+def test_load_checked_requires_a_check_record(root: Path) -> None:
+    write_plan(root, [draft("A")])
+    with pytest.raises(plan.PlanError, match="check"):
+        plan.load_checked(root, "P001")
+
+
+def test_load_checked_refuses_a_plan_edited_after_the_check(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_plan(root, [draft("A")])
+    assert check(root, capsys)[0] == 0
+    assert plan.load_checked(root, "P001")["status"] == "CHECKED"
+    write_plan(root, [draft("A", requirement="바뀐 요구사항")])
+    with pytest.raises(plan.PlanError, match="바뀌었"):
+        plan.load_checked(root, "P001")
+
+
+def test_recheck_keeps_runs_of_jobs_still_in_the_plan(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_plan(root, [draft("A"), draft("B", paths=["b.py"])])
+    assert check(root, capsys)[0] == 0
+    saved = state(root)
+    saved["runs"] = {"A": {"job_id": "J001", "status": "MERGED"},
+                     "B": {"job_id": "J002", "status": "BLOCKED"}}  # fmt: skip
+    saved["status"] = "STOPPED"
+    state_path(root).write_text(json.dumps(saved), encoding="utf-8")
+    write_plan(root, [draft("A"), draft("C", paths=["c.py"])])  # 사람이 B를 C로 바꿈
+    assert check(root, capsys)[0] == 0
+    assert state(root)["runs"] == {"A": {"job_id": "J001", "status": "MERGED"}}
+    assert state(root)["status"] == "CHECKED"
+
+
+def test_plan_context_carries_design_and_assumptions_into_the_session() -> None:
+    item = {**draft("A", size="medium", design="note 열을 추가한다",
+                    assumptions=["500자 제한"]), "expected_risk": "MEDIUM"}  # fmt: skip
+    text = plan.plan_context("P001", item)
+    assert "P001" in text and "note 열을 추가한다" in text and "500자 제한" in text
+    assert "무언가가 보인다" in text  # 수락 기준 힌트
