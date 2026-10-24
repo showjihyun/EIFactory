@@ -111,7 +111,7 @@ def _write(path: Path, data: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="factory_settings", description="팩토리 설정 (사람 전용)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("show")

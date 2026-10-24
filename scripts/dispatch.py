@@ -83,12 +83,17 @@ DEFAULT_SETUP_SCRIPT = (
 )
 DEFAULT_CACHE_VOLUMES = {"frontend/node_modules": "node", "/home/node/.venvs": "venv"}
 CONTAINER_GIT = "/repo-git"
+# 얇은 설치(기획안 12.1): 레포 밖 엔진을 컨테이너에 읽기 전용으로 끼운다
+ENGINE = Path(__file__).resolve().parents[1]
+CONTAINER_ENGINE_HOME = "/opt/factory/engines"
 # 컨테이너에 이름으로 넘기지 않는 dispatcher 전용 설정
 HOST_ONLY_SETTINGS = {
     "FACTORY_AGENT_CMD",
     "FACTORY_SETUP_CMD",
     "FACTORY_DOCKER_MOUNTS",
     "FACTORY_ROOT",
+    "FACTORY_REPO",
+    "FACTORY_ENGINE_HOME",
     "FACTORY_AGENT_SESSION",
     "FACTORY_DOCKER_NO_PROXY",
     "FACTORY_ANTHROPIC_API_KEY_STASH",
@@ -407,6 +412,21 @@ def _extra_mounts() -> list[str]:
     return args
 
 
+def _engine_mount(root: Path) -> list[str]:
+    """얇은 설치 레포면 엔진 폴더를 읽기 전용으로 끼운다. 세션은 엔진을 바꿀 수 없다."""
+    try:
+        tag = json.loads((root / "factory/kit.lock").read_text(encoding="utf-8"))["engine"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return []
+    target = f"{CONTAINER_ENGINE_HOME}/{tag}"
+    return [
+        "--mount",
+        f"type=bind,source={ENGINE},target={target},readonly",
+        "-e",
+        f"FACTORY_ENGINE_HOME={CONTAINER_ENGINE_HOME}",
+    ]
+
+
 def _docker_base(job: DockerJob, network: str) -> list[str]:
     _write_dotgit(job)
     common_git = job.root / ".git"
@@ -440,6 +460,7 @@ def _docker_base(job: DockerJob, network: str) -> list[str]:
         "GIT_CONFIG_KEY_0=safe.directory",
         "-e",
         "GIT_CONFIG_VALUE_0=*",
+        *_engine_mount(job.root),
         *_extra_mounts(),
     ]
 
@@ -508,7 +529,8 @@ def prepare_docker(root: Path) -> str:
         raise DispatchError("Docker를 쓸 수 없습니다 (docker info 실패)")
     images = [
         (_content_tag("bookmark-factory-agent", root / ".devcontainer"), root / ".devcontainer"),
-        (_content_tag("bookmark-factory-proxy", root / "docker/proxy"), root / "docker/proxy"),
+        # 프록시 허용 목록은 엔진 것을 쓴다 (얇은 설치 레포에는 없다)
+        (_content_tag("bookmark-factory-proxy", ENGINE / "docker/proxy"), ENGINE / "docker/proxy"),
     ]
     for tag, context in images:
         if _docker("image", "inspect", tag).returncode != 0:
@@ -1002,7 +1024,7 @@ def _summary(report: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="dispatch", description="팩토리 병렬 실행")
     parser.add_argument("requirements", nargs="*")
     parser.add_argument("--approve", metavar="ID", help="승인 대기 작업을 승인하고 머지")

@@ -138,7 +138,7 @@ def ensure_labels() -> None:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="issues", description="GitHub Issues → 팩토리")
     parser.add_argument("--label", default="factory")
     parser.add_argument("--limit", type=int, default=5)

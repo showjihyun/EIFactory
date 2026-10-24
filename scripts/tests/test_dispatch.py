@@ -280,6 +280,18 @@ def test_session_container_is_isolated(tmp_path: Path, monkeypatch: pytest.Monke
     assert cmd[-3:] == ["claude", "-p", "x"]
 
 
+def test_thin_installed_repo_mounts_the_engine_read_only(tmp_path: Path) -> None:
+    job = docker_job(tmp_path)
+    plain = dispatch.docker_tool_command(job, ["x"])
+    assert not any("/opt/factory/engines" in x for x in mounts(plain))
+    (job.root / "factory").mkdir(parents=True)
+    (job.root / "factory/kit.lock").write_text(json.dumps({"engine": "factory-v1"}), "utf-8")
+    cmd = dispatch.docker_tool_command(job, ["x"])
+    engine = f"source={dispatch.ENGINE},target=/opt/factory/engines/factory-v1,readonly"
+    assert f"type=bind,{engine}" in mounts(cmd)
+    assert cmd[cmd.index("FACTORY_ENGINE_HOME=/opt/factory/engines") - 1] == "-e"
+
+
 def test_setup_container_has_network_but_no_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

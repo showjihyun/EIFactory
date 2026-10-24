@@ -262,7 +262,11 @@ def check_bash(command: str, job: dict[str, Any] | None) -> None:
 
 def main() -> None:
     use_utf8_output()
-    root = Path(os.environ.get("FACTORY_ROOT") or Path(__file__).resolve().parents[2])
+    root = Path(
+        os.environ.get("FACTORY_ROOT")
+        or os.environ.get("FACTORY_REPO")  # 얇은 설치: shim이 알린 대상 레포
+        or Path(__file__).resolve().parents[2]
+    )
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError:
