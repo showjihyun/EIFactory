@@ -151,6 +151,61 @@ def run(repo: Path, *argv: str) -> tuple[int, dict[str, Any]]:
     return code, report
 
 
+NOTIFY_RECORDER = r"""
+import json, os, sys
+with open(sys.argv[1], "a", encoding="utf-8") as log:
+    log.write(json.dumps({"argv": sys.argv[2:], "title": os.environ.get("FACTORY_TOAST_TITLE"),
+                          "body": os.environ.get("FACTORY_TOAST_BODY")}, ensure_ascii=False) + "\n")
+sys.exit(int(os.environ.get("FAKE_NOTIFY_EXIT", "0")))
+"""
+
+
+@pytest.fixture
+def notify_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    recorder = tmp_path / "notify.py"
+    recorder.write_text(NOTIFY_RECORDER, encoding="utf-8")
+    log = tmp_path / "notify.log"
+    monkeypatch.setenv("FACTORY_NOTIFY_CMD", json.dumps([sys.executable, str(recorder), str(log)]))
+    return log
+
+
+def notifications(log: Path) -> list[dict[str, Any]]:
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def test_dispatch_notifies_the_result_when_done(repo: Path, notify_log: Path) -> None:
+    # dispatch 종료 알림 (기획안 6.9 P2, 기본 켬). 문구는 명령줄이 아니라 환경변수로 넘긴다
+    code, _ = run(repo, "요구사항 $(rm -rf /) `x`")
+    assert code == 0
+    sent = notifications(notify_log)
+    assert len(sent) == 1
+    assert "dispatch" in sent[0]["title"]
+    assert "MERGED 1" in sent[0]["body"]
+    assert not any("MERGED" in a or "rm -rf" in a for a in sent[0]["argv"])
+
+
+def test_dispatch_notification_can_be_turned_off(repo: Path, notify_log: Path) -> None:
+    config = json.loads((repo / "factory" / "config.json").read_text(encoding="utf-8"))
+    config["notify"] = {"toast": False}
+    (repo / "factory" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "알림 끔")
+    code, _ = run(repo, "요구사항")
+    assert code == 0
+    assert notifications(notify_log) == []
+
+
+def test_notification_failure_does_not_change_the_result(
+    repo: Path, notify_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_NOTIFY_EXIT", "1")
+    code, report = run(repo, "요구사항")
+    assert code == 0
+    assert report["jobs"][0]["status"] == "MERGED"
+    assert len(notifications(notify_log)) == 1
+
+
 def test_three_parallel_jobs_all_merge_without_conflict(repo: Path) -> None:
     code, report = run(repo, "--max-parallel", "3", "첫째", "둘째", "셋째")
     assert code == 0

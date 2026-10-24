@@ -87,6 +87,8 @@ class Config:
     # 단계별 모델·인증 {단계: {"model": auto|haiku|sonnet|opus, "auth": auto|subscription|api}}
     stages: dict[str, dict[str, str]] = field(default_factory=dict)
     budgets: dict[str, float] = field(default_factory=lambda: dict(BUDGET_DEFAULTS))
+    # dispatch 종료 Windows 알림 (기획안 6.9 P2, 기본 켬)
+    notify_toast: bool = True
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -156,6 +158,18 @@ def _budgets(raw: Any) -> dict[str, float]:
     return out
 
 
+def _notify_toast(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{CONFIG_PATH}: notify는 객체여야 합니다")
+    unknown = sorted(k for k in raw if k != "toast" and not str(k).startswith("_"))
+    if unknown:
+        raise ConfigError(f"{CONFIG_PATH}: 모르는 알림 설정 {unknown} (가능: toast)")
+    toast = raw.get("toast", True)
+    if not isinstance(toast, bool):
+        raise ConfigError(f"{CONFIG_PATH}: notify.toast={toast!r}는 true 또는 false")
+    return toast
+
+
 def load_config(root: Path) -> Config:
     path = root / CONFIG_PATH
     data: dict[str, Any] = {}
@@ -184,6 +198,7 @@ def load_config(root: Path) -> Config:
             },
             stages=_stages(data.get("stages") or {}),
             budgets=_budgets(data.get("budgets") or {}),
+            notify_toast=_notify_toast(data.get("notify", {})),
             job_verify_args=[str(a) for a in job_verify.get("args", [])],
             # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
             job_verify_full_if_changed=_merge(
