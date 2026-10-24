@@ -73,6 +73,7 @@ STAGE_OF = {
     "DROPPED": "dropped",
 }
 CLOSED = {"MERGED", "DROPPED"}
+MERGED_BY = re.compile(r"^factory (J\d{3,})\b")  # 팩토리 커밋 제목 → 작업 ID (표시용)
 # 충돌 예고에서 뺄 팩토리 산출물
 ARTIFACTS = ("factory/specs/", "factory/reviews/")
 ARTIFACT_FILES = {"factory/state.json", "factory-state.md", "factory/heartbeat.json"}
@@ -214,10 +215,23 @@ def discover(root: Path, jobs_dir: Path, cache: FileCache | None = None) -> list
 # ---------------------------------------------------------------- 레인 (D11a)
 
 
+def _shared(a: list[str], b: list[str]) -> list[str]:
+    return sorted(
+        f for f in set(a) & set(b) if not f.startswith(ARTIFACTS) and f not in ARTIFACT_FILES
+    )
+
+
 def lanes(
-    jobs: list[dict[str, Any]], changed: dict[str, list[str]], now: float
+    jobs: list[dict[str, Any]],
+    changed: dict[str, list[str]],
+    now: float,
+    base_changed: dict[str, dict[str, list[str]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """작업별 구간과 같은 파일을 고치는 진행 중 작업 쌍 (설계안 6.0). 표시만 한다."""
+    """작업별 구간과 충돌 예고 (설계안 6.0). 표시만 한다.
+
+    - running: 같은 파일을 고치는 진행 중 작업 쌍.
+    - base: 작업이 갈라진 뒤 base에 먼저 머지된 파일과 겹침. 늦은 작업이 머지할 때 rebase 충돌 위험.
+    """
     out = []
     for job in jobs:
         segments: list[dict[str, Any]] = []
@@ -236,13 +250,14 @@ def lanes(
     conflicts = []
     for i, a in enumerate(sorted(active)):
         for b in sorted(active)[i + 1 :]:
-            shared = sorted(
-                f
-                for f in set(changed[a]) & set(changed[b])
-                if not f.startswith(ARTIFACTS) and f not in ARTIFACT_FILES
-            )
+            shared = _shared(changed[a], changed[b])
             if shared:
-                conflicts.append({"a": a, "b": b, "files": shared})
+                conflicts.append({"a": a, "b": b, "files": shared, "kind": "running"})
+    for key in sorted(active):
+        for by, files in sorted((base_changed or {}).get(key, {}).items()):
+            shared = _shared(changed[key], files)
+            if shared and by != key:
+                conflicts.append({"a": by, "b": key, "files": shared, "kind": "base"})
     return out, conflicts
 
 
@@ -363,7 +378,7 @@ class Collector:
         self.cache = FileCache()
         self.tail = LogTail()
         self._usage: dict[Path, tuple[tuple[Any, ...], dict[str, Any]]] = {}
-        self._changed: dict[str, tuple[float, list[str]]] = {}
+        self._changed: dict[str, tuple[float, list[str], dict[str, list[str]]]] = {}
         self._prices: tuple[float, dict[str, float]] = (0.0, {})
 
     # ------------------------------------------------ 공통
@@ -402,17 +417,35 @@ class Collector:
 
     def changed(self, ref: dict[str, Any]) -> list[str]:
         """진행 중 worktree의 바뀐 파일 (Git 확인). 10초 캐시."""
+        return self._worktree_changes(ref)[0]
+
+    def base_changed(self, ref: dict[str, Any]) -> dict[str, list[str]]:
+        """작업이 갈라진 뒤 base에 들어온 파일, 머지한 작업별 (Git 확인). 10초 캐시."""
+        return self._worktree_changes(ref)[1]
+
+    def _worktree_changes(self, ref: dict[str, Any]) -> tuple[list[str], dict[str, list[str]]]:
         worktree = ref.get("worktree")
         job = ref.get("job") or {}
         if ref["source"] != "worktree" or not worktree or job.get("status") in CLOSED:
-            return []
+            return [], {}
         cached = self._changed.get(ref["key"])
         if cached and self.now() - cached[0] < 10:
-            return cached[1]
-        fork = self._git(worktree, "merge-base", "HEAD", job.get("base_branch") or "main")
+            return cached[1], cached[2]
+        base = job.get("base_branch") or "main"
+        fork = self._git(worktree, "merge-base", "HEAD", base)
         files = [f["path"] for f in report.changed_files(worktree, fork)] if fork else []
-        self._changed[ref["key"]] = (self.now(), files)
-        return files
+        landed: dict[str, list[str]] = {}
+        if fork:
+            log = self._git(worktree, "log", "--no-merges", "--no-renames", "--name-only",
+                            "--format=%x1e%s", f"{fork}..{base}")  # fmt: skip
+            for chunk in filter(None, log.split("\x1e")):
+                subject, *paths = chunk.splitlines()
+                match = MERGED_BY.match(subject)
+                by = match.group(1) if match else base
+                landed.setdefault(by, [])
+                landed[by] += [p for p in paths if p and p not in landed[by]]
+        self._changed[ref["key"]] = (self.now(), files, landed)
+        return files, landed
 
     def session_info(self, job_id: str) -> dict[str, Any] | None:
         if not JOB_ID.match(job_id):
@@ -441,6 +474,7 @@ class Collector:
         except ConfigError as error:
             warnings.append(f"설정 오류: {error}")
         cards, real_jobs, lane_jobs, changed = [], [], [], {}
+        base_changed: dict[str, dict[str, list[str]]] = {}
         subscription = None
         sub_at = -1.0
         totals = {"in": 0, "out": 0, "cr": 0, "cw": 0, "usd": 0.0}
@@ -478,8 +512,11 @@ class Collector:
                 files = self.changed(ref)
                 if files:
                     changed[ref["key"]] = files
+                    landed = self.base_changed(ref)
+                    if landed:
+                        base_changed[ref["key"]] = landed
             cards.append(self._card(ref, column, job, cost, tokens))
-        lane_list, conflicts = lanes(lane_jobs, changed, self.now())
+        lane_list, conflicts = lanes(lane_jobs, changed, self.now(), base_changed)
         kpi = report.metrics(real_jobs) if real_jobs else None
         leads = [m for m in (report._lead_minutes(j) for j in real_jobs) if m is not None]
         dispatches = sorted(self.jobs_dir.glob("dispatch-*.json"))

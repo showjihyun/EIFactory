@@ -354,7 +354,52 @@ def test_lanes_and_conflicts() -> None:
     j2 = next(lane for lane in lanes if lane["key"] == "J002")
     assert j2["segments"][-1]["stage"] == "wait"
     # 팩토리 산출물은 충돌로 보지 않는다
-    assert conflicts == [{"a": "J001", "b": "J002", "files": ["frontend/src/List.tsx"]}]
+    assert conflicts == [
+        {"a": "J001", "b": "J002", "files": ["frontend/src/List.tsx"], "kind": "running"}
+    ]
+
+
+def test_lanes_warn_on_files_merged_to_base_after_fork() -> None:
+    # D17: 먼저 끝난 J001이 머지되면 진행 중 쌍 예고는 사라진다. 늦은 J002의 위험은 그때부터다
+    jobs = [
+        {"key": "J001", "status": "MERGED", "history": []},
+        {"key": "J002", "status": "BUILDING", "history": []},
+    ]
+    changed = {"J002": ["frontend/src/List.tsx", "factory/specs/J002.md"]}
+    base = {"J002": {"J001": ["frontend/src/List.tsx", "factory/specs/J001.md", "README.md"]}}
+    _, conflicts = monitor.lanes(jobs, changed, now=100, base_changed=base)
+    assert conflicts == [
+        {"a": "J001", "b": "J002", "files": ["frontend/src/List.tsx"], "kind": "base"}
+    ]
+    # 겹치는 파일이 없거나 base 변경이 없으면 예고하지 않는다
+    assert monitor.lanes(jobs, changed, now=100, base_changed={"J002": {"J001": ["x"]}})[1] == []
+    assert monitor.lanes(jobs, changed, now=100)[1] == []
+
+
+def test_snapshot_detects_base_overlap_with_real_worktree(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    git(root, "init", "-q", "-b", "main")
+    (root / "src").mkdir()
+    (root / "src" / "List.tsx").write_text("a\n", encoding="utf-8")
+    (root / "src" / "Form.tsx").write_text("f\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, *ident, "commit", "-qm", "base")
+    jobs = tmp_path / "repo.jobs"
+    git(root, "worktree", "add", "-q", "-b", "factory/J002", str(jobs / "J002"))
+    write_json(jobs / "J002" / "factory" / "state.json",
+               {"active": "J002", "jobs": {"J002": state_job("J002", "BUILDING")}})  # fmt: skip
+    (jobs / "J002" / "src" / "List.tsx").write_text("a\nj002\n", encoding="utf-8")
+    # J002가 갈라진 뒤 main에 J001이 머지됨 (같은 파일 + 다른 파일)
+    (root / "src" / "List.tsx").write_text("j001\na\n", encoding="utf-8")
+    (root / "src" / "Form.tsx").write_text("f2\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, *ident, "commit", "-qm", "factory J001: 빈 목록 문구")
+    snap = monitor.Collector(root, jobs, now=lambda: NOW).snapshot()
+    assert snap["conflicts"] == [
+        {"a": "J001", "b": "J002", "files": ["src/List.tsx"], "kind": "base"}
+    ]
 
 
 # ---------- D8 서버 ----------

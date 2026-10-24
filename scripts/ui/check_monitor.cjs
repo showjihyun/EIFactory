@@ -60,6 +60,9 @@ async function startServer(jobs) {
     if (attention < 2) fail(`주의 줄 ${attention}건 (승인 대기·막힘·오류)`);
     if (!(await page.locator("#attention").textContent()).includes("dispatch.py --approve J002")) fail("승인 명령이 없음");
     if ((await page.locator("#top").textContent()).includes("null")) fail("윗줄에 'null' 글자");
+    await page.waitForFunction(() => document.querySelector("#lanes") && document.querySelector("#lanes").textContent.includes("먼저 머지됨"), null, { timeout: 10000 }).catch(() => {});
+    const lanesText = await page.locator("#lanes").textContent();
+    if (!lanesText.includes("J001 (먼저 머지됨) → J005") || !lanesText.includes("List.tsx")) fail("머지 후 ⚡ 예고(J001 → J005)가 없음");
     const unpriced = await page.locator(".card[data-key='J001'] .meter .num").last().textContent();
     if (!unpriced.includes("≈ ?")) fail(`단가 없는 작업이 '≈ ?'가 아님 (${unpriced})`);
 

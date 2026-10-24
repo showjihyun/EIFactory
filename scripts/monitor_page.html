@@ -464,7 +464,10 @@ function renderLanes() {
   const step = Math.max(300, Math.ceil((t1 - t0) / 8 / 300) * 300);
   for (let t = t0; t <= t1; t += step) ticks.append(el("span", { style: `left:${pct(t)}`, text: clock(t) }));
   box.append(el("div", { class: "axis" }, el("div", { class: "small muted", text: "작업" }), ticks, el("div", { class: "small muted", text: "활성 / 상한" })));
-  const conflictAfter = new Map((snap.conflicts || []).map((c) => [c.b, c]));
+  // running: 진행 중 두 작업이 같은 파일 · base: 먼저 머지된 작업과 같은 파일 (늦은 쪽 rebase 위험)
+  const conflictNote = (cf) => cf.kind === "base"
+    ? el("div", { class: "conflict", role: "note" }, "⚡ ", el("b", { text: `${cf.a} (먼저 머지됨) → ${cf.b}` }), " 같은 파일: ", el("code", { text: cf.files.join(", ") }), el("span", { class: "muted", text: ` · ${cf.b} 머지 때 rebase 충돌할 수 있어요` }), trust("git"))
+    : el("div", { class: "conflict", role: "note" }, "⚡ ", el("b", { text: `${cf.a} ↔ ${cf.b}` }), " 같은 파일을 고치는 중: ", el("code", { text: cf.files.join(", ") }), el("span", { class: "muted", text: " · 늦게 끝나는 쪽이 충돌할 수 있어요" }), trust("git"));
   for (const lane of lanes) {
     const c = cardOf(lane.key);
     const track = el("div", { class: "track" });
@@ -483,8 +486,7 @@ function renderLanes() {
     box.append(el("div", { class: "lane", role: "button", tabindex: 0, onclick: () => openDrawer(lane.key), onkeydown: (e) => e.key === "Enter" && openDrawer(lane.key) },
       el("div", { class: "who" }, bolt(lane.status, 26), el("span", { class: "mono", text: c ? c.id : lane.key })),
       track, el("div", { class: "meta", text: c && c.time ? `${mins(c.time.active_s)} / ${mins(c.time.cap_s)}분` : "" })));
-    const cf = conflictAfter.get(lane.key);
-    if (cf) box.append(el("div", { class: "conflict", role: "note" }, "⚡ ", el("b", { text: `${cf.a} ↔ ${cf.b}` }), " 같은 파일을 고치는 중: ", el("code", { text: cf.files.join(", ") }), el("span", { class: "muted", text: " · 늦게 끝나는 쪽이 충돌할 수 있어요" }), trust("git")));
+    for (const cf of (snap.conflicts || []).filter((x) => x.b === lane.key)) box.append(conflictNote(cf));
   }
   box.append(el("div", { class: "lanes-foot" }, el("span", { text: "점선 = 사람을 기다리는 시간" }), el("span", { text: "▶ = 지금 진행 중" }), el("span", {}, "구간은 상태 이력 기준 ", trust("session"))));
 }
