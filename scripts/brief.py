@@ -61,6 +61,7 @@ def _approval(collector: Collector, ref: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "approval",
         "id": ref["id"],
+        "key": ref["key"],
         "title": f"{ref['id']} 승인 대기 (위험 {job.get('risk')})",
         "requirement": job.get("requirement") or "",
         "lines": [
@@ -84,6 +85,7 @@ def _blocked(collector: Collector, ref: dict[str, Any]) -> dict[str, Any]:
     return {
         "kind": "blocked",
         "id": ref["id"],
+        "key": ref["key"],
         "title": f"{ref['id']} BLOCKED ({reason})",
         "requirement": job.get("requirement") or "",
         "lines": [str(blocked.get("detail") or "진단 없음")],
@@ -93,8 +95,9 @@ def _blocked(collector: Collector, ref: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect(root: Path, jobs_dir: Path) -> dict[str, Any]:
-    collector = Collector(root, jobs_dir)
+def collect(root: Path, jobs_dir: Path, collector: Collector | None = None) -> dict[str, Any]:
+    """목록과 종류별 건수. 대시보드는 자기 로더(collector)를 넘겨 파일을 다시 읽지 않는다."""
+    collector = collector or Collector(root, jobs_dir)
     refs = collector.refs()
     with_job = [r for r in refs if r.get("job")]
 

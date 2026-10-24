@@ -233,6 +233,17 @@ def test_snapshot_shape(world: dict[str, Path]) -> None:
     assert kinds[0] == "APPROVAL_REQUIRED" and "SETUP_FAILED" in kinds
 
 
+def test_snapshot_carries_the_brief_for_attention_cards(world: dict[str, Path]) -> None:
+    # 화면의 "나를 기다리는 일"은 brief.py와 같은 목록이다 (기획안 6.9 P2)
+    snap = collector(world).snapshot()
+    brief = snap["brief"]
+    assert brief["counts"]["approval"] == 1
+    approval = brief["by_key"]["J002"]
+    assert "위험 근거: MEDIUM: DB 스키마 변경 (repository.py)" in approval["lines"]
+    assert any(line.startswith("가정") for line in approval["lines"])
+    assert brief["extra"] == []  # push 대기는 원격 추적 브랜치가 있을 때만
+
+
 def test_snapshot_warns_on_unknown_status(world: dict[str, Path]) -> None:
     write_json(world["jobs"] / "J009" / "factory" / "state.json",
                {"jobs": {"J009": state_job("J009", "WEIRD_STATE")}})  # fmt: skip

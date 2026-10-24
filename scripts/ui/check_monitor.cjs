@@ -50,6 +50,12 @@ async function startServer(jobs) {
     page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
     page.on("pageerror", (e) => errors.push(String(e)));
     page.on("dialog", async (d) => { dialogs += 1; await d.dismiss(); });
+    // 브라우저 알림은 기록만 하는 가짜로 바꾼다 (권한은 허용된 상태)
+    await page.addInitScript(() => {
+      window.__notes = [];
+      window.Notification = class { constructor(title, opts) { window.__notes.push([title, opts && opts.body]); }
+        static get permission() { return "granted"; } static requestPermission() { return Promise.resolve("granted"); } };
+    });
     await page.goto(url);
     await page.waitForSelector(".card[data-key='J002']", { timeout: 10000 });
 
@@ -62,6 +68,25 @@ async function startServer(jobs) {
     if (attention < 2) fail(`주의 줄 ${attention}건 (승인 대기·막힘·오류)`);
     if (!(await page.locator("#attention").textContent()).includes("dispatch.py --approve J002")) fail("승인 명령이 없음");
     if ((await page.locator("#top").textContent()).includes("null")) fail("윗줄에 'null' 글자");
+    // 브리핑: 승인 대기 카드의 "판단할 것", BLOCKED 카드의 추천 처리 (기획안 6.9 P2)
+    await page.waitForFunction(() => document.querySelector("#attention .judge"), null, { timeout: 10000 }).catch(() => {});
+    const attText = await page.locator("#attention").textContent();
+    if (!attText.includes("가정: 공백 본문은 빈 본문으로 보지 않는다")) fail("승인 대기 카드에 가정이 없음");
+    if (!attText.includes("[security] 토큰 비교가 상수 시간이 아니다 <b>굵게</b>")) fail("리뷰어 의견이 글자로 보이지 않음");
+    if (await page.locator("#attention .judge b").count()) fail("리뷰어 의견이 HTML로 들어감");
+    if (!attText.includes("추천:") || !attText.includes("직접")) fail("BLOCKED 카드에 추천 처리가 없음");
+    // 알림: 처음 불러올 때는 알리지 않고, 켠 뒤 새로 생긴 항목만 알린다
+    if ((await page.evaluate(() => window.__notes.length)) !== 0) fail("처음 불러올 때 알림이 감");
+    await page.click("#notify-btn");
+    if (!(await page.locator("#notify-btn").textContent()).includes("켜짐")) fail("알림 버튼이 켜짐으로 바뀌지 않음");
+    const j006 = { id: "J006", status: "BLOCKED", requirement: "새로 막힌 작업", risk: "LOW",
+      history: [{ status: "BLOCKED", at: Date.now() / 1000 }], time: { active_s: 60, cap_s: 900, extended: false },
+      blocked: { reason: "TIMEOUT", detail: "15분 상한" } };
+    fs.mkdirSync(path.join(jobs, "J006", "factory"), { recursive: true });
+    fs.writeFileSync(path.join(jobs, "J006", "factory", "state.json"), JSON.stringify({ jobs: { J006: j006 } }));
+    await page.waitForFunction(() => window.__notes.length > 0, null, { timeout: 15000 }).catch(() => {});
+    const notes = await page.evaluate(() => window.__notes);
+    if (notes.length !== 1 || !String(notes[0][1]).includes("J006")) fail(`새 항목 알림이 한 번 가지 않음 (${JSON.stringify(notes)})`);
     await page.waitForFunction(() => document.querySelector("#lanes") && document.querySelector("#lanes").textContent.includes("먼저 머지됨"), null, { timeout: 10000 }).catch(() => {});
     const lanesText = await page.locator("#lanes").textContent();
     if (!lanesText.includes("J001 (먼저 머지됨) → J005") || !lanesText.includes("List.tsx")) fail("머지 후 ⚡ 예고(J001 → J005)가 없음");
