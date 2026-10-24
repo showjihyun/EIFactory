@@ -117,7 +117,18 @@ def _frontmatter_model(root: Path) -> str | None:
 def check_subagent(
     root: Path, tool: str, tool_input: dict[str, Any], job: dict[str, Any] | None
 ) -> None:
-    """Builder는 factory.py가 정한 모델로만 띄운다 (실패 누적 시 승격, 기획안 6.6)."""
+    """Builder는 factory.py가 정한 모델로만 띄운다 (실패 누적 시 승격, 기획안 6.6).
+
+    Builder는 앞에서(foreground) 실행한다. 백그라운드로 띄우면 끝나기 전에 verify가 돌아
+    시도 1회를 버리거나(Haiku), headless 세션이 Builder를 기다리지 못하고 끝난다(Sonnet).
+    Claude Code 2.1.310은 run_in_background를 생략해도 백그라운드로 띄우므로 false를 명시하게 한다.
+    """
+    is_builder = tool in {"Agent", "Task"} and tool_input.get("subagent_type") == "builder"
+    if is_builder and tool_input.get("run_in_background") is not False:
+        deny(
+            "Builder는 앞에서 실행합니다: run_in_background: false를 넣어 다시 호출하세요. "
+            "Builder가 끝나 결과를 돌려준 뒤 verify를 실행하세요."
+        )
     required = job.get("builder_model") if job else None
     if not required:
         return

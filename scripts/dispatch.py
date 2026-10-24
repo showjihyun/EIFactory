@@ -782,6 +782,11 @@ def _session(
         elif cost is not None and cost >= session_cap:
             reason = "BUDGET"
             detail = f"세션 비용 ${cost:.2f}가 상한 ${session_cap:.2f}에 닿아 세션이 멈춤"
+        elif not needs_continue(job):
+            # 진행 중으로 남겨 두면 대시보드에서 계속 도는 것처럼 보인다 (Builder를 백그라운드로
+            # 띄우고 기다리지 못한 세션, 2026-10-24 Sonnet 함정 과제 실험)
+            reason = "SESSION_ENDED"
+            detail = f"세션이 끝났는데 작업이 {job['status']}에 남음 (exit {out['exit_code']})"
         if reason and detail:
             _factory(root, worktree, "block", job_id, "--reason", reason, "--detail", detail)
             job = _load_job(worktree, job_id)

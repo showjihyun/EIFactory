@@ -916,24 +916,39 @@ def key_is_set(name: str) -> bool:
     return bool(KEY_STORE.is_set(name) or os.environ.get(name))
 
 
-def api_key_view(token: str) -> dict[str, Any]:
-    """키가 있는지만 보인다 (값은 일부도 내보내지 않는다)."""
+# 입력 코드: 서버를 띄운 터미널에만 보인다. HTTP로는 내보내지 않아 같은 PC의 다른 프로세스가
+# 화면처럼 요청을 만들어도 키를 바꿀 수 없다. 틀린 코드가 이만큼 쌓이면 다시 켤 때까지 잠근다
+KEY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+KEY_CODE_MAX_FAILS = 5
+
+
+def new_key_code() -> str:
+    raw = "".join(secrets.choice(KEY_CODE_ALPHABET) for _ in range(10))
+    return f"{raw[:5]}-{raw[5:]}"
+
+
+def _normal_code(code: str) -> str:
+    return code.replace("-", "").replace(" ", "").upper()
+
+
+def api_key_view() -> dict[str, Any]:
+    """키가 있는지만 보인다 (값은 일부도 내보내지 않는다). 입력 코드는 터미널에서 받는다."""
     return {
-        "token": token,
+        "needs_code": True,
         "where": "Windows 사용자 환경변수" if sys.platform == "win32" else None,
         "keys": {name: {"set": key_is_set(name)} for name in API_KEY_PREFIX},
         "note": API_KEY_NOTE,
     }
 
 
-def settings_view(root: Path, token: str = "") -> dict[str, Any]:
+def settings_view(root: Path) -> dict[str, Any]:
     """설정 패널: 단계별 모델·인증, 비용 상한, 자동 규칙 (읽기 전용) + API 키 입력."""
     try:
         cfg = load_config(root)
     except ConfigError as error:
-        return {"error": str(error), "api_key_input": api_key_view(token)}
+        return {"error": str(error), "api_key_input": api_key_view()}
     return {
-        "api_key_input": api_key_view(token),
+        "api_key_input": api_key_view(),
         "stages": cfg.stages,
         "budgets": cfg.budgets,
         "auto_rules": AUTO_RULES,
@@ -952,7 +967,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     collector: Collector
     root: Path
-    token: str = ""
+    key_code: str = ""
+    key_fails: list[int]  # 서버 하나에서 공유 (make_server)
     server_version = "factory-monitor"
     sys_version = ""
 
@@ -1032,7 +1048,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._error(404, "없는 그림")
         elif name == "settings":
-            self._json(settings_view(self.root, self.token))
+            self._json(settings_view(self.root))
         elif name == "detail":
             detail = self.collector.detail(groups[0])
             if detail is None:
@@ -1075,7 +1091,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _method_not_allowed  # noqa: N815
 
     def do_POST(self) -> None:  # noqa: N802
-        """API 키 입력만 받는다. 같은 출처 + 이 서버가 만든 토큰 + JSON 본문."""
+        """API 키 입력만 받는다. 같은 출처 + 터미널에 보인 입력 코드 + JSON 본문."""
         if urllib.parse.urlsplit(self.path).path != "/api/settings/api-key":
             self._method_not_allowed()
             return
@@ -1083,9 +1099,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         port = self.server.server_port  # type: ignore[attr-defined]
         origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
-        sent = self.headers.get("X-Factory-Token") or ""
-        if self.headers.get("Origin") not in origins or not hmac.compare_digest(sent, self.token):
+        if self.headers.get("Origin") not in origins:
             self._error(403, "이 화면에서 보낸 요청만 받습니다")
+            return
+        if self.key_fails[0] >= KEY_CODE_MAX_FAILS:
+            self._error(
+                429, "입력 코드가 여러 번 틀려 잠갔습니다. 대시보드를 다시 켜면 새 코드가 나옵니다"
+            )
+            return
+        sent = _normal_code(self.headers.get("X-Factory-Token") or "")
+        if not hmac.compare_digest(sent.encode(), _normal_code(self.key_code).encode()):
+            self.key_fails[0] += 1
+            self._error(403, "입력 코드가 맞지 않습니다 (대시보드를 띄운 터미널에 보입니다)")
             return
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             self._error(415, "JSON만 받습니다")
@@ -1132,11 +1157,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def make_server(root: Path, jobs_dir: Path, port: int = 8765) -> http.server.ThreadingHTTPServer:
     """127.0.0.1에만 연다 (바꾸는 옵션 없음). 포트가 쓰이면 다음 포트를 2개까지 시도."""
     collector = Collector(root, jobs_dir)
-    # API 키 입력 요청의 토큰. 서버를 띄울 때마다 새로 만든다 (화면이 /api/settings로 받음)
-    token = secrets.token_urlsafe(32)
-    handler = type(
-        "BoundHandler", (Handler,), {"collector": collector, "root": root, "token": token}
-    )
+    # API 키 입력 코드. 서버를 띄울 때마다 새로 만들고 터미널에만 출력한다 (main)
+    attrs = {"collector": collector, "root": root, "key_code": new_key_code(), "key_fails": [0]}
+    handler = type("BoundHandler", (Handler,), attrs)
     last: OSError | None = None
     for candidate in [port] if port == 0 else [port, port + 1, port + 2]:
         try:
@@ -1157,6 +1180,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     server = make_server(root, args.jobs_dir, args.port)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"팩토리 대시보드: {url} (읽기 전용, Ctrl+C로 끝)", flush=True)
+    code = server.RequestHandlerClass.key_code  # type: ignore[attr-defined]
+    print(f"API 키 입력 코드: {code} (⚙ 설정 → 🔑 API 키에 붙여 넣기, 다시 켜면 바뀜)", flush=True)
     if not args.no_open:
         webbrowser.open(url)
     try:

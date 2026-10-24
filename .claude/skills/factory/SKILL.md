@@ -17,6 +17,7 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
   수락 테스트: <acceptance_tests 목록>
   (재시도라면) factory.py가 출력한 실패 내용: <원문 그대로>
   ```
+- Builder는 **앞에서(foreground) 실행한다**: 호출에 `run_in_background: false`를 꼭 넣는다 (생략하면 백그라운드로 떠서 hook이 막는다). Builder가 끝나 결과를 돌려준 뒤에 `verify`를 실행한다.
 - 리뷰어(code / security / test 3명)는 `python scripts/factory.py validate <ID>`가 별도 프로세스로 실행한다. 직접 리뷰하지 않는다.
 
 ## 명령 실행 형태

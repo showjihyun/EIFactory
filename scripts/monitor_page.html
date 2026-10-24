@@ -247,6 +247,7 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
 .stagerow .why { color: var(--muted); font-size: 11.5px; }
 .keyrow { display: grid; grid-template-columns: minmax(0, 150px) auto minmax(0, 1fr) auto auto; gap: 6px; align-items: center; font-size: 12px; padding: 4px 0; border-bottom: 1px dotted var(--border); }
 .keyrow code { overflow: hidden; text-overflow: ellipsis; }
+.keyrow.coderow { grid-template-columns: minmax(0, 150px) minmax(0, 180px) 1fr; }
 .keyin { min-width: 0; width: 100%; font: inherit; font-family: var(--mono); padding: 3px 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg, inherit); }
 @media (max-width: 520px) { .keyrow { grid-template-columns: 1fr auto; } .keyrow .keyin { grid-column: 1 / -1; } }
 
@@ -689,14 +690,18 @@ function apiKeySection(info) {
     return box;
   }
   const msg = el("div", { class: "small muted", role: "status", "aria-live": "polite" });
+  // 입력 코드는 대시보드를 띄운 터미널에만 보인다 (화면·API로는 받을 수 없음)
+  const code = el("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "ABCDE-FGHJK", "aria-label": "입력 코드 (터미널에 보임)", class: "keyin codein" });
+  const codeRow = el("div", { class: "keyrow coderow" }, el("span", { text: "입력 코드" }), code, el("span", { class: "small muted", text: "monitor.py를 띄운 터미널에 보여요" }));
   const rows = Object.entries(info.keys).map(([name, k]) => {
     const state = el("span", { class: `badge ${k.set ? "r-LOW" : "r-NONE"}`, text: k.set ? "설정됨" : "없음" });
     const input = el("input", { type: "password", autocomplete: "off", spellcheck: "false", placeholder: name === "ANTHROPIC_API_KEY" ? "sk-ant-…" : "sk-…", "aria-label": `${name} 값`, class: "keyin" });
     const send = async (value) => {
+      if (!code.value.trim()) { msg.textContent = "먼저 입력 코드를 넣어 주세요 (대시보드를 띄운 터미널에 보여요)."; code.focus(); return; }
       msg.textContent = "저장 중…";
       try {
         const r = await fetch("/api/settings/api-key", { method: "POST", cache: "no-store",
-          headers: { "Content-Type": "application/json", "X-Factory-Token": info.token },
+          headers: { "Content-Type": "application/json", "X-Factory-Token": code.value.trim() },
           body: JSON.stringify({ name, value }) });
         const res = await r.json().catch(() => ({}));
         if (!r.ok) { msg.textContent = res.error || `저장하지 못했어요 (${r.status})`; return; }
@@ -710,7 +715,7 @@ function apiKeySection(info) {
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && input.value) send(input.value.trim()); });
     return el("div", { class: "keyrow" }, el("code", { text: name }), state, input, save, clear);
   });
-  box.append(...rows, msg, el("div", { class: "small muted", style: "margin-top:6px", text: `저장 위치: ${info.where}. ${info.note}` }));
+  box.append(codeRow, ...rows, msg, el("div", { class: "small muted", style: "margin-top:6px", text: `저장 위치: ${info.where}. ${info.note}` }));
   return box;
 }
 function closeDrawer() { $("drawer").classList.remove("open"); $("scrim").classList.remove("on"); S.open = null; document.querySelectorAll(".card.sel").forEach((n) => n.classList.remove("sel")); }
