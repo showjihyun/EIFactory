@@ -303,6 +303,24 @@ python scripts/factory_kit.py upgrade <대상 레포> --engine factory-vN [--yes
 - 대상 레포는 **검증 계약** 세 스크립트(`scripts/verify.py`, `scripts/check_red.py --json`, `scripts/check_style.py`)를 직접 만든다. 형식은 `factory/templates/AGENTS.md`.
 - 컨테이너 격리를 쓰려면 대상 레포에 `.devcontainer/Dockerfile`(Claude Code·Codex CLI 포함 이미지)도 필요하다.
 
+## 브리핑과 알림 (`scripts/brief.py`, factory-v2)
+
+사람에게 오는 단일 목록 "나를 기다리는 일"이다. 모델이 요약하지 않고, 대시보드와 같은 로더·명령 규칙을 쓴다.
+
+```
+python scripts/brief.py            # 목록 (승인 대기 → BLOCKED → push 대기 → 경고)
+python scripts/brief.py --counts   # 상태줄용 한 줄: 승인 1 · BLOCKED 1 · push 1
+python scripts/brief.py --json
+```
+
+- 승인 대기에는 **판단할 것**이 붙는다: spec의 `assumptions`, 리뷰어의 `notes_for_human`, 리뷰어의 등급 상향(`risk_up`), 위험 근거, 화면 스크린샷. 승인 요약(`<ID>-approval.md`)의 "판단할 것" 절과 같다.
+- BLOCKED에는 사유 코드별 추천 처리가 붙는다 (예: `TIMEOUT`이면 `resume --extend`, 연장을 이미 썼으면 split·drop). 고르는 것은 사람이다.
+- 작업 상태 파일 값은 "세션 값"으로 표시한다 (세션이 쓸 수 있는 데이터).
+- 대시보드의 "나를 기다리는 일"도 같은 목록이다. "🔔 알림 켜기"를 누르면 새 항목이 생길 때 브라우저 알림을 띄운다 (처음 불러올 때는 알리지 않는다).
+- dispatch가 끝나면 결과 요약을 Windows 알림으로 띄운다. `factory/config.json`의 `"notify": {"toast": false}`로 끈다.
+- 사용자 흐름 테스트가 남긴 스크린샷은 `factory/config.json`의 `"screenshots"`(레포 기준 glob, 예: `["frontend/test-results/**/*.png"]`)로 모아 승인 요약·브리핑에 붙인다. Playwright 설정에 `screenshot: "on"`이 있어야 파일이 생긴다.
+- 상위 세션(사람과 대화하는 Claude Code)에 붙이는 SessionStart hook·상태줄 예시: `factory/templates/upper-session.example.json`. 사용자 설정이라 사람이 넣는다.
+
 ## 운영 기록 (`factory/learnings.md`)
 
 평가·실전 실행에서 배운 점과 규칙 개선 후보를 적는다. 에이전트는 개선 후보를 보고에 제안만 하고, 이 파일과 정책·절차 파일은 사람이 고친다.

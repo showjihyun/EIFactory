@@ -145,6 +145,24 @@ def test_invalid_budgets(tmp_path: Path, budgets: dict[str, object]) -> None:
         factory_config.load_config(tmp_path)
 
 
+# ---------- 화면 스크린샷 (screenshots, 기획안 11장 시각 검증 1단계) ----------
+
+
+def test_screenshots_default_empty(tmp_path: Path) -> None:
+    assert factory_config.load_config(tmp_path).screenshots == []
+
+
+def test_sample_repo_collects_playwright_screenshots() -> None:
+    assert factory_config.load_config(REPO).screenshots == ["frontend/test-results/**/*.png"]
+
+
+@pytest.mark.parametrize("screenshots", ["frontend/*.png", [1], ["../outside/*.png"]])
+def test_invalid_screenshots(tmp_path: Path, screenshots: object) -> None:
+    write(tmp_path, {"screenshots": screenshots})
+    with pytest.raises(factory_config.ConfigError):
+        factory_config.load_config(tmp_path)
+
+
 # ---------- 알림 (notify, 기획안 6.9 P2) ----------
 
 

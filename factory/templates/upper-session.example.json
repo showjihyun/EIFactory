@@ -1,0 +1,13 @@
+{
+  "_설명": "사람과 대화하는 상위 세션(예: 작업 공간 sw-factory)의 Claude Code 설정 예시 (기획안 6.9 P2). 대상 레포의 설정이 아니다. <레포>를 제품 레포 경로로 바꿔 사용자 설정(~/.claude/settings.json) 또는 작업 공간 .claude/settings.local.json에 사람이 넣는다. SessionStart hook의 출력은 세션 문맥에 들어가 상위 세션이 '나를 기다리는 일'을 알고 시작한다. 상태줄은 대기 건수를 한 줄로 보여 준다 (없으면 빈 줄).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {"type": "command", "command": "python <레포>/scripts/brief.py", "timeout": 30}
+        ]
+      }
+    ]
+  },
+  "statusLine": {"type": "command", "command": "python <레포>/scripts/brief.py --counts"}
+}

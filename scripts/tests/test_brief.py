@@ -82,6 +82,19 @@ def test_approval_comes_first_with_judgement_and_commands(root: Path) -> None:
     assert approval["trust"] == "session"
 
 
+def test_approval_shows_screenshots_of_the_job_worktree(root: Path) -> None:
+    (root / "factory").mkdir()
+    (root / "factory" / "config.json").write_text(
+        json.dumps({"screenshots": ["frontend/test-results/**/*.png"]}), encoding="utf-8"
+    )
+    add_job(root, "J001", "APPROVAL_REQUIRED")
+    shot = root.parent / "repo.jobs" / "J001" / "frontend/test-results/a/test-finished-1.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"\x89PNG")
+    lines = collect(root)["items"][0]["lines"]
+    assert any("스크린샷" in line and "test-finished-1.png" in line for line in lines)
+
+
 def test_high_risk_approval_before_medium(root: Path) -> None:
     add_job(root, "J001", "APPROVAL_REQUIRED", risk="MEDIUM", at=1.0)
     add_job(root, "J002", "APPROVAL_REQUIRED", risk="HIGH", at=2.0)

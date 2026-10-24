@@ -49,6 +49,7 @@
       "example": "frontend/e2e/<name>.{id}.accept.e2e.ts"
     }
   ],
+  "screenshots": ["frontend/test-results/**/*.png"],
   "setup": [
     ["backend", ["uv", "sync", "-q"]],
     ["frontend", ["npm", "ci", "--no-audit", "--no-fund", "--loglevel=error"]]

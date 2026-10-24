@@ -20,7 +20,8 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   reporter: "list",
   // 없는 화면 요소를 누르면 테스트 상한(30초)까지 기다리지 않고 5초 뒤 실패한다 (Red 판정이 빠르도록)
-  use: { baseURL: `http://127.0.0.1:${webPort}`, actionTimeout: 5_000, trace: "off" },
+  // 화면 작업은 승인 요약에 스크린샷을 붙인다 (factory/config.json의 screenshots)
+  use: { baseURL: `http://127.0.0.1:${webPort}`, actionTimeout: 5_000, trace: "off", screenshot: "on" },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
     {

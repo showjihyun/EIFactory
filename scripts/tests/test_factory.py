@@ -1437,6 +1437,27 @@ def test_reviewer_cannot_lower_or_garble_the_risk(h: Harness, to: str | None) ->
     assert h.job()["status"] == "APPROVED"
 
 
+def test_approval_brief_lists_screenshots_from_user_flow_tests(h: Harness) -> None:
+    # 화면 작업은 사람이 스크린샷을 바로 볼 수 있게 한다 (시각 검증 1단계)
+    h.to_building()
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    shot = h.repo / "frontend/test-results/list-empty/test-finished-1.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"\x89PNG")
+    assert h.run("verify", "J001") == 0
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=PASS)
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    section = brief.split("## 화면 스크린샷")[1].split("## ")[0]
+    assert "frontend/test-results/list-empty/test-finished-1.png" in section
+
+
+def test_approval_brief_says_when_no_screenshot_was_taken(h: Harness) -> None:
+    to_validated(h, path="backend/src/bookmarks/auth.py", text="TOKENS = {}\n")
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    assert "스크린샷 없음" in brief.split("## 화면 스크린샷")[1]
+
+
 def test_approval_brief_shows_reviewer_notes_and_risk_up(h: Harness) -> None:
     h.to_building(assumptions=["만료된 토큰은 401"])
     (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")

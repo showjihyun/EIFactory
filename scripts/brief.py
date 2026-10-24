@@ -23,7 +23,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from factory import judgement_lines  # noqa: E402
+from factory import judgement_lines, screenshot_paths  # noqa: E402
+from factory_config import ConfigError, load_config  # noqa: E402
 from monitor import Collector  # noqa: E402
 from proc import use_utf8_output  # noqa: E402
 
@@ -56,6 +57,17 @@ def push_waiting(root: Path) -> int:
     return int(ahead) if ahead and ahead.isdigit() else 0
 
 
+def _screenshots(root: Path, ref: dict[str, Any]) -> list[str]:
+    worktree = ref.get("worktree")
+    if not worktree:
+        return []
+    try:
+        patterns = load_config(root).screenshots
+    except ConfigError:
+        return []
+    return [f"스크린샷: {Path(worktree) / s}" for s in screenshot_paths(Path(worktree), patterns)]
+
+
 def _approval(collector: Collector, ref: dict[str, Any]) -> dict[str, Any]:
     job = ref["job"]
     return {
@@ -67,6 +79,7 @@ def _approval(collector: Collector, ref: dict[str, Any]) -> dict[str, Any]:
         "lines": [
             *(f"위험 근거: {r}" for r in job.get("risk_reasons") or []),
             *(line.removeprefix("- ") for line in judgement_lines(job)),
+            *_screenshots(collector.root, ref),
         ],  # fmt: skip
         "commands": collector.next_commands(ref),
         "trust": "session",

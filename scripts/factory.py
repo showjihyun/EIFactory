@@ -1258,6 +1258,25 @@ def judgement_lines(job: Job) -> list[str]:
     return lines
 
 
+def screenshot_paths(root: Path, patterns: list[str], limit: int = 10) -> list[str]:
+    """사용자 흐름 테스트가 남긴 스크린샷 (레포 기준 경로, 최대 limit개)."""
+    found = {
+        path.relative_to(root).as_posix()
+        for pattern in patterns
+        for path in root.glob(pattern)
+        if path.is_file()
+    }
+    return sorted(found)[:limit]
+
+
+def _screenshot_lines(root: Path, cfg: Config) -> list[str]:
+    if not cfg.screenshots:
+        return []
+    shots = screenshot_paths(root, cfg.screenshots)
+    body = [f"- {s}" for s in shots] or ["- 스크린샷 없음 (사용자 흐름 테스트가 남긴 파일이 없음)"]
+    return ["## 화면 스크린샷", *body, ""]
+
+
 def write_approval_brief(root: Path, job: Job) -> str:
     """사람 승인용 요약 (Approver). 승인 여부는 사람이 정한다."""
     _, files = _diff(root, job["base_commit"])
@@ -1279,6 +1298,7 @@ def write_approval_brief(root: Path, job: Job) -> str:
         "## 바뀐 파일",
         *[f"- {path} (+{len(a)} -{len(d)})" for path, (a, d) in sorted(files.items())],
         "",
+        *_screenshot_lines(root, _config(root)),
         "## 사람의 다음 명령",
         "dispatch로 만든 작업은 기본 checkout에서 실행한다 (작업 worktree의 scripts/와 상태 "
         "파일은 세션이 바꿀 수 있다):",
