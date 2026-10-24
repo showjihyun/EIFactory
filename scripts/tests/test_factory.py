@@ -59,7 +59,10 @@ if kind == "verify":
     sys.exit(result["exit"])
 if kind == "validator":
     usage = {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 20}
-    envelope = {"type": "result", "result": take("validator"), "total_cost_usd": 0.01}
+    answer = take("validator")
+    envelope = {"type": "result", "result": answer, "total_cost_usd": 0.01}
+    if answer.startswith("STRUCTURED:"):  # claude -p --json-schema: 판정은 structured_output에
+        envelope.update(result="설명만 있는 응답", structured_output=json.loads(answer[11:]))
     print(json.dumps({**envelope, "usage": usage}))
 """
 
@@ -1374,6 +1377,82 @@ def test_approval_brief_says_when_there_is_nothing_to_judge(h: Harness) -> None:
     brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
     assert "## 판단할 것" in brief
     assert "가정 없음" in brief.split("## 판단할 것")[1]
+
+
+def verdict(**fields: Any) -> str:
+    return json.dumps({"verdict": "PASS", "issues": [], **fields}, ensure_ascii=False)
+
+
+def test_claude_reviewer_is_asked_for_the_verdict_schema() -> None:
+    cmd = factory.reviewer_command("claude", Path("last.txt"))
+    schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+    assert set(schema["required"]) == {"verdict", "issues", "notes_for_human", "risk_up"}
+    assert "--json-schema" not in factory.reviewer_command("codex", Path("last.txt"))
+
+
+def test_structured_verdict_is_used_when_text_has_no_json(h: Harness) -> None:
+    to_verifying(h)
+    answer = "STRUCTURED:" + verdict(notes_for_human=["입력 길이 제한이 없다"], risk_up=None)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=answer)
+    assert h.run("validate", "J001") == 0
+    review = h.job()["reviews"][-1]
+    assert review["verdict"] == "PASS"
+    assert review["notes_for_human"] == ["입력 길이 제한이 없다"]
+
+
+def test_verdict_with_nested_risk_up_object_is_read_from_text(h: Harness) -> None:
+    # Codex처럼 텍스트로만 답해도 중첩 객체가 있는 판정을 읽는다
+    to_verifying(h)
+    text = "설명\n" + verdict(notes_for_human=[], risk_up={"to": "MEDIUM", "reason": "API 추가"})
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=text)
+    assert h.run("validate", "J001") == 0
+    assert h.job()["status"] == "APPROVAL_REQUIRED"
+
+
+def test_reviewer_risk_up_sends_auto_merge_to_human_approval(h: Harness) -> None:
+    # 등급 상향 제안은 받아들이되 낮추지는 못한다 (H4, 기획안 8.2)
+    to_verifying(h)
+    assert h.job()["risk"] == "LOW"
+    up = verdict(risk_up={"to": "MEDIUM", "reason": "공개 API 응답 형식이 바뀜"})
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": up, "test": PASS},
+    )
+    assert h.run("validate", "J001") == 0
+    job = h.job()
+    assert job["status"] == "APPROVAL_REQUIRED"
+    assert job["risk"] == "MEDIUM"
+    assert any("리뷰어 security" in r and "공개 API" in r for r in job["risk_reasons"])
+
+
+@pytest.mark.parametrize("to", ["LOW", "NONE", None])
+def test_reviewer_cannot_lower_or_garble_the_risk(h: Harness, to: str | None) -> None:
+    to_verifying(h)
+    answer = verdict(risk_up={"to": to, "reason": "낮춰도 된다"})
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator=answer)
+    assert h.run("validate", "J001") == 0
+    assert h.job()["risk"] == "LOW"
+    assert h.job()["status"] == "APPROVED"
+
+
+def test_approval_brief_shows_reviewer_notes_and_risk_up(h: Harness) -> None:
+    h.to_building(assumptions=["만료된 토큰은 401"])
+    (h.repo / "backend/src/bookmarks/auth.py").write_text("TOKENS = {}\n", encoding="utf-8")
+    assert h.run("verify", "J001") == 0
+    noted = verdict(notes_for_human=["토큰 비교가 상수 시간이 아니다"])
+    h.configure(
+        red=RED_OK,
+        green=GREEN_OK,
+        verify=VERIFY_OK,
+        validator={"code": PASS, "security": noted, "test": PASS},
+    )
+    assert h.run("validate", "J001") == 0
+    brief = (h.repo / h.job()["approval_brief"]).read_text(encoding="utf-8")
+    judge = brief.split("## 판단할 것")[1].split("## ")[0]
+    assert "가정: 만료된 토큰은 401" in judge
+    assert "[security] 토큰 비교가 상수 시간이 아니다" in judge
 
 
 def test_builder_model_is_promoted_after_two_failures(

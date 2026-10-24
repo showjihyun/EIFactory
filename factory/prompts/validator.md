@@ -8,8 +8,12 @@
 - 승인 여부는 네가 정하지 않는다. 리뷰어가 모두 PASS여도 위험 등급이 LOW가 아니면 사람이 승인한다.
 
 ## 출력
-설명은 짧게 쓰고, **마지막 줄에 JSON 한 줄로만** 판정한다.
+설명은 짧게 쓰고, **마지막 줄에 JSON 한 줄로만** 판정한다. 네 필드를 모두 넣는다.
 
-{"verdict": "PASS", "issues": []}
+{"verdict": "PASS", "issues": [], "notes_for_human": [], "risk_up": null}
 또는
-{"verdict": "FAIL", "issues": ["구체적인 문제 1", "구체적인 문제 2"]}
+{"verdict": "FAIL", "issues": ["구체적인 문제 1", "구체적인 문제 2"], "notes_for_human": [], "risk_up": null}
+
+- `issues`: FAIL 사유. 고치지 않으면 머지하면 안 되는 문제만 적는다.
+- `notes_for_human`: PASS여도 승인하는 사람이 알아야 할 점 (예: 요구사항이 정하지 않은 동작을 구현이 정한 곳, 운영에서 주의할 점). 사소한 스타일 의견은 적지 않는다. 없으면 [].
+- `risk_up`: 선언된 위험 등급이 실제 변경보다 낮다고 보면 `{"to": "MEDIUM" 또는 "HIGH", "reason": "근거"}`. 등급을 올리기만 하고 낮출 수는 없다. 그 밖에는 null.
