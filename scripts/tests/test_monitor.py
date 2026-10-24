@@ -275,6 +275,29 @@ def test_usage_reprices_when_another_session_finishes(world: dict[str, Path]) ->
     assert col.usage(ref)["total"]["usd"] is not None
 
 
+def test_usage_adds_continued_sessions(world: dict[str, Path]) -> None:
+    # 충돌을 풀러 이어서 처리한 세션(<ID>.r2.jsonl)도 그 작업의 비용이다
+    def result(usd: float) -> str:
+        return json.dumps({"type": "result", "total_cost_usd": usd,
+                           "modelUsage": {OPUS: {"inputTokens": 100, "outputTokens": 10,
+                                                 "cacheReadInputTokens": 0,
+                                                 "cacheCreationInputTokens": 0,
+                                                 "costUSD": usd}}}) + "\n"  # fmt: skip
+
+    logs = world["jobs"] / "logs"
+    (logs / "J001.jsonl").write_text(result(0.5), encoding="utf-8")
+    (logs / "J001.r2.jsonl").write_text(result(0.25), encoding="utf-8")
+    col = collector(world)
+    ref = next(r for r in col.refs() if r["key"] == "J001")
+    usage = col.usage(ref)
+    assert usage is not None
+    assert usage["total"]["usd"] == pytest.approx(0.75)
+    assert usage["total"]["in"] == 200
+    assert usage["estimated"] is False
+    # 이어서 처리한 로그는 다른 작업으로 보이지 않는다
+    assert "J001.r2" not in {r["key"] for r in col.refs()}
+
+
 def test_snapshot_counts_unpriced_jobs(world: dict[str, Path]) -> None:
     # 확정 세션 로그가 없으면 단가가 없다. 진행 중 J001은 토큰만 있고 비용은 "모름"
     snap = collector(world).snapshot()
@@ -462,6 +485,116 @@ def test_server_routes_and_security_headers(server: Any) -> None:
     assert req(server, "/")[0] == 200
     settings = json.loads(req(server, "/api/settings")[2])
     assert "reviewer_test" in settings["stages"] and "job_total" in settings["budgets"]
+
+
+# ---------- API 키 입력 (설정 화면, 쓰기는 이것 하나) ----------
+
+FAKE_KEY = "sk-ant-api03-" + "A1b2C3d4" * 10
+
+
+class FakeKeyStore:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def is_set(self, name: str) -> bool:
+        return name in self.values
+
+    def save(self, name: str, value: str) -> None:
+        self.values[name] = value
+
+    def delete(self, name: str) -> None:
+        self.values.pop(name, None)
+
+
+@pytest.fixture
+def keys(monkeypatch: pytest.MonkeyPatch) -> FakeKeyStore:
+    store = FakeKeyStore()
+    monkeypatch.setattr(monitor, "KEY_STORE", store)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    return store
+
+
+def post_key(srv: Any, data: Any, token: str | None = None, origin: str | None = "same",
+             content_type: str = "application/json") -> tuple[int, bytes]:  # fmt: skip
+    port = srv.server_address[1]
+    headers = {"Host": f"127.0.0.1:{port}", "Content-Type": content_type}
+    if origin == "same":
+        headers["Origin"] = f"http://127.0.0.1:{port}"
+    elif origin:
+        headers["Origin"] = origin
+    if token is not None:
+        headers["X-Factory-Token"] = token
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("POST", "/api/settings/api-key", body=json.dumps(data), headers=headers)
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp.status, body
+
+
+def key_token(srv: Any) -> str:
+    return str(json.loads(req(srv, "/api/settings")[2])["api_key_input"]["token"])
+
+
+def test_settings_shows_only_whether_keys_are_set(
+    server: Any, keys: FakeKeyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys.values["ANTHROPIC_API_KEY"] = FAKE_KEY
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-" + "Z" * 40)
+    body = req(server, "/api/settings")[2]
+    info = json.loads(body)["api_key_input"]
+    assert info["keys"]["ANTHROPIC_API_KEY"]["set"] is True
+    assert info["keys"]["OPENAI_API_KEY"]["set"] is True  # 지금 환경에 있음
+    assert info["keys"]["CODEX_API_KEY"]["set"] is False
+    # 값은 일부라도 내보내지 않는다
+    assert FAKE_KEY[-8:].encode() not in body and b"ZZZZ" not in body
+
+
+def test_api_key_input_saves_with_token_and_never_echoes(server: Any, keys: FakeKeyStore) -> None:
+    status, body = post_key(server, {"name": "ANTHROPIC_API_KEY", "value": FAKE_KEY},
+                            token=key_token(server))  # fmt: skip
+    assert status == 200
+    assert keys.values == {"ANTHROPIC_API_KEY": FAKE_KEY}
+    assert FAKE_KEY[-8:].encode() not in body
+    assert json.loads(body)["set"] is True
+
+
+def test_api_key_input_rejects_cross_site_and_missing_token(
+    server: Any, keys: FakeKeyStore
+) -> None:
+    token = key_token(server)
+    data = {"name": "ANTHROPIC_API_KEY", "value": FAKE_KEY}
+    assert post_key(server, data)[0] == 403  # 토큰 없음
+    assert post_key(server, data, token="wrong")[0] == 403
+    assert post_key(server, data, token=token, origin=None)[0] == 403  # 출처 없음
+    assert post_key(server, data, token=token, origin="http://evil.com")[0] == 403
+    assert post_key(server, data, token=token, content_type="text/plain")[0] == 415
+    assert keys.values == {}
+
+
+def test_api_key_input_validates_name_and_value(server: Any, keys: FakeKeyStore) -> None:
+    token = key_token(server)
+    bad: list[dict[str, Any]] = [
+        {"name": "PATH", "value": FAKE_KEY},
+        {"name": "ANTHROPIC_API_KEY", "value": "not-a-key"},
+        {"name": "ANTHROPIC_API_KEY", "value": FAKE_KEY + " \n"},
+        {"name": "ANTHROPIC_API_KEY", "value": "sk-ant-" + "a" * 600},
+        {"name": "ANTHROPIC_API_KEY", "value": 123},
+    ]
+    for data in bad:
+        status, body = post_key(server, data, token=token)
+        assert status == 400, data
+        value = data["value"]
+        assert not (isinstance(value, str) and value[-12:].strip().encode() in body)
+    assert keys.values == {}
+
+
+def test_api_key_input_can_delete(server: Any, keys: FakeKeyStore) -> None:
+    keys.values["ANTHROPIC_API_KEY"] = FAKE_KEY
+    status, body = post_key(server, {"name": "ANTHROPIC_API_KEY", "value": None},
+                            token=key_token(server))  # fmt: skip
+    assert status == 200 and json.loads(body)["set"] is False
+    assert keys.values == {}
 
 
 def test_server_etag_304(server: Any) -> None:

@@ -79,6 +79,12 @@ async function startServer(jobs) {
 
     await page.click("button[aria-label='설정 보기']");
     await page.waitForFunction(() => document.querySelector("#drawer").textContent.includes("factory_settings.py"), null, { timeout: 10000 });
+    // API 키 입력칸: 키마다 하나, 가려진 입력 (저장은 실제 환경변수를 바꾸므로 여기서 누르지 않는다)
+    if (process.platform === "win32") {
+      const keyInputs = await page.locator("#drawer .keyrow input[type='password']").count();
+      if (keyInputs !== 3) fail(`API 키 입력칸 ${keyInputs}개 (3개여야 함, 가려진 입력)`);
+      if (!(await page.locator("#drawer").textContent()).includes("ANTHROPIC_API_KEY")) fail("API 키 이름이 없음");
+    }
     await page.keyboard.press("Escape");
 
     await page.emulateMedia({ reducedMotion: "reduce" });

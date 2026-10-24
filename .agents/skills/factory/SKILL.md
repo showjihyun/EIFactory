@@ -42,6 +42,8 @@ description: 요구사항 한 줄을 팩토리 절차(spec → 수락 테스트 
 
 - 상태가 `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 즉시 멈추고, `python scripts/factory.py status` 결과와 함께 요약을 보고한다.
 - `APPROVED`(자동 승인)는 멈추는 상태가 아니다. `python scripts/factory.py merge <ID>`를 실행한다. 컨테이너 세션이면 merge가 "머지는 호스트가 합니다"라고 출력하고, 그때 멈춘다.
+- merge가 `RETRY_REQUIRED (CONFLICT)`를 출력하면 멈추지 않는다. 출력된 충돌 파일과 원문을 Builder에게 전달해 6번부터 반복한다.
+- 프롬프트가 충돌로 RETRY_REQUIRED가 된 작업을 이어서 처리하라고 하면, recover 없이 Builder 호출(PROCESS.md 6번)부터 진행한다.
 - `approve`, `resume`, `drop`, `recover --force`는 사람 전용이다. 실행하지 말고 사람에게 안내만 한다.
 - hook이 도구 호출을 막으면 우회하지 말고, 막힌 이유를 보고에 포함한다.
 

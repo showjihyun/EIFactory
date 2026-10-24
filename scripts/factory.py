@@ -944,6 +944,20 @@ def _failed_lines(output: str) -> list[str]:
     )
 
 
+CONFLICT_MARKER = re.compile(rb"^(<{7}|>{7})( |\r?$)", re.MULTILINE)
+
+
+def _conflict_markers(root: Path, job: Job) -> list[str]:
+    """작업 변경 중 충돌 표시(<<<<<<< / >>>>>>>)가 남은 파일."""
+    found = []
+    for rel in sorted(_changed_paths(root, _fork_point(root, job))):
+        path = root / rel
+        skip = not path.is_file() or _matches(rel, TREE_EXCLUDE)
+        if not skip and CONFLICT_MARKER.search(path.read_bytes()):
+            found.append(rel)
+    return found
+
+
 def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
     job = _job(state, job_id)
     _require(job, "BUILDING", "RETRY_REQUIRED")
@@ -953,6 +967,11 @@ def cmd_verify(root: Path, state: State, job_id: str) -> tuple[int, str]:
     if changed:
         _block(job, "PROTECTED_FILE_CHANGED", "잠긴 파일 변경: " + ", ".join(changed))
         return 1, f"{job_id}: BLOCKED (PROTECTED_FILE_CHANGED): {', '.join(changed)}"
+    markers = _conflict_markers(root, job)
+    if markers:
+        signature = f"충돌 표시 남음: {', '.join(markers)}"
+        status = _record_failure(job, signature, signature)
+        return 1, f"{job_id}: {status}.{_builder_note(job)} {signature} (<<<<<<< ~ >>>>>>> 정리)"
 
     green = run_check_red(root, "green", job["acceptance_tests"])
     verify_args = job_verify_args(root, job)
@@ -1369,6 +1388,56 @@ def _mark_merged(root: Path, state: State, job: Job) -> None:
     _close_job(root, state, job, "MERGED")
 
 
+def _replay_on_base(root: Path, job: Job, rebase_output: str) -> tuple[int, str]:
+    """rebase 충돌: 작업 변경을 base 끝 위에 다시 펼치고 Builder가 충돌을 풀게 한다 (기획안 8.3).
+
+    충돌 파일에는 충돌 표시가 남고, 변경은 커밋하지 않은 채 작업 트리에 둔다. 승인·검증 기록은
+    무효가 되어 verify부터 다시 한다. 잠긴 파일이 충돌하면 Builder가 고칠 수 없으므로 작업
+    브랜치를 되돌리고 BLOCKED(CONFLICT)로 사람에게 넘긴다.
+    """
+    job_id, base = job["id"], job["base_branch"]
+    head = _git(root, "rev-parse", "HEAD").strip()
+    fork = _git(root, "merge-base", head, base).strip()
+    _git(root, "reset", "-q", "--hard", base)
+    subprocess.run(
+        ["git", "merge", "-q", "--squash", head], cwd=root, capture_output=True, check=False
+    )
+    files = sorted(
+        n for n in _git(root, "diff", "--name-only", "--diff-filter=U").splitlines() if n
+    )
+    locked = [f for f in files if f in job["locks"]]
+    if locked or not files:
+        _git(root, "reset", "-q", "--hard", head)
+        detail = f"잠긴 파일 충돌: {', '.join(locked)}" if locked else "rebase 충돌"
+        _block(job, "CONFLICT", f"{base} 기준 {detail}")
+        return 1, f"{job_id}: BLOCKED (CONFLICT). {detail}\n{rebase_output}"
+    _git(root, "reset", "-q")  # 충돌 색인을 비운다. 변경은 작업 트리에만 남는다
+    # base가 깔끔하게 바꾼 잠긴 파일은 작업의 변경이 아니다. 지금 내용으로 다시 잠근다
+    cfg = _config(root)
+    landed = _git(root, "diff", "--name-only", "--diff-filter=A", fork, base).splitlines()
+    relock = set(_lock_targets(root, job)) | {
+        p for p in landed if _matches(p, cfg.no_new_file_patterns)
+    }
+    job["locks"] = {rel: _sha(root / rel) for rel in sorted(relock) if (root / rel).is_file()}
+    onto = _git(root, "rev-parse", base).strip()
+    job.setdefault("replays", []).append({"from": head, "onto": onto, "files": files, "at": now()})
+    job["approval"] = None
+    job["verified_tree"] = None
+    _clear_heartbeat(root)
+    listed = ", ".join(files)
+    status = _record_failure(
+        job, f"CONFLICT: {listed}", f"{base}에 먼저 머지된 변경과 충돌: {listed}"
+    )
+    if status == "RETRY_REQUIRED":
+        _start_clock(job, now())
+    return 1, (
+        f"{job_id}: {status} (CONFLICT). {base}에 먼저 머지된 변경과 겹쳐, 작업 변경을 {base} 끝"
+        f"({onto[:7]}) 위에 다시 펼쳤습니다. 충돌 표시(<<<<<<<)가 남은 파일: {listed}. "
+        f"Builder에게 두 변경을 모두 살려 충돌을 풀게 한 뒤 verify {job_id}부터 다시."
+        f"{_builder_note(job)}"
+    )
+
+
 def _merge_steps(root: Path, state: State, job: Job, approved_now: bool) -> tuple[int, str]:
     job_id = job["id"]
     if _git(root, "branch", "--show-current").strip() != job["branch"]:
@@ -1440,8 +1509,7 @@ def _merge_steps(root: Path, state: State, job: Job, approved_now: bool) -> tupl
         )
         if rebase.returncode != 0:
             _abort_git_operations(root)
-            _block(job, "CONFLICT", f"{job['base_branch']} 기준 rebase 충돌")
-            return 1, f"{job_id}: BLOCKED (CONFLICT). {rebase.stdout.strip()[-800:]}"
+            return _replay_on_base(root, job, rebase.stdout.strip()[-800:])
     if rebased or untrusted:
         why = "rebase" if rebased else "untrusted"
         green = run_check_red(root, "green", job["acceptance_tests"])
