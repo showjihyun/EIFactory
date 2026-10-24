@@ -1171,7 +1171,7 @@ def make_server(root: Path, jobs_dir: Path, port: int = 8765) -> http.server.Thr
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="monitor", description="팩토리 대시보드 (읽기 전용)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--jobs-dir", type=Path, default=root.parent / f"{root.name}.jobs")

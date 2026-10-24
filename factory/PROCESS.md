@@ -279,17 +279,23 @@ python scripts/report.py [--out 파일]
 - dispatch 작업 기록과 남은 worktree 상태로 KPI(작업 성공률, 사람 개입률, 리드타임, 머지 후 결함, 비용)와 개선 후보(BLOCKED 사유, 리뷰 지적)를 낸다.
 - 오판율은 정답표와 대조해야 하므로 사람이 확인한다. 비용은 Claude 세션·리뷰어의 API 환산 비용이고, Codex는 토큰 수만 센다.
 
-## 키트 (`scripts/factory_kit.py`, Phase 4)
+## 키트 (`scripts/factory_kit.py`, Phase 4 · 얇은 설치)
 
 팩토리를 다른 레포에 설치한다. 레포마다 다른 값은 `factory/config.json`에만 둔다.
 
 ```
-python scripts/factory_kit.py install <대상 레포> [--force]
+python scripts/factory_kit.py install <대상 레포> --engine factory-vN [--force]
 python scripts/factory_kit.py check <대상 레포>
+python scripts/factory_kit.py upgrade <대상 레포> --engine factory-vN [--yes]
 ```
 
-- **설치·점검은 원본 레포(EIFactory)에서만 한다.** `factory_kit.py`는 대상에 복사하지 않는다 (설치된 레포가 또 다른 레포에 복사본을 퍼뜨리지 않게, 기획안 12.1).
-- 설치 기록 `factory/kit.lock`: 원본 커밋(`source_commit`, 안 올린 변경이 있으면 `+dirty`)과 키트 파일별 해시. `check`가 해시를 대조해 손으로 고쳤거나 다른 버전인 키트 파일을 알려 준다. 고친 키트를 반영하려면 원본에서 `install --force` (설치 기록도 새로 씀). 잠금·HIGH 대상.
+- **설치·점검·업그레이드는 원본 레포(EIFactory)에서 사람만 한다.** `factory_kit.py`는 대상에 복사하지 않는다 (설치된 레포가 또 다른 레포에 복사본을 퍼뜨리지 않게, 기획안 12.1).
+- **엔진은 레포 밖에 둔다.** 원본의 버전 태그(`factory-vN`)에서 꺼내 `FACTORY_ENGINE_HOME`(기본 `~/.factory/engines`)/<태그>에 읽기 전용으로 둔다. 작업 트리가 아니라 태그에서 꺼내므로 커밋 안 한 변경은 들어가지 않는다.
+- 대상 레포에 두는 것: shim(`scripts/factory.py`, `dispatch.py`, `issues.py`, `factory_settings.py`, `monitor.py`, `report.py`, `hooks/guard.py`, 같은 경로라 명령·허용 목록·hook 설정이 그대로), 엔진 찾기 `scripts/factory_engine.py`, 에이전트가 읽는 절차·지시문(`factory/PROCESS.md`, `factory/prompts/builder.md`, `.claude/`, `.agents/`, `.codex/`), 검증 계약 스크립트가 쓰는 `scripts/proc.py`, 템플릿(없을 때만), 설치 기록.
+- shim은 실행할 때마다 엔진 파일 해시를 설치 기록과 대조하고, 다르거나 없으면 실행하지 않는다. 엔진에는 `FACTORY_REPO`로 대상 레포를 알린다 (상태·설정을 읽는 레포, 신뢰 checkout). 컨테이너 격리에서는 dispatch가 엔진 폴더를 읽기 전용으로 끼운다.
+- 설치 기록 `factory/kit.lock`: 엔진 태그(`engine`)·커밋, 엔진 파일 해시, 레포에 둔 키트 파일 해시. `check`가 둘 다 대조한다. 잠금·HIGH 대상.
+- `upgrade`는 새 태그와의 차이를 보여 주고, `--yes`를 붙여야 바꾼다. 레포의 키트 파일을 손으로 고쳤으면 바꾸지 않는다.
+- 엔진을 고치면 원본에서 커밋하고 새 태그(`factory-vN+1`)를 단 뒤 `upgrade`한다. 원본 레포 자신(샘플 레포)은 엔진을 제자리에서 쓴다.
 - 키트 공통 보호(정책·절차 파일, 도구 래퍼, `scripts/`, 격리 환경, `factory/config.json`, `factory/kit.lock`)는 코드에 있어 설정이 없어도 적용된다.
 - `factory/config.json`: 검증 설정 파일(`lock_patterns`, `medium_paths`), 위험 경로(`high_paths`), 기존 테스트 위치(`test_patterns`, `changed_test`), 수락 테스트 경로 규칙(`acceptance_tests`, `{id}` 자리표시), 의존성 설치(`setup`), 컨테이너 경로(`docker`).
 - 대상 레포는 **검증 계약** 세 스크립트(`scripts/verify.py`, `scripts/check_red.py --json`, `scripts/check_style.py`)를 직접 만든다. 형식은 `factory/templates/AGENTS.md`.

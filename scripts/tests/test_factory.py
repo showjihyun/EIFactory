@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -7,7 +8,8 @@ from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+SCRIPTS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SCRIPTS))
 
 import factory  # noqa: E402
 
@@ -1622,6 +1624,16 @@ def test_untrusted_mode_reads_config_from_trusted_checkout(
     assert "backend/tests/*.py" not in factory._config(h.repo).lock_patterns
     monkeypatch.setenv("FACTORY_UNTRUSTED_STATE", "1")
     assert "backend/tests/*.py" in factory._config(h.repo).lock_patterns
+
+
+def test_trusted_checkout_is_the_repo_whose_shim_ran(tmp_path: Path) -> None:
+    # 얇은 설치: 엔진은 레포 밖에 있고, shim이 자기 레포를 FACTORY_REPO로 알려 준다
+    probe = "import factory; print(factory.TRUSTED_ROOT)"
+    env = {**os.environ, "FACTORY_REPO": str(tmp_path)}
+    done = subprocess.run(
+        [sys.executable, "-c", probe], cwd=SCRIPTS, env=env, capture_output=True, text=True
+    )
+    assert Path(done.stdout.strip()) == tmp_path, done.stderr
 
 
 def test_untrusted_merge_ignores_forged_human_approval(

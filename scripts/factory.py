@@ -41,7 +41,9 @@ MERGE_LOCK = "factory-merge.lock"  # Git 공통 디렉터리에 둔다 (worktree
 # 상태 파일을 믿지 않는 실행 (dispatch의 호스트 머지·사람 승인). 컨테이너 세션은 작업 worktree의
 # 상태·설정 파일을 쓸 수 있으므로, 설정은 이 스크립트가 있는 checkout에서 읽고 검증은 다시 한다
 UNTRUSTED_ENV = "FACTORY_UNTRUSTED_STATE"
-TRUSTED_ROOT = Path(__file__).resolve().parents[1]
+# 얇은 설치(기획안 12.1)면 엔진은 레포 밖에 있고, 대상 레포의 shim이 FACTORY_REPO로 레포를 알린다
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+TRUSTED_ROOT = Path(os.environ.get("FACTORY_REPO") or ENGINE_ROOT)
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
 SIZE_CAPS = {"small": 15 * 60, "medium": 30 * 60}
@@ -1025,8 +1027,11 @@ DEFAULT_REVIEWER_FOCUS = {
 
 
 def _instructions(root: Path, rel: str, default: str) -> str:
-    path = root / rel
-    return path.read_text(encoding="utf-8") if path.exists() else default
+    # 얇은 설치 레포에는 리뷰어 지시문이 없고 엔진에만 있다
+    for path in (root / rel, ENGINE_ROOT / rel):
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    return default
 
 
 def build_validator_prompt(root: Path, job: Job, reviewer: str = "code") -> str:
@@ -1751,7 +1756,7 @@ def cmd_status_all(root: Path) -> str:
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
     # FACTORY_ROOT: 다른 checkout(작업 worktree)을 대상으로 실행할 때 (dispatch.py가 사용)
-    root = root or Path(os.environ.get("FACTORY_ROOT") or Path(__file__).resolve().parents[1])
+    root = root or Path(os.environ.get("FACTORY_ROOT") or TRUSTED_ROOT)
     parser = argparse.ArgumentParser(prog="factory", description="팩토리 상태 관리")
     sub = parser.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new")

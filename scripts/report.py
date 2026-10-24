@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -451,7 +452,7 @@ def load_jobs(jobs_dir: Path) -> list[dict[str, Any]]:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     use_utf8_output()
-    root = root or Path(__file__).resolve().parents[1]
+    root = root or Path(os.environ.get("FACTORY_REPO") or Path(__file__).resolve().parents[1])
     parser = argparse.ArgumentParser(prog="report", description="팩토리 운영 보고서")
     parser.add_argument("--jobs-dir", type=Path, default=root.parent / f"{root.name}.jobs")
     parser.add_argument("--out", type=Path)
