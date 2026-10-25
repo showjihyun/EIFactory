@@ -92,6 +92,13 @@ MEDIUM_CONTENT = [
         "테스트 skip·xfail·only 추가",
     ),
 ]
+# 계획 단계(아직 코드가 없음)의 변경 표시 → 위 내용 규칙과 같은 등급·사유 (기획안 6.9 P1)
+RISK_TOUCHES = {
+    "data_delete": ("HIGH", HIGH_CONTENT[0][1]),
+    "db_schema": ("MEDIUM", MEDIUM_CONTENT[0][1]),
+    "api": ("MEDIUM", MEDIUM_CONTENT[1][1]),
+    "test_skip": ("MEDIUM", MEDIUM_CONTENT[2][1]),
+}
 MAX_LINES = 400
 MAX_FILES = 15
 
@@ -417,6 +424,19 @@ def _diff(root: Path, base: str) -> tuple[str, dict[str, tuple[list[str], list[s
     return raw + "\n".join(extra), files
 
 
+def path_risk(cfg: Config, path: str) -> tuple[str, str] | None:
+    """경로 규칙 하나. verify(실제 diff)와 계획 검사(예상 경로)가 같이 쓴다."""
+    if _matches(path, cfg.high_paths):
+        return "HIGH", f"{path} 변경"
+    if _matches(path, cfg.medium_paths):
+        return "MEDIUM", f"{path} 변경"
+    return None
+
+
+def type_risk(job_type: str) -> tuple[str, str] | None:
+    return ("MEDIUM", "refactor 유형") if job_type == "refactor" else None
+
+
 def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
     cfg = _config(root)
     _, files = _diff(root, job["base_commit"])
@@ -428,17 +448,15 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
         reasons.append(f"{target}: {reason}")
         level = max(level, RISKS.index(target))
 
-    if job["type"] == "refactor":
-        raise_to("MEDIUM", "refactor 유형")
+    if rule := type_risk(job["type"]):
+        raise_to(*rule)
     if job["allowed_config_changes"]:
         raise_to("MEDIUM", "설정 파일 변경 허용")
     total_lines = 0
     for path, (added, removed) in files.items():
         total_lines += len(added) + len(removed)
-        if _matches(path, cfg.high_paths):
-            raise_to("HIGH", f"{path} 변경")
-        elif _matches(path, cfg.medium_paths):
-            raise_to("MEDIUM", f"{path} 변경")
+        if rule := path_risk(cfg, path):
+            raise_to(*rule)
         for pattern, reason in HIGH_CONTENT:
             if any(pattern.search(ln) for ln in added):
                 raise_to("HIGH", f"{reason} ({path})")
@@ -630,6 +648,8 @@ def stage_model(root: Path, stage: str, job: Job) -> dict[str, str]:
             alias, reason = "opus", "HIGH 위험의 보안 리뷰"
         elif stage == "orchestrator":
             alias, reason = "opus", "오케스트레이터 기본"
+        elif stage == "planner":
+            alias, reason = "opus", "계획자 기본 (기획안 6.9, 사람 결정)"
         else:
             alias, reason = "sonnet", "리뷰어 기본"
     return {"alias": alias, "model": CLAUDE_MODELS[alias], "source": source, "reason": reason}
@@ -797,7 +817,21 @@ def _create_job_branch(root: Path, state: State) -> tuple[str, str]:
     raise FactoryError("새 작업 브랜치를 만들지 못했습니다 (factory/J* 번호 충돌)")
 
 
-def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None = None) -> str:
+def cmd_new(
+    root: Path,
+    state: State,
+    requirement: str,
+    base_branch: str | None = None,
+    plan_ref: str | None = None,
+    expected_risk: str | None = None,
+) -> str:
+    plan_id = plan_job = None
+    if plan_ref is not None:
+        # 계획 실행(dispatch.py --run-plan)이 넘긴다: "P001:A" (기획안 6.5, 6.9)
+        found = re.fullmatch(r"(P\d{3,}):(\S+)", plan_ref)
+        if not found or expected_risk not in RISKS:
+            raise FactoryError(f"--plan은 P001:A 형식, --expected-risk는 {RISKS} 중 하나입니다")
+        plan_id, plan_job = found.groups()
     active = state["active"]
     if active and state["jobs"][active]["status"] not in CLOSED_STATUSES:
         raise FactoryError(f"진행 중인 작업 {active}가 있습니다 (checkout 하나에 한 작업)")
@@ -848,6 +882,9 @@ def cmd_new(root: Path, state: State, requirement: str, base_branch: str | None 
         "last_failure": None,
         "approval": None,
         "approval_brief": None,
+        "plan_id": plan_id,
+        "plan_job": plan_job,
+        "expected_risk": expected_risk if plan_id else None,
         "agent": agent,
         "builder_model": None,
         "models": {},
@@ -1868,6 +1905,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     new = sub.add_parser("new")
     new.add_argument("requirement")
     new.add_argument("--base", help="머지 대상 브랜치 (detached worktree에서 필요)")
+    new.add_argument("--plan", help="계획 작업 P001:A (dispatch.py --run-plan이 넘김)")
+    new.add_argument("--expected-risk", help="계획 단계의 예상 등급")
     for name in ("spec", "red", "verify", "validate", "merge", "drop"):
         sub.add_parser(name).add_argument("job_id")
     block = sub.add_parser("block")
@@ -1911,7 +1950,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     code = 0
     try:
         if args.command == "new":
-            message = cmd_new(root, state, args.requirement, args.base)
+            message = cmd_new(root, state, args.requirement, args.base, args.plan,
+                              args.expected_risk)  # fmt: skip
         elif args.command == "spec":
             message = cmd_spec(root, state, args.job_id)
         elif args.command == "red":

@@ -78,6 +78,7 @@ ENGINE_FILES = [
     "scripts/monitor_assets/bolt_UNKNOWN.png",
     "scripts/report.py",
     "scripts/brief.py",
+    "scripts/plan.py",
     "scripts/proc.py",
     "scripts/hooks/guard.py",
     "factory/prompts/validator.md",
@@ -85,6 +86,7 @@ ENGINE_FILES = [
     "factory/prompts/review-security.md",
     "factory/prompts/review-test.md",
     "factory/templates/upper-session.example.json",
+    "factory/prompts/planner.md",
     "docker/proxy/Dockerfile",
     "docker/proxy/tinyproxy.conf",
     "docker/proxy/filter",
@@ -98,6 +100,7 @@ SHIMS = [
     "scripts/monitor.py",
     "scripts/report.py",
     "scripts/brief.py",
+    "scripts/plan.py",
     "scripts/hooks/guard.py",
 ]
 # 대상 레포에 태그 그대로 복사하는 파일

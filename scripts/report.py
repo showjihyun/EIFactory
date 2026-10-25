@@ -2,27 +2,38 @@
 
 사용법:
     python scripts/report.py [--jobs-dir ../<레포>.jobs] [--out 파일] [--branch main] [--no-git]
+                             [--weeks 4]
 
 dispatch가 남긴 작업 기록(`<jobs>/records/*.json`)과 아직 남아 있는 worktree의 상태를 읽어
-KPI(작업 성공률, 사람 개입률, 리드타임, 머지 후 결함, 비용)와 개선 후보(BLOCKED 사유, 리뷰 지적)를
-마크다운 표로 낸다. 오판율은 정답표와 대조해야 해서 사람이 확인한다.
+KPI(작업 성공률, 사람 개입률, 리드타임, 머지 후 결함, 비용, 예상 등급 적중률, 승인 대기 체류
+시간)와 개선 후보(BLOCKED 사유, 리뷰 지적)를 마크다운 표로 낸다. 오판율은 정답표와 대조해야 해서
+사람이 확인한다.
+
+코드 건강 추세(기획안 1.2의 5)는 Git 이력에서 주마다 base 브랜치를 읽어 잰다 (checkout 없음).
+팩토리 작업이 바꿀 수 있는 코드만 센다 (잠긴 경로 제외, 테스트 경로는 테스트 줄로). 목표값 없이
+추세만 보고, 나빠지는 지표를 표시한다. 함수 복잡도는 지금 Python만 잰다 (ast).
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import fnmatch
+import hashlib
 import json
 import os
 import re
 import statistics
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from factory_config import ConfigError, load_config  # noqa: E402
 from proc import use_utf8_output  # noqa: E402
 
 REACHED = {"APPROVAL_REQUIRED", "APPROVED", "MERGED"}
@@ -269,6 +280,39 @@ def _lead_minutes(job: dict[str, Any]) -> float | None:
     return None
 
 
+def _spread(values: list[float]) -> dict[str, Any] | None:
+    if not values:
+        return None
+    return {"n": len(values), "min": min(values), "median": statistics.median(values),
+            "max": max(values)}  # fmt: skip
+
+
+def expected_risk_hits(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    """계획 단계 예상 등급과 verify 실제 등급 (KPI 예상 등급 적중률, 기획안 6.9)."""
+    planned = [j for j in jobs if j.get("expected_risk") and j.get("risk")]
+    misses = [
+        {"id": j["id"], "expected": j["expected_risk"], "actual": j["risk"]}
+        for j in planned
+        if j["expected_risk"] != j["risk"]
+    ]
+    return {"n": len(planned), "hits": len(planned) - len(misses), "misses": misses}
+
+
+def approval_waits(jobs: list[dict[str, Any]]) -> tuple[list[float], list[str]]:
+    """APPROVAL_REQUIRED → 사람의 승인·반려까지 (분), 그리고 아직 기다리는 작업."""
+    waits, waiting = [], []
+    for j in jobs:
+        history = j.get("history", [])
+        for i, entry in enumerate(history):
+            if entry["status"] != "APPROVAL_REQUIRED":
+                continue
+            if i + 1 < len(history):
+                waits.append(round((float(history[i + 1]["at"]) - float(entry["at"])) / 60, 1))
+            elif j.get("status") == "APPROVAL_REQUIRED":
+                waiting.append(j["id"])
+    return waits, sorted(waiting)
+
+
 def metrics(jobs: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(jobs)
     reached = [j for j in jobs if any(h["status"] in REACHED for h in j.get("history", []))]
@@ -287,6 +331,7 @@ def metrics(jobs: list[dict[str, Any]]) -> dict[str, Any]:
         for issue in r.get("issues", [])
     )
     review_cost = sum(float(r.get("cost_usd") or 0) for j in jobs for r in j.get("reviews", []))
+    waits, waiting = approval_waits(jobs)
     session = [j.get("session_usage") or {} for j in jobs]
     return {
         "total": total,
@@ -306,7 +351,183 @@ def metrics(jobs: list[dict[str, Any]]) -> dict[str, Any]:
         "session_cost_usd": round(sum(float(s.get("cost_usd") or 0) for s in session), 4),
         "session_tokens": sum(int(s.get("tokens") or 0) for s in session),
         "merges": [j["merge_commit"] for j in jobs if j.get("merge_commit")],
+        "expected_risk": expected_risk_hits(jobs),
+        "approval_wait_min": _spread(waits),
+        "approval_waiting": waiting,
     }
+
+
+# ---------------------------------------------------------------- 코드 건강 추세
+
+CODE_EXT = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+GENERIC_TESTS = ("*/tests/*", "tests/*", "*/test_*.py", "*.test.*", "*.spec.*", "*/e2e/*")
+LARGE_FILE_LINES = 400
+COMPLEX_FUNCTION = 10
+DUP_WINDOW = 6  # 의미 있는 줄 6줄이 같으면 중복
+
+
+def _match(path: str, patterns: list[str] | tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+
+def _blobs(repo: Path, commit: str, paths: list[str]) -> dict[str, str]:
+    """commit의 파일 내용을 한 번에 읽는다 (git cat-file --batch, checkout 없음)."""
+    if not paths:
+        return {}
+    request = "".join(f"{commit}:{p}\n" for p in paths).encode("utf-8")
+    raw = subprocess.run(["git", "cat-file", "--batch"], cwd=repo, input=request,
+                         capture_output=True, check=False).stdout  # fmt: skip
+    out, pos = {}, 0
+    for path in paths:
+        end = raw.index(b"\n", pos)
+        header = raw[pos:end].split()
+        pos = end + 1
+        if len(header) != 3 or header[1] != b"blob":
+            continue
+        size = int(header[2])
+        out[path] = raw[pos : pos + size].decode("utf-8", errors="replace")
+        pos += size + 1
+    return out
+
+
+def _complexities(text: str) -> list[int]:
+    """Python 함수별 순환 복잡도 (1 + 분기 수)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    branches = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp,
+                ast.comprehension, ast.match_case)  # fmt: skip
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            score = 1
+            for inner in ast.walk(node):
+                if isinstance(inner, branches):
+                    score += 1
+                elif isinstance(inner, ast.BoolOp):
+                    score += len(inner.values) - 1
+            out.append(score)
+    return out
+
+
+def _dup_lines(files: dict[str, list[str]]) -> int:
+    """다른 곳에도 똑같이 있는 DUP_WINDOW줄 묶음에 속한 줄 수."""
+    seen: dict[str, list[tuple[str, int]]] = {}
+    for path, lines in files.items():
+        for i in range(len(lines) - DUP_WINDOW + 1):
+            key = hashlib.sha1("\n".join(lines[i : i + DUP_WINDOW]).encode()).hexdigest()
+            seen.setdefault(key, []).append((path, i))
+    marked: set[tuple[str, int]] = set()
+    for places in seen.values():
+        if len(places) > 1:
+            for path, i in places:
+                marked.update((path, i + k) for k in range(DUP_WINDOW))
+    return len(marked)
+
+
+def code_health(repo: Path, commit: str, cfg: dict[str, list[str]]) -> dict[str, Any]:
+    """한 시점의 코드 건강 (팩토리 작업이 바꿀 수 있는 코드만)."""
+    listed = _git_run(repo, "ls-tree", "-r", "-z", "--name-only", commit).stdout
+    tests = [*cfg.get("test_patterns", []), *GENERIC_TESTS]
+    locked = cfg.get("lock_patterns", [])
+    # 잠긴 경로는 빼되, 레포 설정의 테스트 경로(기존 테스트는 작업이 고칠 수 있음)는 센다
+    paths = [
+        p for p in filter(None, listed.split("\0"))
+        if p.endswith(CODE_EXT)
+        and (_match(p, cfg.get("test_patterns", [])) or not _match(p, locked))
+    ]  # fmt: skip
+    code: dict[str, list[str]] = {}
+    test_lines, complexity = 0, []
+    for path, text in _blobs(repo, commit, paths).items():
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if _match(path, tests):
+            test_lines += len(lines)
+            continue
+        code[path] = lines
+        if path.endswith(".py"):
+            complexity += _complexities(text)
+    sizes = sorted(((len(v), k) for k, v in code.items()), reverse=True)
+    code_lines = sum(n for n, _ in sizes)
+    meaningful = {k: [ln for ln in v if len(ln) > 2] for k, v in code.items()}
+    return {
+        "code_lines": code_lines,
+        "test_lines": test_lines,
+        "test_ratio": round(test_lines / code_lines, 3) if code_lines else 0.0,
+        "largest": [sizes[0][1], sizes[0][0]] if sizes else None,
+        "large_files": sum(1 for n, _ in sizes if n > LARGE_FILE_LINES),
+        "dup_lines": _dup_lines(meaningful),
+        "max_complexity": max(complexity, default=0),
+        "complex_functions": sum(1 for c in complexity if c > COMPLEX_FUNCTION),
+    }
+
+
+def health_trend(
+    repo: Path, branch: str, cfg: dict[str, list[str]], weeks: int = 4, now: float | None = None
+) -> list[dict[str, Any]]:
+    """주마다(지금부터 7일 간격) 그 시점 branch 끝의 코드 건강. 첫 커밋 전 주는 뺀다."""
+    now = time.time() if now is None else now
+    rows = []
+    for back in range(weeks, -1, -1):
+        at = now - back * 7 * 86400
+        commit = _git_run(repo, "rev-list", "-1", f"--before={int(at)}", branch).stdout.strip()
+        if not commit:
+            continue
+        week = time.strftime("%Y-%m-%d", time.gmtime(at))
+        rows.append({"week": week, "commit": commit[:7], **code_health(repo, commit, cfg)})
+    return rows
+
+
+def worsening(rows: list[dict[str, Any]]) -> list[str]:
+    """처음과 마지막 주를 비교해 나빠진 지표 (목표값 없이 추세만)."""
+    if len(rows) < 2:
+        return []
+    first, last = rows[0], rows[-1]
+
+    def dup(r: dict[str, Any]) -> float:
+        return float(r["dup_lines"]) / r["code_lines"] if r["code_lines"] else 0.0
+
+    out = []
+    if last["large_files"] > first["large_files"]:
+        out.append("큰 파일")
+    if dup(last) - dup(first) > 0.02:
+        out.append("중복")
+    if last["complex_functions"] > first["complex_functions"]:
+        out.append("복잡한 함수")
+    if first["test_ratio"] - last["test_ratio"] > 0.1:
+        out.append("테스트 비율")
+    return out
+
+
+def render_health(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "## 코드 건강 추세 (기획안 3장, 1.2의 5)",
+        "",
+        f"팩토리 작업이 바꿀 수 있는 코드만 (잠긴 경로 제외). 큰 파일 {LARGE_FILE_LINES}줄 초과, "
+        f"복잡한 함수 복잡도 {COMPLEX_FUNCTION} 초과 (Python만), 중복은 {DUP_WINDOW}줄 묶음.",
+        "",
+        "| 주 | 커밋 | 코드 줄 | 테스트/코드 | 가장 큰 파일 | 큰 파일 | 중복 줄 | 최대 복잡도 "
+        "| 복잡한 함수 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        largest = f"{r['largest'][0]} ({r['largest'][1]})" if r["largest"] else "-"
+        lines.append(
+            f"| {r['week']} | {r['commit']} | {r['code_lines']} | {r['test_ratio']} | {largest} "
+            f"| {r['large_files']} | {r['dup_lines']} | {r['max_complexity']} "
+            f"| {r['complex_functions']} |"
+        )
+    if not rows:
+        lines.append("| 기록 없음 | - | - | - | - | - | - | - | - |")
+    bad = worsening(rows)
+    lines += [
+        "",
+        f"나빠지는 추세: {', '.join(bad)} → 자율 범위 확대를 멈추고 정리 작업을 계획"
+        if bad
+        else "나빠지는 추세: 없음",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def reverted(repo: Path, branch: str, merges: list[str]) -> set[str]:
@@ -401,6 +622,17 @@ def render(m: dict[str, Any], defects: int | None, merged: int) -> str:
         else (f"{_pct(defects / merged)} ({defects}/{merged})" if merged else "- (머지 없음)")
     )
     status = ", ".join(f"{k} {v}" for k, v in sorted(m["by_status"].items()))
+    hit = m["expected_risk"]
+    hit_text = "- (계획에서 온 작업 없음)"
+    if hit["n"]:
+        hit_text = f"{_pct(hit['hits'] / hit['n'])} ({hit['hits']}/{hit['n']})"
+    misses = [f"{x['id']} 예상 {x['expected']} → 실제 {x['actual']}" for x in hit["misses"]]
+    wait = m["approval_wait_min"]
+    wait_text = "-"
+    if wait:
+        wait_text = f"{wait['min']} / {wait['median']} / {wait['max']}분 ({wait['n']}회)"
+    waiting = ", ".join(m["approval_waiting"])
+    still = [f"- 아직 승인 대기: {waiting}"] if waiting else []
     lines = [
         "# 팩토리 운영 보고서",
         "",
@@ -418,7 +650,12 @@ def render(m: dict[str, Any], defects: int | None, merged: int) -> str:
         f"| 머지 후 결함 | {defect_text} | 10% 이하 |",
         f"| 비용 (세션 + 리뷰어, API 환산) | ${m['session_cost_usd'] + m['review_cost_usd']:.2f} "
         f"(세션 토큰 {m['session_tokens']:,}) | 측정 후 상한 설정 |",
+        f"| 예상 등급 적중률 | {hit_text} | 측정 후 정함 |",
+        f"| 승인 대기 체류 시간 (최소 / 중앙 / 최대) | {wait_text} | 측정 후 정함 |",
         "",
+        *[f"- 예상과 다른 등급: {miss}" for miss in misses],
+        *still,
+        *([""] if misses or still else []),
         "## 개선 후보 (기획안 11장, 사람이 검토해 반영)",
         "",
         "| BLOCKED 사유 | 건수 |",
@@ -457,12 +694,22 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser.add_argument("--jobs-dir", type=Path, default=root.parent / f"{root.name}.jobs")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--branch", default="HEAD")
-    parser.add_argument("--no-git", action="store_true", help="머지 후 결함을 세지 않음")
+    parser.add_argument(
+        "--no-git", action="store_true", help="머지 후 결함·코드 건강 추세를 세지 않음"
+    )
+    parser.add_argument("--weeks", type=int, default=4, help="코드 건강 추세 주 수")
     args = parser.parse_args(argv)
 
     m = metrics(load_jobs(args.jobs_dir))
     defects = None if args.no_git else len(reverted(root, args.branch, m["merges"]))
     text = render(m, defects, len(m["merges"]))
+    if not args.no_git:
+        try:
+            cfg = load_config(root)
+            patterns = {"test_patterns": cfg.test_patterns, "lock_patterns": cfg.lock_patterns}
+            text += "\n" + render_health(health_trend(root, args.branch, patterns, args.weeks))
+        except ConfigError as error:
+            text += f"\n## 코드 건강 추세\n\n설정 오류로 건너뜀: {error}\n"
     if args.out:
         args.out.write_text(text, encoding="utf-8")
     print(text)

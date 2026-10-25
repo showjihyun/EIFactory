@@ -53,6 +53,11 @@ root = Path.cwd()
 print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FACTORY_AGENT"))
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
 job_id = state["active"]
+requirement = state["jobs"][job_id]["requirement"]
+if "[QUIT]" in requirement and os.environ.get("FAKE_AGENT_QUIT_TAG"):
+    # 계획 시험용: 표시가 붙은 작업만 세션이 중간에 끝난다 (BLOCKED)
+    print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.1}))
+    sys.exit(0)
 def factory(*args):
     cmd = [sys.executable, "scripts/factory.py", *args]
     out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
@@ -72,7 +77,8 @@ if state["jobs"][job_id]["status"] == "RETRY_REQUIRED":
                       "usage": {"input_tokens": 50, "output_tokens": 10}}))
     sys.exit(0)
 contract = {
-    "type": "feature", "size": "small", "risk": os.environ.get("FAKE_AGENT_RISK", "LOW"),
+    "type": "feature", "size": "small",
+    "risk": os.environ.get("FAKE_AGENT_RISK", "MEDIUM" if "[MEDIUM]" in requirement else "LOW"),
     "risk_reason": "새 모듈",
     "acceptance_criteria": ["모듈이 있다"],
     "acceptance_tests": [f"backend/tests/acceptance/test_{job_id}.py"],
@@ -118,7 +124,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     (root / "scripts").mkdir()
-    for name in ("factory.py", "factory_config.py", "proc.py"):
+    for name in ("factory.py", "factory_config.py", "proc.py", "plan.py"):
         shutil.copy(SCRIPTS / name, root / "scripts" / name)
     (root / "factory").mkdir()
     shutil.copy(SCRIPTS.parent / "factory" / "config.json", root / "factory" / "config.json")
@@ -140,6 +146,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("FAKE_AGENT_MODE", raising=False)
     monkeypatch.delenv("FAKE_AGENT_RISK", raising=False)
     monkeypatch.delenv("FAKE_AGENT_SHARED", raising=False)
+    monkeypatch.delenv("FAKE_AGENT_QUIT_TAG", raising=False)
     monkeypatch.delenv("FACTORY_UNTRUSTED_STATE", raising=False)
     return root
 
@@ -843,3 +850,130 @@ def test_host_merge_is_recorded(repo: Path, monkeypatch: pytest.MonkeyPatch) -> 
     job_id = report["jobs"][0]["job_id"]
     event = dispatch.host_record(repo, job_id)["events"][-1]
     assert event["action"] == "merge" and event["status"] == "MERGED"
+
+
+# ---------- 계획 실행 (--run-plan, 기획안 6.9 P1) ----------
+
+
+def plan_item(job_id: str, *depends_on: str, tag: str = "") -> dict[str, Any]:
+    return {
+        "id": job_id,
+        "requirement": f"{tag}계획 작업 {job_id}",
+        "type": "feature",
+        "size": "small",
+        "paths": [f"backend/src/bookmarks/mod_{job_id}.py"],
+        "touches": [],
+        "depends_on": list(depends_on),
+        "assumptions": [],
+        "design": None,
+        "acceptance_hints": ["모듈이 있다"],
+    }
+
+
+def checked_plan(repo: Path, *items: dict[str, Any]) -> None:
+    path = repo / "factory" / "plans" / "P001.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"goal": "목표", "jobs": list(items)}, ensure_ascii=False)
+    path.write_text(f"# P001\n\n```json\n{body}\n```\n", encoding="utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "계획")
+    assert dispatch.plan.main(["check", "P001"], root=repo) == 0
+
+
+def plan_state(repo: Path) -> dict[str, Any]:
+    path = repo.parent / f"{repo.name}.jobs" / "plans" / "P001.json"
+    loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def run_plan(repo: Path) -> tuple[int, dict[str, dict[str, Any]]]:
+    code, report = run(repo, "--run-plan", "P001")
+    assert report["plan_id"] == "P001"
+    return code, {j["plan_job"]: j for j in report["jobs"]}
+
+
+def record(job: dict[str, Any]) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    return loaded
+
+
+def test_run_plan_runs_jobs_in_dependency_order(repo: Path) -> None:
+    checked_plan(repo, plan_item("A"), plan_item("B", "A"), plan_item("C"))
+    code, jobs = run_plan(repo)
+    assert code == 0
+    assert {k: j["status"] for k, j in jobs.items()} == dict.fromkeys("ABC", "MERGED")
+    # B는 A가 머지된 base 위에서 시작했다
+    a, b = record(jobs["A"]), record(jobs["B"])
+    assert subprocess.run(
+        ["git", "merge-base", "--is-ancestor", a["merge_commit"], b["base_commit"]], cwd=repo
+    ).returncode == 0
+    # 작업 기록에 계획과 예상 등급이 남는다 (KPI 적중률)
+    assert (b["plan_id"], b["plan_job"], b["expected_risk"]) == ("P001", "B", "LOW")
+    assert plan_state(repo)["status"] == "DONE"
+    assert plan_state(repo)["runs"]["B"]["job_id"] == jobs["B"]["job_id"]
+
+
+def test_dependent_waits_while_upstream_awaits_approval(repo: Path) -> None:
+    checked_plan(repo, plan_item("A", tag="[MEDIUM]"), plan_item("B", "A"), plan_item("C"))
+    code, jobs = run_plan(repo)
+    assert code == 0  # 승인 대기는 실패가 아니다
+    assert jobs["A"]["status"] == "APPROVAL_REQUIRED"
+    assert jobs["C"]["status"] == "MERGED"  # 독립 작업은 계속 돈다
+    assert "B" not in jobs
+    state = plan_state(repo)
+    assert state["status"] == "RUNNING"
+    assert state["waiting"] == {"B": "A 승인 대기"}
+    # 사람이 승인하면 다시 실행해 남은 작업만 이어서 한다
+    assert dispatch.main(["--approve", jobs["A"]["job_id"]], root=repo) == 0
+    code, again = run_plan(repo)
+    assert code == 0
+    assert set(again) == {"B"} and again["B"]["status"] == "MERGED"
+    assert plan_state(repo)["status"] == "DONE"
+
+
+def test_blocked_upstream_stops_the_plan_and_restart_runs_only_the_rest(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_AGENT_QUIT_TAG", "1")
+    checked_plan(repo, plan_item("A", tag="[QUIT]"), plan_item("B", "A"), plan_item("C"))
+    code, jobs = run_plan(repo)
+    assert code == 1
+    assert jobs["A"]["status"] == "BLOCKED" and jobs["C"]["status"] == "MERGED"
+    assert "B" not in jobs
+    assert plan_state(repo)["status"] == "STOPPED"
+    assert plan_state(repo)["waiting"] == {"B": "A BLOCKED"}
+    # 사람이 A를 버리고(drop) 다시 시작하면 A는 새 작업으로, 그다음 B. C는 다시 돌지 않는다
+    blocked = jobs["A"]
+    done = dispatch._factory(repo, Path(blocked["worktree"]), "drop", blocked["job_id"])
+    assert done.returncode == 0, done.stdout
+    monkeypatch.delenv("FAKE_AGENT_QUIT_TAG")
+    code, again = run_plan(repo)
+    assert code == 0
+    assert set(again) == {"A", "B"}
+    assert again["A"]["job_id"] != blocked["job_id"]
+    assert plan_state(repo)["status"] == "DONE"
+
+
+def test_run_plan_session_gets_the_plan_context(repo: Path) -> None:
+    item = {**plan_item("A"), "size": "medium", "design": "mod_A 모듈에 VALUE를 둔다"}
+    checked_plan(repo, item)
+    _, jobs = run_plan(repo)
+    info = dispatch.session_info(repo, jobs["A"]["job_id"])
+    assert info["plan"] == {"id": "P001", "job": "A", "expected_risk": "LOW"}
+    assert "mod_A 모듈에 VALUE를 둔다" in info["prompt_plan"]
+
+
+def test_run_plan_refuses_an_unchecked_or_edited_plan(repo: Path) -> None:
+    assert dispatch.main(["--run-plan", "P001"], root=repo) == 2
+    checked_plan(repo, plan_item("A"))
+    path = repo / "factory" / "plans" / "P001.md"
+    path.write_text(path.read_text(encoding="utf-8").replace("작업 A", "작업 X"), "utf-8")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "고침")
+    assert dispatch.main(["--run-plan", "P001"], root=repo) == 2
+
+
+def test_run_plan_of_a_done_plan_does_nothing(repo: Path) -> None:
+    checked_plan(repo, plan_item("A"))
+    assert run_plan(repo)[0] == 0
+    code, jobs = run_plan(repo)
+    assert code == 0 and jobs == {}
