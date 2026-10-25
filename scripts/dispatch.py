@@ -134,6 +134,13 @@ CONTINUE_SPEC_TASK = (
     "테스트 변경은 뺐다. recover 없이 factory/PROCESS.md 4번부터 진행해: 기존 테스트를 새 base "
     "기준으로 다시 바꾸고(이전에 바꾼 내용: {diffs}) spec → red → Builder 순서로."
 )
+# 사람이 승인 대기에서 반려한 작업을 이어서 고치는 세션 (factory-v4)
+REJECT_TASK = (
+    "작업 {job_id}는 사람이 승인 대기에서 반려해 RETRY_REQUIRED 상태다. 반려 사유: {reason} "
+    "recover 없이 factory/PROCESS.md 6번(Builder 호출)부터 진행해. Builder에게 반려 사유를 그대로 "
+    "전달한다. 잠긴 수락 테스트는 바꾸지 않고, 사유가 새 동작이면 Builder가 새 테스트 파일을 "
+    "더한다. 그 뒤 verify·validate까지 절차대로."
+)
 CONTINUE_HEAD = {
     "claude": "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n",
     "codex": "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 작업 {job_id}를 "
@@ -763,14 +770,28 @@ def run_job(
     return result
 
 
+def _rejected(job: dict[str, Any]) -> bool:
+    return (
+        job["status"] == "RETRY_REQUIRED"
+        and (job.get("approval") or {}).get("decision") == "rejected"
+    )
+
+
 def needs_continue(job: dict[str, Any]) -> bool:
-    """rebase 충돌로 새 base 위에 다시 펼쳐져 Builder를 기다리는 작업인가."""
+    """세션이 이어서 처리할 작업인가: rebase 충돌로 새 base 위에 다시 펼쳐졌거나 사람이 반려했다."""
     failure = str(job.get("last_failure") or "")
-    return job["status"] in {"RETRY_REQUIRED", "SPEC_READY"} and failure.startswith("CONFLICT")
+    conflict = job["status"] in {"RETRY_REQUIRED", "SPEC_READY"} and failure.startswith("CONFLICT")
+    return conflict or _rejected(job)
 
 
 def continue_prompt(job: dict[str, Any], job_id: str, agent: str) -> str:
-    """이어서 처리하는 세션의 프롬프트. Builder부터(충돌 표시) 또는 Spec부터(기존 테스트 충돌)."""
+    """이어서 처리하는 세션의 프롬프트. Builder부터(충돌·반려) 또는 Spec부터(기존 테스트 충돌)."""
+    head = CONTINUE_HEAD["codex" if agent == "codex" else "claude"]
+    if _rejected(job) and not str(job.get("last_failure") or "").startswith("CONFLICT"):
+        reason = str(job["approval"].get("reason") or "")
+        return (head + REJECT_TASK).format(
+            job_id=job_id, requirement=job["requirement"], reason=reason
+        )
     last = (job.get("replays") or [{}])[-1]
     files = ", ".join(last.get("files") or []) or "-"
     diffs = " / ".join(
@@ -778,7 +799,6 @@ def continue_prompt(job: dict[str, Any], job_id: str, agent: str) -> str:
         for f in last.get("files") or []
     )
     task = CONTINUE_SPEC_TASK if job["status"] == "SPEC_READY" else CONTINUE_TASK
-    head = CONTINUE_HEAD["codex" if agent == "codex" else "claude"]
     return (head + task).format(
         job_id=job_id, requirement=job["requirement"], files=files, diffs=diffs or "-"
     )
@@ -928,39 +948,40 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
     status = _load_job(worktree, job_id)["status"]
     if status != "APPROVAL_REQUIRED":
         raise DispatchError(f"{job_id}: 승인 대기 상태가 아닙니다 ({status})")
-    if reject:
-        done = _factory(
-            root, worktree, "approve", job_id, "--reject", reject,
-            env={"FACTORY_UNTRUSTED_STATE": "1"},
-        )  # fmt: skip
-        print(done.stdout.strip())
-        job = _load_job(worktree, job_id)
-        _save_record(root, job_id, job)
-        _record_host(root, job_id, "reject", job)
-        return done.returncode
     docker = None
     if info["isolation"] == "docker":
         docker = _docker_job(root, worktree, job_id, info["stamp"], info["image"])
-        # 세션이 끝날 때 의존성 볼륨을 지웠으므로 재검증 전에 다시 설치한다 (키 없음)
+        # 세션이 끝날 때 의존성 볼륨을 지웠으므로 재검증·이어서 처리 전에 다시 설치한다 (키 없음)
         setup = _run(docker_setup_command(docker), worktree)
         if setup.returncode != 0:
             raise DispatchError(f"컨테이너 설치 실패: {(setup.stdout + setup.stderr)[-500:]}")
     try:
-        env = host_merge_env(docker, wait_s=DEFAULT_WALL_TIMEOUT_MIN * 60)
-        done = _factory(root, worktree, "approve", job_id, env=env)
-        print(done.stdout.strip()[-2000:])
-        job = _load_job(worktree, job_id)
-        _save_record(root, job_id, job)
-        _record_host(root, job_id, "approve", job)
+        if reject:
+            done = _factory(
+                root, worktree, "approve", job_id, "--reject", reject,
+                env={"FACTORY_UNTRUSTED_STATE": "1"},
+            )  # fmt: skip
+            print(done.stdout.strip())
+            job = _load_job(worktree, job_id)
+            _save_record(root, job_id, job)
+            _record_host(root, job_id, "reject", job)
+            if done.returncode != 0:
+                return done.returncode
+        else:
+            env = host_merge_env(docker, wait_s=DEFAULT_WALL_TIMEOUT_MIN * 60)
+            done = _factory(root, worktree, "approve", job_id, env=env)
+            print(done.stdout.strip()[-2000:])
+            job = _load_job(worktree, job_id)
+            _save_record(root, job_id, job)
+            _record_host(root, job_id, "approve", job)
         if needs_continue(job):
-            # 승인 사이 base에 같은 줄이 먼저 머지됐다. 새 base 위에서 세션이 충돌을 푼다
+            # 반려됐거나, 승인 사이 base에 같은 줄이 먼저 머지됐다. 세션이 이어서 고친다
             args = _session_args(root, info, docker is not None)
             cap = float((job.get("budgets_applied") or {}).get("session", DEFAULT_BUDGET_USD))
+            why = "반려 사유를 고치러" if reject else "충돌을 풀러"
             for _ in range(MAX_CONTINUE):
                 more = continue_session(root, worktree, job_id, args, docker, cap)
-                print(
-                    f"{job_id}: 충돌을 풀러 이어서 처리 (세션 {more['round']}) → {more['status']}"
-                )
+                print(f"{job_id}: {why} 이어서 처리 (세션 {more['round']}) → {more['status']}")
                 job = _load_job(worktree, job_id)
                 if not needs_continue(job):
                     break
@@ -981,6 +1002,8 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
             f"계획 {job['plan_id']}의 남은 작업 이어서 (사람 전용): "
             f"python scripts/dispatch.py --run-plan {job['plan_id']}"
         )
+    if reject:
+        return 0 if job["status"] in {"APPROVAL_REQUIRED", "MERGED"} else 1
     return 0 if job["status"] == "MERGED" else 1
 
 
@@ -1000,7 +1023,7 @@ def plan_statuses(root: Path, state: dict[str, Any]) -> dict[str, str | None]:
             elif record.exists():
                 status = json.loads(record.read_text(encoding="utf-8"))["status"]
         out[name] = status
-    return out
+    return {**out, **plan.human_statuses(state)}
 
 
 def run_plan(
@@ -1065,6 +1088,8 @@ def plan_summary(state: dict[str, Any], statuses: dict[str, str | None]) -> str:
         name = item["id"]
         run = (state.get("runs") or {}).get(name) or {}
         status = say[item["route"]] or statuses.get(name) or "-"
+        if statuses.get(name) == "DONE":
+            status += " (완료)"
         if name in state.get("waiting", {}):
             status = "PLAN_WAITING"
         lines.append(

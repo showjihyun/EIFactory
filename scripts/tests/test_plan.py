@@ -413,3 +413,63 @@ def test_plan_context_carries_design_and_assumptions_into_the_session() -> None:
     text = plan.plan_context("P001", item)
     assert "P001" in text and "note 열을 추가한다" in text and "500자 제한" in text
     assert "무언가가 보인다" in text  # 수락 기준 힌트
+
+
+# ---------- 사람 직접 항목 완료 (factory-v4) ----------
+
+
+def test_done_human_item_releases_its_dependents() -> None:
+    state = checked({**draft("H"), "route": "human"}, draft("A", depends_on=["H"]))
+    start, waiting = plan.schedule(state, {"H": "DONE"}, set())
+    assert (start, waiting) == (["A"], {})
+    assert plan.plan_status(state, {"H": "DONE"}) == "RUNNING"
+    assert plan.plan_status(state, {"H": "DONE", "A": "MERGED"}) == "DONE"
+
+
+def test_human_statuses_come_from_done_marks() -> None:
+    state = {**checked({**draft("H"), "route": "human"}, draft("A")), "human_done": {"H": 1.0}}
+    assert plan.human_statuses(state) == {"H": "DONE"}
+
+
+def test_done_command_marks_a_human_item(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_plan(root, [draft("A"), draft("H", paths=["scripts/x.py"])])
+    assert plan.main(["check", "P001"], root=root) == 0
+    assert plan.main(["done", "P001", "H"], root=root) == 0
+    state = plan.load_state(root, "P001")
+    assert state is not None and "H" in state["human_done"]
+    assert "H" in capsys.readouterr().out
+    # 다시 검사해도 완료 표시는 남는다
+    assert plan.main(["check", "P001"], root=root) == 0
+    state = plan.load_state(root, "P001")
+    assert state is not None and "H" in state["human_done"]
+
+
+@pytest.mark.parametrize("name", ["A", "Z"])
+def test_done_command_refuses_factory_items_and_unknown_ids(root: Path, name: str) -> None:
+    write_plan(root, [draft("A"), draft("H", paths=["scripts/x.py"])])
+    plan.main(["check", "P001"], root=root)
+    assert plan.main(["done", "P001", name], root=root) == 1
+    state = plan.load_state(root, "P001")
+    assert state is not None and not state.get("human_done")
+
+
+def test_done_command_requires_a_checked_plan(root: Path) -> None:
+    write_plan(root, [draft("H", paths=["scripts/x.py"])])
+    assert plan.main(["done", "P001", "H"], root=root) == 1
+
+
+# ---------- 지시문 (factory-v4, randomy P001 실측 후속) ----------
+
+PROMPTS = SCRIPTS.parent / "factory" / "prompts"
+
+
+def test_reviewers_are_told_they_only_have_read_tools() -> None:
+    # 리뷰어가 쓸 수 없는 Bash를 시도하다 hook에 막혀 교차 확인을 못 했다 (J008)
+    text = (PROMPTS / "validator.md").read_text(encoding="utf-8")
+    assert "Read·Glob·Grep" in text and "Bash" in text
+
+
+def test_planner_is_told_about_screen_states_and_skill_eval_cases() -> None:
+    text = (PROMPTS / "planner.md").read_text(encoding="utf-8")
+    assert "요청 중" in text and "다시 시도" in text  # J009·J013·J014에서 반복된 누락
+    assert "evals/" in text and "평가 케이스" in text  # 스킬 작업의 평가 케이스는 사람 직접

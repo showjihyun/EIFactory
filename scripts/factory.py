@@ -1774,6 +1774,8 @@ def cmd_approve(root: Path, state: State, job_id: str, reject: str | None) -> tu
         job["approval"] = {"by": "human", "decision": "rejected", "reason": reject, "at": now()}
         _set_status(job, "RETRY_REQUIRED")
         _start_clock(job, now())
+        # 이어서 고치는 세션이 끝난 세션의 heartbeat에 막히지 않게 한다 (충돌 이어받기와 같음)
+        _clear_heartbeat(root)
         return 0, f"{job_id}: 반려 → RETRY_REQUIRED ({reject})"
     job["approval"] = {"by": "human", "decision": "approved", "reason": "", "at": now()}
     _set_status(job, "APPROVED")

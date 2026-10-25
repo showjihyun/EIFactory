@@ -338,3 +338,12 @@ def test_old_blocked_job_is_cleanup_candidate_after_drop(root: Path) -> None:
     assert "drop" in "\n".join(cleanup["lines"])
     # 화면 카드는 키로 붙는다: 정리 후보가 BLOCKED 항목을 덮어쓰지 않게 키를 두지 않는다
     assert "key" not in cleanup
+
+
+def test_done_human_items_are_not_listed(root: Path) -> None:
+    jobs = [plan_job("a"), plan_job("b", "human", "잠긴 경로"), plan_job("c", "human", "잠긴 경로")]
+    add_plan(root, "P001", "RUNNING", jobs)
+    path = root.parent / "repo.jobs" / "plans" / "P001.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**state, "human_done": {"b": NOW}}), encoding="utf-8")
+    assert [i["id"] for i in items_of(root, "human")] == ["P001:c"]
