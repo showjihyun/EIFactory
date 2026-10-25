@@ -65,7 +65,7 @@ body {
 }
 .mono, code { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .num { font-variant-numeric: tabular-nums; }
-.wrap { max-width: 1440px; margin: 0 auto; padding: 0 20px 80px; }
+.wrap { margin: 0 auto; padding: 0 20px 80px; }
 button { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
 .muted { color: var(--muted); }
@@ -128,6 +128,9 @@ h2 .count { background: var(--s-approval-bg); color: var(--s-approval); border-r
 .stat .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat .l { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
 .miss { width: 7px; height: 7px; border-radius: 50%; background: var(--med); display: inline-block; }
+.kpis { display: inline-flex; gap: 10px; align-items: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.kpis > span { display: inline-flex; gap: 4px; align-items: center; }
+.kpis b { font-weight: 700; }
 
 /* 작업 레인 */
 .lanes { background: var(--surface); border-radius: 16px; padding: 14px 16px 10px; box-shadow: var(--shadow); border: 1px solid var(--border); overflow-x: auto; }
@@ -150,11 +153,19 @@ h2 .count { background: var(--s-approval-bg); color: var(--s-approval); border-r
 .lane .meta { font-size: 11.5px; color: var(--muted); }
 .conflict { margin: 2px 0 6px 160px; font-size: 12px; color: var(--s-retry); display: flex; gap: 6px; align-items: center; }
 .conflict b { color: var(--text); }
+.lanes.closed { display: none; }
+.fold { border: 0; background: transparent; cursor: pointer; font: inherit; font-weight: 700; padding: 0; display: inline-flex; gap: 6px; align-items: center; }
 .lanes-foot { font-size: 11.5px; color: var(--muted); margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; }
 
 /* 보드 */
-.board { display: grid; grid-template-columns: repeat(8, minmax(160px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
-.col { background: var(--sunken); border-radius: 16px; padding: 8px; min-height: 140px; }
+.board { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+.col { background: var(--sunken); border-radius: 16px; padding: 8px; min-height: 140px; flex: 1 1 0; min-width: 220px; }
+.col.slim { flex: 0 0 44px; min-width: 44px; padding: 8px 4px; overflow: hidden !important; }
+.col.slim .colhead { flex-direction: column; align-items: center; padding: 4px 0; gap: 8px; }
+.col.slim .cname { writing-mode: vertical-rl; letter-spacing: 1px; }
+.col.slim .colhead .cnt { margin: 0; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; align-items: start; }
+.cards .card { margin-bottom: 0; }
 .col.hot { background: color-mix(in srgb, var(--s-approval-bg) 70%, var(--sunken)); }
 .colhead { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12.5px; padding: 4px 6px 8px; }
 .colhead .cnt { margin-left: auto; color: var(--muted); font-weight: 500; }
@@ -266,7 +277,24 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
 
 .reduce *, .reduce *::before, .reduce *::after { animation: none !important; transition: none !important; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
-@media (max-width: 1279px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+/* 한 화면 배치 (DESIGN.md 2.1): 페이지는 스크롤하지 않고 보드가 남은 높이를 채운다 */
+@media (min-width: 1280px) {
+  html, body { height: 100%; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  .topbar { flex: none; }
+  main.wrap { flex: 1; min-height: 0; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; padding-bottom: 12px; }
+  main.wrap > * { flex: none; }
+  h2 { margin: 8px 0 4px; }
+  .attention { flex-wrap: nowrap; overflow: auto; padding-bottom: 4px; max-height: 30vh; align-items: flex-start; }
+  .acard { flex: none; }
+  .lanes { max-height: 26vh; overflow: auto; padding-top: 8px; padding-bottom: 6px; }
+  main.wrap > .board { flex: 1 1 auto; min-height: 0; }
+  .col { overflow-y: auto; overflow-x: hidden; min-height: 0; }
+  .lane { padding: 2px 0; } .track { height: 18px; } .seg { top: 2px; height: 14px; line-height: 14px; }
+  .lane .who img { width: 22px; height: 22px; }
+  .page-note, #board-h { display: none; } /* 보드는 컬럼 머리로 충분하다 */
+  main.wrap > .board { margin-top: 10px; }
+}
 @media (max-width: 899px) {
   .acard { width: 100%; }
   .board { grid-template-columns: repeat(8, 220px); }
@@ -282,13 +310,11 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
   <div id="banners"></div>
   <h2 id="att-h">🙋 나를 기다리는 일 <span class="count" id="att-count"></span> <button type="button" class="notify-btn" id="notify-btn" aria-label="새 항목 알림 켜기">🔔 알림 켜기</button></h2>
   <div class="attention" id="attention" aria-live="polite"></div>
-  <h2>📊 요약</h2>
-  <div class="stats" id="stats"></div>
-  <h2>🛤 작업 레인 <span class="muted small">동시에 무엇이 돌고 있는지 · 같은 파일 충돌 예고</span></h2>
+  <h2 id="lanes-h"></h2>
   <div class="lanes" id="lanes"></div>
-  <h2>📋 보드</h2>
+  <h2 id="board-h">📋 보드</h2>
   <div class="board" id="board"></div>
-  <p class="muted small" style="margin-top:18px">읽기 전용 대시보드 (127.0.0.1). 상태를 바꾸는 명령은 터미널에서 실행합니다. 설계: sw-factory 기획안 dashboard/</p>
+  <p class="muted small page-note" style="margin-top:18px">읽기 전용 대시보드 (127.0.0.1). 상태를 바꾸는 명령은 터미널에서 실행합니다. 설계: sw-factory 기획안 dashboard/</p>
 </main>
 <aside class="drawer" id="drawer" aria-label="작업 상세" tabindex="-1"></aside>
 <div class="scrim" id="scrim"></div>
@@ -317,6 +343,9 @@ const STAGE_COLOR = { spec: "spec", build: "build", review: "verify", merge: "ap
 const STAGE_NAME = { spec: "spec", build: "build", review: "review", merge: "merge", merged: "✓", wait: "🙋 기다리는 중", blocked: "막힘", dropped: "중단" };
 const ROLE_NAME = { orchestrator: "오케스트레이터", builder: "Builder", reviewer_code: "리뷰어 code", reviewer_security: "리뷰어 security", reviewer_test: "리뷰어 test" };
 const MERGED_KEEP_S = 24 * 3600;
+const LANE_KEEP_S = 2 * 3600; // 레인은 진행 중이거나 최근 2시간 안에 움직인 작업만 (DESIGN.md 2.1)
+const MERGED_SHOWN = 6;
+const CLOSED_LANE = ["MERGED", "DROPPED"];
 
 // ---------------------------------------------------------------- 도우미
 const $ = (id) => document.getElementById(id);
@@ -386,7 +415,7 @@ async function getJSON(url, etag) {
 }
 
 // ---------------------------------------------------------------- 상태
-const S = { seen: null, notify: false, snap: null, etag: null, fails: 0, lastOk: 0, open: null, detail: null, detailEtag: null, activity: [], after: 0, settings: null, mergedOpen: false };
+const S = { seen: null, notify: false, snap: null, etag: null, fails: 0, lastOk: 0, open: null, detail: null, detailEtag: null, activity: [], after: 0, settings: null, mergedOpen: false, lanesOpen: null };
 
 // ---------------------------------------------------------------- 그리기
 function renderTop() {
@@ -408,6 +437,7 @@ function renderTop() {
       el("span", {}, "⬆ ", el("b", { text: kfmt(t.in) })), el("span", {}, "⬇ ", el("b", { text: kfmt(t.out) })),
       el("span", {}, "💾 ", el("b", { text: kfmt(t.cr + t.cw) }), ` (적중 ${Math.round(hitRate(t) * 100)}%)`),
       el("b", { text: snap ? kpiCost(snap.kpi) : money(0), title: snap && snap.kpi.cost_unpriced ? UNPRICED : null })),
+    kpiChips(snap),
     sub && sub.five_hour != null ? el("span", { class: "pill", title: `구독 사용량 (가장 최근 세션 로그) · 5시간 창 초기화 ${full(sub.five_hour_resets_at)}` },
       "구독 5h ", quota(sub.five_hour), ` ${Math.round(sub.five_hour * 100)}%`, sub.seven_day != null ? ` · 7d ${Math.round(sub.seven_day * 100)}%` : "") : null,
     el("button", { class: "iconbtn", "aria-label": "설정 보기", onclick: openSettings, text: "⚙ 설정" }),
@@ -493,24 +523,29 @@ function setupNotify() {
   };
   show();
 }
-function renderStats() {
-  const k = S.snap && S.snap.kpi; const s = $("stats"); s.replaceChildren();
-  if (!k) return;
-  const tile = (v, l, miss) => el("div", { class: "stat" }, el("div", { class: "v", text: v }), el("div", { class: "l" }, miss ? el("span", { class: "miss", title: "목표 미달 (기획안 3장)" }) : null, l));
+// 요약 숫자 (DESIGN.md 4.3): 상단 바 안의 칩. 목표 미달이면 주황 점, 자세한 설명은 마우스를 올리면
+function kpiChips(snap) {
+  const k = snap && snap.kpi; if (!k) return null;
   const pct = (v) => (v == null ? "-" : `${Math.round(v * 100)}%`);
-  s.append(
-    tile(pct(k.success_rate), `성공률 (승인 대기 이상 도달 / 전체 ${k.total}건) · 목표 70%`, k.success_rate != null && k.success_rate < 0.7),
-    tile(pct(k.intervention_rate), "사람 개입률 · 목표 30% 이하", k.intervention_rate != null && k.intervention_rate > 0.3),
-    tile(k.lead_time_min_median == null ? "-" : `${k.lead_time_min_median}분`, "리드타임 중앙값 · 목표 소형 10분", k.lead_time_min_median != null && k.lead_time_min_median > 10),
-    tile(kpiCost(k), `작업 비용 합계 (세션 + 리뷰어, API 환산)${k.cost_unpriced ? ` · 단가 없음 ${k.cost_unpriced}건` : ""}`, false),
-    el("div", { class: "muted small", style: "grid-column:1/-1", text: "오판율은 정답표로 사람이 확인해요." }));
+  const chip = (label, v, title, miss) => el("span", { title }, miss ? el("span", { class: "miss", title: "목표 미달 (기획안 3장)" }) : null, label, " ", el("b", { text: v }));
+  return el("span", { class: "pill kpis", title: "오판율은 정답표로 사람이 확인해요." },
+    chip("성공", pct(k.success_rate), `성공률 (승인 대기 이상 도달 / 전체 ${k.total}건) · 목표 70%`, k.success_rate != null && k.success_rate < 0.7),
+    chip("개입", pct(k.intervention_rate), "사람 개입률 · 목표 30% 이하", k.intervention_rate != null && k.intervention_rate > 0.3),
+    chip("리드", k.lead_time_min_median == null ? "-" : `${k.lead_time_min_median}분`, "리드타임 중앙값 · 목표 소형 10분", k.lead_time_min_median != null && k.lead_time_min_median > 10));
 }
 function renderLanes() {
   const box = $("lanes"); box.replaceChildren();
   const snap = S.snap; if (!snap) return;
   const now = snap.generated_at;
-  const lanes = snap.lanes.filter((l) => l.segments.length && (!["MERGED", "DROPPED"].includes(l.status) || now - l.segments.at(-1).start < MERGED_KEEP_S)).slice(-12);
-  if (!lanes.length) { box.append(el("div", { class: "empty-att" }, bolt("QUEUED", 40), "지금 레인이 비어 있어요.")); return; }
+  const running = (l) => l.segments.at(-1).end == null && !CLOSED_LANE.includes(l.status);
+  const lanes = snap.lanes.filter((l) => l.segments.length && (running(l) || now - (l.segments.at(-1).end ?? now) < LANE_KEEP_S)).slice(-12);
+  // 진행 중인 작업이 없으면 접어 둔다. 사람이 펼치거나 접으면 그 선택을 따른다
+  const open = S.lanesOpen ?? lanes.some(running);
+  box.classList.toggle("closed", !open);
+  $("lanes-h").replaceChildren(el("button", { class: "fold", "aria-expanded": String(open), onclick: () => { S.lanesOpen = !open; renderLanes(); } },
+    `${open ? "▾" : "▸"} 🛤 작업 레인`, el("span", { class: "muted small", text: `(진행 중 ${lanes.filter(running).length} · 최근 2시간 ${lanes.length})` })),
+    el("span", { class: "muted small", text: "동시에 무엇이 돌고 있는지 · 같은 파일 충돌 예고" }));
+  if (!lanes.length) { box.append(el("div", { class: "empty-att" }, bolt("QUEUED", 40), "최근 2시간 안에 움직인 작업이 없어요.")); return; }
   lanes.sort((a, b) => a.segments[0].start - b.segments[0].start);
   const t0 = Math.floor(Math.min(...lanes.map((l) => l.segments[0].start)) / 300) * 300, t1 = now + 120;
   const pct = (t) => `${((t - t0) / (t1 - t0)) * 100}%`;
@@ -578,18 +613,19 @@ function renderBoard() {
     let list = snap.jobs.filter((c) => c.column === key).sort((a, x) => (x.last_transition_at || 0) - (a.last_transition_at || 0));
     let older = 0;
     if (key === "merged") { const recent = list.filter((c) => snap.generated_at - (c.last_transition_at || 0) < MERGED_KEEP_S); older = list.length - recent.length; list = recent; }
-    const col = el("section", { class: `col ${key === "approval" && list.length ? "hot" : ""}`, "aria-label": `${name} ${list.length}건` },
-      el("div", { class: "colhead" }, el("span", { class: "sd", style: `background:${varc(v)}` }), name, el("span", { class: "cnt", text: String(list.length) })));
-    const shown = key === "merged" && !S.mergedOpen ? list.slice(0, 2) : list;
-    shown.forEach((c) => col.append(card(c)));
-    if (key === "merged" && list.length > 2) col.append(el("button", { class: "more", onclick: () => { S.mergedOpen = !S.mergedOpen; renderBoard(); }, text: S.mergedOpen ? "접기" : `더 보기 (${list.length - 2})` }));
-    if (older) col.append(el("div", { class: "muted small", style: "padding:4px 6px", text: `24시간 지난 머지 ${older}건은 숨김` }));
-    if (!list.length && !older) col.append(el("div", { class: "muted small", style: "padding:6px", text: "비어 있어요" }));
+    // 카드가 없는 컬럼은 세로 띠로 접고, 카드가 있는 컬럼이 남은 폭을 나눠 가진다 (DESIGN.md 2.1)
+    const slim = !list.length;
+    const col = el("section", { class: `col ${key === "approval" && list.length ? "hot" : ""} ${slim ? "slim" : ""}`, "aria-label": `${name} ${list.length}건`, title: slim ? `${name}: 비어 있어요${older ? ` (24시간 지난 머지 ${older}건은 숨김)` : ""}` : null },
+      el("div", { class: "colhead" }, el("span", { class: "sd", style: `background:${varc(v)}` }), el("span", { class: "cname", text: name }), el("span", { class: "cnt", text: String(list.length) })));
+    const shown = key === "merged" && !S.mergedOpen ? list.slice(0, MERGED_SHOWN) : list;
+    if (shown.length) col.append(el("div", { class: "cards" }, shown.map((c) => card(c))));
+    if (key === "merged" && list.length > MERGED_SHOWN) col.append(el("button", { class: "more", style: "margin-top:8px", onclick: () => { S.mergedOpen = !S.mergedOpen; renderBoard(); }, text: S.mergedOpen ? "접기" : `더 보기 (${list.length - MERGED_SHOWN})` }));
+    if (older && !slim) col.append(el("div", { class: "muted small", style: "padding:4px 6px", text: `24시간 지난 머지 ${older}건은 숨김` }));
     b.append(col);
   }
   if (S.open) document.querySelector(`.card[data-key="${CSS.escape(S.open)}"]`)?.classList.add("sel");
 }
-function render() { renderTop(); renderBanners(); renderAttention(); renderStats(); renderLanes(); renderBoard(); }
+function render() { renderTop(); renderBanners(); renderAttention(); renderLanes(); renderBoard(); }
 
 // ---------------------------------------------------------------- 드로어
 function sec(title, trustKind, ...kids) { return el("section", { class: "sec" }, el("h3", {}, title, trust(trustKind)), ...kids); }

@@ -124,6 +124,34 @@ async function startServer(jobs) {
     const anim = await page.evaluate(() => { const n = document.querySelector(".bounce, .live-dot, .seg.live"); return n ? getComputedStyle(n).animationName : "none"; });
     if (anim !== "none") fail(`동작 줄이기에서 애니메이션이 남음 (${anim})`);
 
+    // 한 화면 배치 (DESIGN.md 2.1): 1600×900에서 페이지가 세로로 스크롤되지 않고 보드가 첫 화면 안에 있다
+    const wide = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+    wide.on("pageerror", (e) => errors.push(String(e)));
+    await wide.goto(url);
+    await wide.waitForSelector(".card[data-key='J002']", { timeout: 10000 });
+    const fit = await wide.evaluate(() => {
+      const board = document.querySelector("#board").getBoundingClientRect();
+      const lanes = document.querySelector("#lanes").getBoundingClientRect();
+      const cols = [...document.querySelectorAll("#board .col")];
+      const empty = cols.filter((c) => !c.querySelector(".card"));
+      const full = cols.filter((c) => c.querySelector(".card"));
+      return { scroll: document.scrollingElement.scrollHeight, inner: innerHeight, boardTop: board.top, boardBottom: board.bottom,
+        lanesH: lanes.height, emptyW: empty.map((c) => c.getBoundingClientRect().width), fullW: full.map((c) => c.getBoundingClientRect().width),
+        top: document.querySelector("#top").textContent };
+    });
+    if (fit.scroll > fit.inner + 1) fail(`1600×900에서 페이지가 세로로 스크롤됨 (${fit.scroll} > ${fit.inner})`);
+    // 승인 대기·막힘·진행 중이 한꺼번에 있는 가장 바쁜 화면에서도 보드가 화면 높이의 30% 이상을 갖는다
+    if (fit.boardBottom > fit.inner + 1 || fit.boardBottom - fit.boardTop < fit.inner * 0.3) fail(`보드가 첫 화면에 충분히 들어오지 않음 (${Math.round(fit.boardTop)}~${Math.round(fit.boardBottom)})`);
+    if (fit.lanesH > fit.inner * 0.26 + 1) fail(`작업 레인이 화면의 26%보다 높음 (${Math.round(fit.lanesH)}px)`);
+    if (!fit.top.includes("성공") || !fit.top.includes("개입")) fail("요약 숫자가 상단 바에 없음");
+    if (!fit.emptyW.length || fit.emptyW.some((w) => w > 60)) fail(`빈 컬럼이 띠로 접히지 않음 (${fit.emptyW.map(Math.round)})`);
+    if (fit.fullW.some((w) => w < 200)) fail(`카드가 있는 컬럼이 좁음 (${fit.fullW.map(Math.round)})`);
+    // 좁은 화면은 위에서 아래로 쌓고 가로로 넘치지 않는다 (9장)
+    await wide.setViewportSize({ width: 1100, height: 800 });
+    const narrow = await wide.evaluate(() => ({ sw: document.scrollingElement.scrollWidth, iw: innerWidth }));
+    if (narrow.sw > narrow.iw + 1) fail(`1100px에서 페이지가 가로로 넘침 (${narrow.sw} > ${narrow.iw})`);
+    await wide.close();
+
     if (dialogs) fail(`대화상자 ${dialogs}개 (스크립트가 실행됨)`);
     const real = errors.filter((e) => !e.includes("favicon"));
     if (real.length) fail(`콘솔 오류: ${real.join(" | ")}`);
