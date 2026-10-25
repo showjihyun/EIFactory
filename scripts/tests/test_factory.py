@@ -491,6 +491,31 @@ def test_risk_new_skip_marker_is_medium(h: Harness) -> None:
     assert any("skip" in r for r in job["risk_reasons"])
 
 
+def test_large_change_is_medium(h: Harness) -> None:
+    h.to_building()
+    body = "".join(f"V{i} = {i}\n" for i in range(450))
+    (h.repo / "backend/src/bookmarks/big.py").write_text(body, encoding="utf-8")
+    h.run("verify", "J001")
+    job = h.job()
+    assert job["risk"] == "MEDIUM"
+    assert any("변경 규모" in r for r in job["risk_reasons"])
+
+
+def test_acceptance_test_lines_do_not_count_toward_change_size(h: Harness) -> None:
+    # 수락 테스트는 Spec 단계에서 잠근 기준이라 규모에 넣지 않는다 (factory-v4, 사람 결정).
+    # 화면 작업이 수락 테스트 줄 때문에 늘 MEDIUM이 되던 문제 (randomy J009·J013·J014)
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
+    h.run("new", "요구사항")
+    h.write_spec()
+    body = "".join(f"def test_{i}():\n    assert {i} == {i}\n" for i in range(250))
+    (h.repo / "backend/tests/acceptance/test_J001.py").write_text(body, encoding="utf-8")
+    assert h.run("spec", "J001") == 0
+    assert h.run("red", "J001") == 0
+    (h.repo / "backend/src/bookmarks/main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    h.run("verify", "J001")
+    assert h.job()["risk"] == "LOW"
+
+
 def test_declared_risk_is_never_lowered(h: Harness) -> None:
     h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
     h.run("new", "요구사항")
@@ -647,6 +672,19 @@ def test_approve_reject_sends_back_to_retry(h: Harness) -> None:
     h.run("validate", "J001")
     assert h.run("approve", "J001", "--reject", "문구가 어색함") == 0
     assert h.job()["status"] == "RETRY_REQUIRED"
+
+
+def test_reject_clears_the_heartbeat_for_the_next_session(h: Harness) -> None:
+    # 반려 뒤 이어서 고치는 세션이 끝난 세션의 heartbeat에 막히지 않게 한다 (factory-v4)
+    h.to_building(risk="MEDIUM")
+    h.run("verify", "J001")
+    h.configure(
+        red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator='{"verdict": "PASS", "issues": []}'
+    )
+    h.run("validate", "J001")
+    write_heartbeat(h, "s1", h.now)
+    assert h.run("approve", "J001", "--reject", "문구가 어색함") == 0
+    assert not (h.repo / "factory" / "heartbeat.json").exists()
 
 
 def test_approve_requires_approval_required(h: Harness) -> None:

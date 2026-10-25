@@ -159,14 +159,16 @@ def _plan_items(plans: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list
                             "trust": "host"})  # fmt: skip
         if state.get("status") == "DONE":
             continue
+        done = state.get("human_done") or {}
         for item in state["jobs"]:
-            if item.get("route") not in {"human", "needs_decision"}:
+            if item.get("route") not in {"human", "needs_decision"} or item["id"] in done:
                 continue
             what = "결정 필요" if item["route"] == "needs_decision" else "사람 직접 항목"
             human.append({"kind": "human", "id": f"{plan_id}:{item['id']}",
                           "title": f"{plan_id}:{item['id']} {what}",
                           "requirement": item.get("requirement") or "",
-                          "lines": [str(item.get("route_reason") or "")], "commands": [],
+                          "lines": [str(item.get("route_reason") or "")],
+                          "commands": [f"python scripts/plan.py done {plan_id} {item['id']}"],
                           "trust": "host"})  # fmt: skip
     return waiting, human
 

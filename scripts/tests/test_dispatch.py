@@ -64,8 +64,11 @@ def factory(*args):
     print(args[0], out.returncode, out.stdout.strip()[-200:], flush=True)
     return out.returncode
 if state["jobs"][job_id]["status"] == "RETRY_REQUIRED":
-    # 이어서 처리하는 세션: 충돌 표시를 지우고 두 쪽을 모두 살린다 (Builder 흉내)
-    for rel in state["jobs"][job_id]["replays"][-1]["files"]:
+    # 이어서 처리하는 세션: 충돌 표시를 지우고 두 쪽을 모두 살린다 (Builder 흉내).
+    # 반려된 작업이면 replays가 없다 (프롬프트에 반려 사유가 있는지 로그로 확인한다)
+    sys.stdout.reconfigure(encoding="utf-8")
+    print("prompt:", sys.argv[-1].replace(chr(10), " "), flush=True)
+    for rel in (state["jobs"][job_id].get("replays") or [{}])[-1].get("files", []):
         path = root / rel
         keep = [ln for ln in path.read_text(encoding="utf-8").splitlines()
                 if not ln.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
@@ -666,13 +669,30 @@ def test_approve_merges_with_trusted_code_and_reverification(
     assert not Path(job["worktree"]).exists()
 
 
-def test_reject_sends_job_back(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reject_continues_the_job_with_the_reason(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 반려된 작업은 사유를 담은 세션이 바로 이어서 고친다 (factory-v4). 고친 결과는 다시 승인 대기
     job = waiting_job(repo, monkeypatch)
     job_id = job["job_id"]
     assert dispatch.main(["--reject", job_id, "--reason", "이름이 이상함"], root=repo) == 0
     state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
-    assert state["jobs"][job_id]["status"] == "RETRY_REQUIRED"
-    assert state["jobs"][job_id]["approval"]["reason"] == "이름이 이상함"
+    assert state["jobs"][job_id]["status"] == "APPROVAL_REQUIRED"
+    log = repo.parent / f"{repo.name}.jobs" / "logs" / f"{job_id}.r2.jsonl"
+    text = log.read_text(encoding="utf-8")
+    assert "이름이 이상함" in text and "6번" in text
+    # 끝난 세션의 heartbeat가 남아 있으면 새 세션이 hook에 막힌다
+    assert not (Path(job["worktree"]) / "factory" / "heartbeat.json").exists()
+    events = [e["action"] for e in dispatch.host_record(repo, job_id)["events"]]
+    assert events[-2:] == ["reject", "continue"]
+
+
+def test_reject_prompt_names_the_reason() -> None:
+    job = {"status": "RETRY_REQUIRED", "requirement": "문구", "last_failure": None,
+           "approval": {"decision": "rejected", "reason": "버튼을 막아라"}}  # fmt: skip
+    assert dispatch.needs_continue(job)
+    prompt = dispatch.continue_prompt(job, "J001", "claude")
+    assert "버튼을 막아라" in prompt and "6번" in prompt and "recover" in prompt
 
 
 def test_approve_conflict_continues_session_on_new_base(
@@ -839,8 +859,9 @@ def test_host_actions_are_recorded_outside_the_worktree(
 def test_reject_is_recorded(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     job = waiting_job(repo, monkeypatch)
     dispatch.main(["--reject", job["job_id"], "--reason", "다시"], root=repo)
-    event = dispatch.host_record(repo, job["job_id"])["events"][-1]
-    assert event["action"] == "reject" and event["status"] == "RETRY_REQUIRED"
+    events = dispatch.host_record(repo, job["job_id"])["events"]
+    reject = next(e for e in events if e["action"] == "reject")
+    assert reject["status"] == "RETRY_REQUIRED"
 
 
 def test_host_merge_is_recorded(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -904,9 +925,12 @@ def test_run_plan_runs_jobs_in_dependency_order(repo: Path) -> None:
     assert {k: j["status"] for k, j in jobs.items()} == dict.fromkeys("ABC", "MERGED")
     # B는 A가 머지된 base 위에서 시작했다
     a, b = record(jobs["A"]), record(jobs["B"])
-    assert subprocess.run(
-        ["git", "merge-base", "--is-ancestor", a["merge_commit"], b["base_commit"]], cwd=repo
-    ).returncode == 0
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", a["merge_commit"], b["base_commit"]], cwd=repo
+        ).returncode
+        == 0
+    )
     # 작업 기록에 계획과 예상 등급이 남는다 (KPI 적중률)
     assert (b["plan_id"], b["plan_job"], b["expected_risk"]) == ("P001", "B", "LOW")
     assert plan_state(repo)["status"] == "DONE"
@@ -977,3 +1001,15 @@ def test_run_plan_of_a_done_plan_does_nothing(repo: Path) -> None:
     assert run_plan(repo)[0] == 0
     code, jobs = run_plan(repo)
     assert code == 0 and jobs == {}
+
+
+def test_human_item_marked_done_lets_its_dependents_run(repo: Path) -> None:
+    human = {**plan_item("H"), "paths": ["scripts/eval_x.py"]}
+    checked_plan(repo, human, plan_item("A", "H"))
+    assert dispatch.main(["--run-plan", "P001"], root=repo) == 1  # STOPPED: H를 기다림
+    assert plan_state(repo)["waiting"] == {"A": "H 사람 직접 항목"}
+    assert dispatch.plan.main(["done", "P001", "H"], root=repo) == 0
+    code, jobs = run_plan(repo)
+    assert code == 0
+    assert jobs["A"]["status"] == "MERGED"
+    assert plan_state(repo)["status"] == "DONE"

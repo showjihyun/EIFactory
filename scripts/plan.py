@@ -2,6 +2,7 @@
 
 사용법:
     python scripts/plan.py check <계획 ID>      # 예: P001
+    python scripts/plan.py done <계획 ID> <작업>  # 사람 직접 항목을 끝냈다고 표시
     (실행은 사람이 python scripts/dispatch.py --run-plan <계획 ID>)
 
 계획 문서는 `factory/plans/<ID>.md`에 ```json 블록 하나로 둔다 (계획자가 쓰고 사람이 고친다):
@@ -309,7 +310,7 @@ def _held(item: dict[str, Any], jobs: dict[str, dict[str, Any]],
     reasons = []
     for dep in item["depends_on"]:
         status = statuses.get(dep)
-        if status == "MERGED":
+        if status in {"MERGED", "DONE"}:
             continue
         if jobs[dep]["route"] != "dispatch":
             reasons.append(f"{dep} 사람 직접 항목")
@@ -364,10 +365,33 @@ def plan_status(state: dict[str, Any], statuses: dict[str, str | None]) -> str:
     if not left:
         return "DONE"
     if any(statuses.get(j["id"]) in STOP_STATUSES for j in left) or any(
-        jobs[d]["route"] != "dispatch" for j in left for d in j["depends_on"]
-    ):
+        jobs[d]["route"] != "dispatch" and statuses.get(d) != "DONE"
+        for j in left for d in j["depends_on"]
+    ):  # fmt: skip
         return "STOPPED"
     return "RUNNING"
+
+
+def human_statuses(state: dict[str, Any]) -> dict[str, str | None]:
+    """사람이 끝냈다고 표시한 사람 직접 항목 → DONE (`plan.py done`)."""
+    return {name: "DONE" for name in state.get("human_done") or {}}
+
+
+def mark_done(root: Path, plan_id: str, name: str) -> dict[str, Any]:
+    """사람 직접 항목을 끝냈다고 기록한다. 그 항목에 기대는 작업이 다음 --run-plan에서 돈다."""
+    state = load_state(root, plan_id)
+    if state is None:
+        raise PlanError(
+            f"{plan_id} 검사 기록이 없습니다. 먼저 python scripts/plan.py check {plan_id}"
+        )
+    item = next((j for j in state["jobs"] if j["id"] == name), None)
+    if item is None:
+        raise PlanError(f"{plan_id}에 없는 작업: {name}")
+    if item["route"] == "dispatch":
+        raise PlanError(f"{name}은 팩토리 작업입니다. 사람 직접 항목만 완료로 표시합니다")
+    state.setdefault("human_done", {})[name] = time.time()
+    save_state(root, state)
+    return state
 
 
 def plan_context(plan_id: str, item: dict[str, Any]) -> str:
@@ -493,7 +517,19 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(prog="plan", description="계획 검사 (기획안 6.9 P1)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check").add_argument("plan_id")
+    done = sub.add_parser("done", help="사람 직접 항목을 끝냈다고 표시")
+    done.add_argument("plan_id")
+    done.add_argument("name")
     args = parser.parse_args(argv)
+    if args.command == "done":
+        try:
+            mark_done(root, args.plan_id, args.name)
+        except PlanError as error:
+            print(f"오류: {error}")
+            return 1
+        print(f"{args.plan_id}:{args.name} 완료로 표시. 이어서: "
+              f"python scripts/dispatch.py --run-plan {args.plan_id}")  # fmt: skip
+        return 0
     try:
         state = check_plan(root, args.plan_id)
     except PlanError as error:
@@ -505,6 +541,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     runs = {k: v for k, v in (previous.get("runs") or {}).items() if k in ids}
     if runs:
         state["runs"] = runs
+    human_done = {k: v for k, v in (previous.get("human_done") or {}).items() if k in ids}
+    if human_done:
+        state["human_done"] = human_done
     save_state(root, state)
     print(render(state))
     return 0
