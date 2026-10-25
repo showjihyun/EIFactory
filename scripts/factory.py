@@ -452,9 +452,13 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
         raise_to(*rule)
     if job["allowed_config_changes"]:
         raise_to("MEDIUM", "설정 파일 변경 허용")
+    # 수락 테스트는 Spec 단계에서 잠근 기준이라 변경 규모에 넣지 않는다 (경로·내용 규칙은 그대로)
+    accept = {t.split("::")[0] for t in job.get("acceptance_tests", [])}
+    sized = [p for p in files if p not in accept]
     total_lines = 0
     for path, (added, removed) in files.items():
-        total_lines += len(added) + len(removed)
+        if path not in accept:
+            total_lines += len(added) + len(removed)
         if rule := path_risk(cfg, path):
             raise_to(*rule)
         for pattern, reason in HIGH_CONTENT:
@@ -463,8 +467,8 @@ def compute_risk(root: Path, job: Job) -> tuple[str, list[str]]:
         for pattern, reason in MEDIUM_CONTENT:
             if any(pattern.search(ln) for ln in added + removed):
                 raise_to("MEDIUM", f"{reason} ({path})")
-    if total_lines > MAX_LINES or len(files) > MAX_FILES:
-        raise_to("MEDIUM", f"변경 규모 {len(files)}파일 {total_lines}줄")
+    if total_lines > MAX_LINES or len(sized) > MAX_FILES:
+        raise_to("MEDIUM", f"변경 규모 {len(sized)}파일 {total_lines}줄 (수락 테스트 제외)")
     return RISKS[level], reasons
 
 
