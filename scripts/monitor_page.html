@@ -160,10 +160,11 @@ h2 .count { background: var(--s-approval-bg); color: var(--s-approval); border-r
 /* 보드 */
 .board { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
 .col { background: var(--sunken); border-radius: 16px; padding: 8px; min-height: 140px; flex: 1 1 0; min-width: 220px; }
-.col.slim { flex: 0 0 44px; min-width: 44px; padding: 8px 4px; overflow: hidden !important; }
-.col.slim .colhead { flex-direction: column; align-items: center; padding: 4px 0; gap: 8px; }
-.col.slim .cname { writing-mode: vertical-rl; letter-spacing: 1px; }
-.col.slim .colhead .cnt { margin: 0; }
+.empty-stages { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
+.empty-stages:empty { display: none; }
+.stage-chip { display: inline-flex; gap: 5px; align-items: center; padding: 2px 9px; border-radius: 999px; background: var(--sunken); border: 1px solid var(--border); }
+.stage-chip .sd { width: 8px; height: 8px; border-radius: 50%; }
+.board-empty { flex: 1; color: var(--muted); padding: 18px; text-align: center; background: var(--sunken); border-radius: 16px; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; align-items: start; }
 .cards .card { margin-bottom: 0; }
 .col.hot { background: color-mix(in srgb, var(--s-approval-bg) 70%, var(--sunken)); }
@@ -285,15 +286,16 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
   main.wrap { flex: 1; min-height: 0; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; padding-bottom: 12px; }
   main.wrap > * { flex: none; }
   h2 { margin: 8px 0 4px; }
-  .attention { flex-wrap: nowrap; overflow: auto; padding-bottom: 4px; max-height: 30vh; align-items: flex-start; }
+  .attention { flex-wrap: nowrap; overflow: auto; padding-bottom: 4px; max-height: 27vh; align-items: flex-start; }
   .acard { flex: none; }
-  .lanes { max-height: 26vh; overflow: auto; padding-top: 8px; padding-bottom: 6px; }
+  .lanes { max-height: 22vh; overflow: auto; padding-top: 8px; padding-bottom: 6px; }
   main.wrap > .board { flex: 1 1 auto; min-height: 0; }
   .col { overflow-y: auto; overflow-x: hidden; min-height: 0; }
   .lane { padding: 2px 0; } .track { height: 18px; } .seg { top: 2px; height: 14px; line-height: 14px; }
   .lane .who img { width: 22px; height: 22px; }
   .page-note, #board-h { display: none; } /* 보드는 컬럼 머리로 충분하다 */
-  main.wrap > .board { margin-top: 10px; }
+  main.wrap > .empty-stages { margin-top: 10px; }
+  main.wrap > .board { margin-top: 8px; }
 }
 @media (max-width: 899px) {
   .acard { width: 100%; }
@@ -313,6 +315,7 @@ table.tt tr.sum td { font-weight: 700; border-bottom: 0; }
   <h2 id="lanes-h"></h2>
   <div class="lanes" id="lanes"></div>
   <h2 id="board-h">📋 보드</h2>
+  <div class="empty-stages" id="empty-stages" aria-label="비어 있는 단계"></div>
   <div class="board" id="board"></div>
   <p class="muted small page-note" style="margin-top:18px">읽기 전용 대시보드 (127.0.0.1). 상태를 바꾸는 명령은 터미널에서 실행합니다. 설계: sw-factory 기획안 dashboard/</p>
 </main>
@@ -344,7 +347,7 @@ const STAGE_NAME = { spec: "spec", build: "build", review: "review", merge: "mer
 const ROLE_NAME = { orchestrator: "오케스트레이터", builder: "Builder", reviewer_code: "리뷰어 code", reviewer_security: "리뷰어 security", reviewer_test: "리뷰어 test" };
 const MERGED_KEEP_S = 24 * 3600;
 const LANE_KEEP_S = 2 * 3600; // 레인은 진행 중이거나 최근 2시간 안에 움직인 작업만 (DESIGN.md 2.1)
-const MERGED_SHOWN = 6;
+const MERGED_SHOWN = 24; // 컬럼 안에서 스크롤하므로 넉넉히 보여 준다
 const CLOSED_LANE = ["MERGED", "DROPPED"];
 
 // ---------------------------------------------------------------- 도우미
@@ -608,21 +611,27 @@ function card(c) {
 }
 function renderBoard() {
   const b = $("board"); b.replaceChildren();
+  const chipsBox = $("empty-stages"); chipsBox.replaceChildren();
   const snap = S.snap; if (!snap) return;
   for (const [key, name, v] of COLUMNS) {
     let list = snap.jobs.filter((c) => c.column === key).sort((a, x) => (x.last_transition_at || 0) - (a.last_transition_at || 0));
     let older = 0;
     if (key === "merged") { const recent = list.filter((c) => snap.generated_at - (c.last_transition_at || 0) < MERGED_KEEP_S); older = list.length - recent.length; list = recent; }
-    // 카드가 없는 컬럼은 세로 띠로 접고, 카드가 있는 컬럼이 남은 폭을 나눠 가진다 (DESIGN.md 2.1)
-    const slim = !list.length;
-    const col = el("section", { class: `col ${key === "approval" && list.length ? "hot" : ""} ${slim ? "slim" : ""}`, "aria-label": `${name} ${list.length}건`, title: slim ? `${name}: 비어 있어요${older ? ` (24시간 지난 머지 ${older}건은 숨김)` : ""}` : null },
+    // 카드가 없는 단계는 보드 위 가로 칩으로 모으고, 카드가 있는 컬럼이 폭을 나눠 가진다 (DESIGN.md 2.1)
+    if (!list.length) {
+      chipsBox.append(el("span", { class: "stage-chip", title: older ? `24시간 지난 머지 ${older}건은 숨김` : `${name}: 비어 있어요` },
+        el("span", { class: "sd", style: `background:${varc(v)}` }), name, " ", el("b", { text: "0" })));
+      continue;
+    }
+    const col = el("section", { class: `col ${key === "approval" ? "hot" : ""}`, "aria-label": `${name} ${list.length}건` },
       el("div", { class: "colhead" }, el("span", { class: "sd", style: `background:${varc(v)}` }), el("span", { class: "cname", text: name }), el("span", { class: "cnt", text: String(list.length) })));
     const shown = key === "merged" && !S.mergedOpen ? list.slice(0, MERGED_SHOWN) : list;
     if (shown.length) col.append(el("div", { class: "cards" }, shown.map((c) => card(c))));
     if (key === "merged" && list.length > MERGED_SHOWN) col.append(el("button", { class: "more", style: "margin-top:8px", onclick: () => { S.mergedOpen = !S.mergedOpen; renderBoard(); }, text: S.mergedOpen ? "접기" : `더 보기 (${list.length - MERGED_SHOWN})` }));
-    if (older && !slim) col.append(el("div", { class: "muted small", style: "padding:4px 6px", text: `24시간 지난 머지 ${older}건은 숨김` }));
+    if (older) col.append(el("div", { class: "muted small", style: "padding:4px 6px", text: `24시간 지난 머지 ${older}건은 숨김` }));
     b.append(col);
   }
+  if (!b.children.length) b.append(el("div", { class: "board-empty", text: "보드가 비어 있어요. dispatch로 작업을 넣으면 여기에 나타나요." }));
   if (S.open) document.querySelector(`.card[data-key="${CSS.escape(S.open)}"]`)?.classList.add("sel");
 }
 function render() { renderTop(); renderBanners(); renderAttention(); renderLanes(); renderBoard(); }
