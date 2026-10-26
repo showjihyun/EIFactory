@@ -68,6 +68,13 @@ if state["jobs"][job_id]["status"] == "RETRY_REQUIRED":
     # 반려된 작업이면 replays가 없다 (프롬프트에 반려 사유가 있는지 로그로 확인한다)
     sys.stdout.reconfigure(encoding="utf-8")
     print("prompt:", sys.argv[-1].replace(chr(10), " "), flush=True)
+    heartbeat = root / "factory/heartbeat.json"
+    print("heartbeat-at-start", heartbeat.exists(), flush=True)
+    if os.environ.get("FAKE_AGENT_MODE") == "stuck":
+        # 고치지 못하고 RETRY_REQUIRED로 끝난 세션 (hook이 남긴 heartbeat는 그대로 남는다)
+        heartbeat.write_text(json.dumps({"at": time.time()}), encoding="utf-8")
+        print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.1}))
+        sys.exit(0)
     for rel in (state["jobs"][job_id].get("replays") or [{}])[-1].get("files", []):
         path = root / rel
         keep = [ln for ln in path.read_text(encoding="utf-8").splitlines()
@@ -693,6 +700,83 @@ def test_reject_prompt_names_the_reason() -> None:
     assert dispatch.needs_continue(job)
     prompt = dispatch.continue_prompt(job, "J001", "claude")
     assert "버튼을 막아라" in prompt and "6번" in prompt and "recover" in prompt
+
+
+def stuck_after_reject(repo: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    job = waiting_job(repo, monkeypatch)
+    monkeypatch.setenv("FAKE_AGENT_MODE", "stuck")
+    assert dispatch.main(["--reject", job["job_id"], "--reason", "줄 끝"], root=repo) == 1
+    monkeypatch.delenv("FAKE_AGENT_MODE")
+    return job
+
+
+def job_state(job: dict[str, Any]) -> dict[str, Any]:
+    state = json.loads((Path(job["worktree"]) / "factory/state.json").read_text(encoding="utf-8"))
+    loaded: dict[str, Any] = state["jobs"][job["job_id"]]
+    return loaded
+
+
+def test_continuation_does_not_hit_the_previous_sessions_heartbeat(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 이어서 처리 세션이 연달아 돌 때 앞 세션의 heartbeat에 막히지 않는다 (factory-v7, J020 실측)
+    job = stuck_after_reject(repo, monkeypatch)
+    logs = repo.parent / f"{repo.name}.jobs" / "logs"
+    for n in (2, 3):
+        text = (logs / f"{job['job_id']}.r{n}.jsonl").read_text(encoding="utf-8")
+        assert "heartbeat-at-start False" in text
+    # 호스트가 끝난 세션을 이어받아(recover) 시계를 마지막 활동 시점으로 맞춘다
+    assert all(r["forced"] for r in job_state(job)["recoveries"])
+
+
+def test_unfinished_continuation_blocks_and_stops_the_clock(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 이어서 처리 세션을 다 쓰고도 RETRY_REQUIRED면 BLOCKED로 남긴다. 세션 없이 시계가 돌지 않게
+    job = stuck_after_reject(repo, monkeypatch)
+    state = job_state(job)
+    assert state["status"] == "BLOCKED"
+    assert state["blocked"]["reason"] == "SESSION_ENDED"
+    assert state["checkpoint"] == "RETRY_REQUIRED"
+    assert state["time"]["segments"][-1][1] is not None
+
+
+def test_continue_runs_a_session_with_the_human_note(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 멈춘 작업을 기본 checkout에서 명령 하나로 이어서 처리한다 (factory-v7)
+    job = stuck_after_reject(repo, monkeypatch)
+    job_id = job["job_id"]
+    code = dispatch.main(["--continue", job_id, "--reason", "줄 끝은 두어라"], root=repo)
+    assert code == 0
+    assert job_state(job)["status"] == "APPROVAL_REQUIRED"
+    logs = repo.parent / f"{repo.name}.jobs" / "logs"
+    text = (logs / f"{job_id}.r4.jsonl").read_text(encoding="utf-8")
+    assert "줄 끝은 두어라" in text and "heartbeat-at-start False" in text
+    events = [e["action"] for e in dispatch.host_record(repo, job_id)["events"]]
+    assert events[-2:] == ["resume", "continue"]
+    record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    assert record["status"] == "APPROVAL_REQUIRED"
+
+
+def test_continue_refuses_a_job_that_is_not_stopped(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = waiting_job(repo, monkeypatch)
+    assert dispatch.main(["--continue", job["job_id"]], root=repo) == 2
+
+
+def test_review_texts_are_kept_after_the_worktree_is_removed(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 리뷰 원문·승인 요약은 worktree 안에 있어 머지 뒤 지워진다. 기록 폴더로 옮겨 둔다 (factory-v7)
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch.main(["--approve", job_id], root=repo) == 0
+    assert not Path(job["worktree"]).exists()
+    kept = repo.parent / f"{repo.name}.jobs" / "meta" / job_id / "reviews"
+    names = {p.name for p in kept.iterdir()}
+    assert {f"{job_id}-1-code.txt", f"{job_id}-approval.md"} <= names
 
 
 def test_approve_conflict_continues_session_on_new_base(
