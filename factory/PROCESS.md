@@ -136,10 +136,11 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
    - 비용 상한 (`--budget-usd`, 기본 $5, API 환산 임시값): Claude 세션에 `--max-budget-usd`로 건다. 상한에 닿아 세션이 작업 도중 멈추면 BLOCKED(`BUDGET`). 리뷰어 호출은 하나당 $1 (`FACTORY_REVIEW_BUDGET_USD`). Codex CLI에는 같은 옵션이 없어 벽시계 상한만 적용되고, 토큰 수는 기록한다.
    - 세션 비용·토큰은 결과 표와 `dispatch-<시각>.json`에 남는다.
-5. 세션이 끝났는데 작업이 rebase 충돌로 RETRY_REQUIRED이면(호스트 머지, `--approve`, 세션이 멈춘 경우) 같은 worktree에서 세션을 이어서 띄운다 (최대 2회, 로그 `logs/<ID>.r<n>.jsonl`, 호스트 기록 `continue`). 이어서 처리한 세션 비용도 작업 비용에 들어간다.
+5. 세션이 끝났는데 작업이 rebase 충돌로 RETRY_REQUIRED이면(호스트 머지, `--approve`, 세션이 멈춘 경우) 같은 worktree에서 세션을 이어서 띄운다 (최대 2회, 로그 `logs/<ID>.r<n>.jsonl`, 호스트 기록 `continue`). 이어서 처리한 세션 비용도 작업 비용에 들어간다. 사람이 반려한 작업도 같은 길로 이어서 고친다. 새 세션 전에 호스트가 `recover --force`로 끝난 세션을 이어받는다 (heartbeat 정리, 세션 없이 흐른 시계 되돌림). 이어서 처리를 다 쓰고도 RETRY_REQUIRED이면 BLOCKED(`SESSION_ENDED`)로 둔다 (factory-v7).
 6. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다.
    - 승인 대기는 **기본 checkout에서** `python scripts/dispatch.py --approve <ID>` (반려 `--reject <ID> --reason "..."`). 작업 worktree의 `scripts/`와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 `factory.py approve`는 쓰지 않는다. 승인 요약(`factory/reviews/<ID>-approval.md`)도 세션이 쓴 파일이니 diff(`git -C <worktree> diff <base>`)를 직접 본다.
-   - BLOCKED는 그 worktree에서 `resume`·`drop`을 실행한다.
+   - BLOCKED는 **기본 checkout에서** `python scripts/dispatch.py --continue <ID> [--reason "지시"] [--extend]`로 멈춘 단계부터 세션 하나로 이어서 처리한다 (resume + 이어서 처리, RETRY_REQUIRED도 받음, factory-v7). 버릴 때는 그 worktree에서 `drop`.
+   - 리뷰 원문과 승인 요약은 기록할 때마다 `../<레포>.jobs/meta/<ID>/reviews/`에 복사해 worktree를 지운 뒤에도 남긴다 (factory-v7).
    - 호스트 머지(컨테이너·Codex 세션)와 `--approve`는 상태 파일을 믿지 않는다 (`FACTORY_UNTRUSTED_STATE=1`): 설정은 기본 checkout에서 읽고, 수락 테스트 목록은 diff에서도 찾고, base가 그대로여도 수락 테스트 Green과 `verify`를 다시 돌린다 (컨테이너 작업이면 오프라인 컨테이너에서). 잠긴 파일(기존 테스트, 검증 설정)이 바뀐 자동 승인 작업은 머지하지 않고 사람 승인으로 돌린다.
    - 세션 정보(격리 방식, 이미지)는 worktree 밖 `../<레포>.jobs/meta/<ID>/session.json`에 둔다.
 7. 결과는 표로 출력하고 `../<레포>.jobs/dispatch-<시각>.json`에 남긴다. 세션 로그는 `../<레포>.jobs/logs/`.

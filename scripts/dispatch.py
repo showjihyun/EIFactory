@@ -78,6 +78,7 @@ DEFAULT_WALL_TIMEOUT_MIN = 40.0  # 중형 상한 30분 + 정리 여유
 # 세션 하나의 비용 상한 (API 환산, 임시값). 규모는 spec에서 정해지므로 중형 기준 하나로 건다.
 # Phase 1~3 실제 세션 31개의 최대 $1.21 (리뷰어 제외)의 약 4배. Claude만 적용 (`--max-budget-usd`)
 DEFAULT_BUDGET_USD = 5.0
+REVIEWS_DIR = "factory/reviews"
 ACTIVE = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING", "APPROVED"}
 
 # 컨테이너 격리 (Phase 3b)
@@ -140,6 +141,13 @@ REJECT_TASK = (
     "recover 없이 factory/PROCESS.md 6번(Builder 호출)부터 진행해. Builder에게 반려 사유를 그대로 "
     "전달한다. 잠긴 수락 테스트는 바꾸지 않고, 사유가 새 동작이면 Builder가 새 테스트 파일을 "
     "더한다. 그 뒤 verify·validate까지 절차대로."
+)
+# 멈춘 작업(RETRY_REQUIRED·BLOCKED)을 사람이 이어서 처리하게 한 세션 (factory-v7, --continue)
+RESUME_TASK = (
+    "작업 {job_id}는 {status} 상태에서 멈춰 있었고 사람이 이어서 처리를 요청했다. 마지막 실패: "
+    "{failure}. 사람의 지시: {note} 호스트가 이미 이어받았다 ({recovered}). recover 없이 "
+    "factory/PROCESS.md 절차대로 그 다음 단계부터 진행해. 잠긴 수락 테스트는 바꾸지 않고, 지시가 "
+    "새 동작이면 Builder가 새 테스트 파일을 더한다."
 )
 CONTINUE_HEAD = {
     "claude": "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n",
@@ -653,6 +661,13 @@ def _save_record(root: Path, job_id: str, job: dict[str, Any]) -> Path:
     record = _jobs_dir(root) / "records" / f"{job_id}.json"
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # 리뷰 원문·승인 요약은 worktree 안(git 제외)이라 머지 뒤 지워진다.
+    # 판단 근거로 남긴다 (factory-v7)
+    reviews = _jobs_dir(root) / job_id / REVIEWS_DIR
+    kept = host_record_path(root, job_id).parent / "reviews"
+    for path in sorted(reviews.glob(f"{job_id}-*")) if reviews.is_dir() else []:
+        kept.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, kept / path.name)
     return record
 
 
@@ -744,6 +759,7 @@ def run_job(
                 "session_cost_usd"
             ]
         job = _load_job(worktree, job_id)
+    job = _block_unfinished(root, worktree, job_id, job)
     builder_id = ((job.get("models") or {}).get("builder") or {}).get("model")
     prices = unit_prices(sorted(logs.glob("*.jsonl")))
     live = combine_usage(
@@ -888,15 +904,33 @@ def continue_session(
     args: argparse.Namespace,
     docker: DockerJob | None,
     session_cap: float,
+    note: str | None = None,
 ) -> dict[str, Any]:
-    """충돌로 새 base 위에 다시 펼쳐진 작업을 세션 하나로 이어서 처리한다.
+    """충돌·반려로 이어서 처리할 작업(note가 있으면 사람이 멈춘 작업)을 세션 하나로 처리한다.
 
     로그는 `<ID>.r<n>.jsonl` (n = 2, 3, ...).
     """
+    # 앞 세션은 끝났다. 호스트가 이어받아 heartbeat를 지우고(남으면 새 세션이 hook에 막힘) 세션 없이
+    # 흐른 시계를 마지막 활동 시점으로 되돌린다 (factory-v7, J020 실측)
+    status = _load_job(worktree, job_id)["status"]
+    recovered = _factory(root, worktree, "recover", job_id, "--force")
+    if recovered.returncode != 0:
+        raise DispatchError(f"{job_id}: recover 실패: {recovered.stdout.strip()[-300:]}")
     job = _load_job(worktree, job_id)
     logs = _jobs_dir(root) / "logs"
     n = 2 + len(list(logs.glob(f"{job_id}.r*.jsonl")))
-    prompt = continue_prompt(job, job_id, args.agent)
+    if note is None:
+        prompt = continue_prompt(job, job_id, args.agent)
+    else:
+        head = CONTINUE_HEAD["codex" if args.agent == "codex" else "claude"]
+        prompt = (head + RESUME_TASK).format(
+            job_id=job_id,
+            requirement=job["requirement"],
+            status=status,
+            failure=job.get("last_failure") or (job.get("blocked") or {}).get("detail") or "-",
+            note=note or "추가 지시 없음.",
+            recovered=recovered.stdout.strip()[-300:],
+        )
     log_path = logs / f"{job_id}.r{n}.jsonl"
     out = _session(root, worktree, job_id, prompt, args, docker, log_path, session_cap)
     job = _load_job(worktree, job_id)
@@ -939,6 +973,74 @@ def _remove_worktree(root: Path, worktree: Path, result: dict[str, Any]) -> bool
             return False
 
 
+def _block_unfinished(
+    root: Path, worktree: Path, job_id: str, job: dict[str, Any]
+) -> dict[str, Any]:
+    """이어서 처리 세션을 다 쓰고도 고칠 것이 남은 작업은 BLOCKED로 둔다.
+
+    RETRY_REQUIRED로 두면 세션이 없는데도 활성 시간이 흘러 나중에 TIMEOUT이 된다 (J020 실측).
+    """
+    if not needs_continue(job):
+        return job
+    detail = f"이어서 처리 세션이 끝났는데 {job['status']}에 남음: {job.get('last_failure') or '-'}"
+    _factory(root, worktree, "block", job_id, "--reason", "SESSION_ENDED", "--detail", detail)
+    return _load_job(worktree, job_id)
+
+
+def _job_docker(root: Path, worktree: Path, job_id: str, info: dict[str, Any]) -> DockerJob | None:
+    if info["isolation"] != "docker":
+        return None
+    docker = _docker_job(root, worktree, job_id, info["stamp"], info["image"])
+    # 세션이 끝날 때 의존성 볼륨을 지웠으므로 재검증·이어서 처리 전에 다시 설치한다 (키 없음)
+    setup = _run(docker_setup_command(docker), worktree)
+    if setup.returncode != 0:
+        raise DispatchError(f"컨테이너 설치 실패: {(setup.stdout + setup.stderr)[-500:]}")
+    return docker
+
+
+def continue_job(root: Path, job_id: str, note: str, extend: bool, keep_merged: bool) -> int:
+    """멈춘 작업(RETRY_REQUIRED·BLOCKED)을 사람 지시와 함께 세션 하나로 이어서 처리한다.
+
+    factory-v7. BLOCKED면 resume(사람 전용)으로 멈춘 단계에 되돌린 뒤 처리한다.
+    기본 checkout에서 실행한다.
+    """
+    worktree = _jobs_dir(root) / job_id
+    if not (worktree / "factory/state.json").exists():
+        raise DispatchError(f"{job_id}: 작업 worktree가 없습니다 ({worktree})")
+    info = session_info(root, job_id)
+    job = _load_job(worktree, job_id)
+    if job["status"] not in {"RETRY_REQUIRED", "BLOCKED"}:
+        raise DispatchError(f"{job_id}: 멈춘 작업이 아닙니다 ({job['status']})")
+    if job["status"] == "BLOCKED":
+        done = _factory(root, worktree, "resume", job_id, *(["--extend"] if extend else []))
+        print(done.stdout.strip())
+        job = _load_job(worktree, job_id)
+        _record_host(root, job_id, "resume", job)
+        if done.returncode != 0:
+            return done.returncode
+        if job["status"] not in ACTIVE:
+            print(f"{job_id}: {job['status']}로 돌아왔습니다. 세션 없이 다음 명령을 쓰세요")
+            return 0
+    docker = _job_docker(root, worktree, job_id, info)
+    try:
+        args = _session_args(root, info, docker is not None)
+        cap = float((job.get("budgets_applied") or {}).get("session", DEFAULT_BUDGET_USD))
+        more = continue_session(root, worktree, job_id, args, docker, cap, note=note)
+        print(f"{job_id}: 이어서 처리 (세션 {more['round']}) → {more['status']}")
+        job = _block_unfinished(root, worktree, job_id, _load_job(worktree, job_id))
+        _save_record(root, job_id, job)
+    finally:
+        if docker:
+            _docker("volume", "rm", f"{docker.name}-node", f"{docker.name}-venv")
+    if job["status"] == "APPROVAL_REQUIRED":
+        print(f"승인해 주세요: python scripts/dispatch.py --approve {job_id}")
+    if job["status"] == "MERGED" and not keep_merged:
+        result: dict[str, Any] = {}
+        if not _remove_worktree(root, worktree, result):
+            print(f"worktree를 지우지 못했습니다: {result.get('cleanup_error')}")
+    return 0 if job["status"] in {"APPROVAL_REQUIRED", "MERGED"} else 1
+
+
 def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = False) -> int:
     """승인 대기 작업을 사람이 승인(머지) 또는 반려한다. 기본 checkout의 factory.py로 실행한다."""
     worktree = _jobs_dir(root) / job_id
@@ -948,13 +1050,7 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
     status = _load_job(worktree, job_id)["status"]
     if status != "APPROVAL_REQUIRED":
         raise DispatchError(f"{job_id}: 승인 대기 상태가 아닙니다 ({status})")
-    docker = None
-    if info["isolation"] == "docker":
-        docker = _docker_job(root, worktree, job_id, info["stamp"], info["image"])
-        # 세션이 끝날 때 의존성 볼륨을 지웠으므로 재검증·이어서 처리 전에 다시 설치한다 (키 없음)
-        setup = _run(docker_setup_command(docker), worktree)
-        if setup.returncode != 0:
-            raise DispatchError(f"컨테이너 설치 실패: {(setup.stdout + setup.stderr)[-500:]}")
+    docker = _job_docker(root, worktree, job_id, info)
     try:
         if reject:
             done = _factory(
@@ -985,6 +1081,7 @@ def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = Fals
                 job = _load_job(worktree, job_id)
                 if not needs_continue(job):
                     break
+            job = _block_unfinished(root, worktree, job_id, job)
             _save_record(root, job_id, job)
             if job["status"] == "APPROVAL_REQUIRED":
                 print(
@@ -1162,7 +1259,9 @@ def _summary(report: dict[str, Any]) -> str:
     lines += [
         "",
         "승인 대기: `python scripts/dispatch.py --approve <ID>` (반려는 `--reject <ID> --reason`). "
-        "BLOCKED: 해당 worktree에서 `python scripts/factory.py resume|drop <ID>`.",
+        "BLOCKED: `python scripts/dispatch.py --continue <ID> [--reason 지시] [--extend]` "
+        "(멈춘 단계부터 세션 하나로 이어서) 또는 해당 worktree에서 "
+        "`python scripts/factory.py drop <ID>`.",
     ]
     return "\n".join(lines)
 
@@ -1230,7 +1329,12 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "--run-plan", metavar="ID", help="검사된 계획을 실행 (사람 전용, 실행 = 계획 승인)"
     )
     parser.add_argument("--reject", metavar="ID", help="승인 대기 작업을 반려")
-    parser.add_argument("--reason", help="--reject 이유")
+    parser.add_argument(
+        "--continue", dest="continue_id", metavar="ID",
+        help="멈춘 작업(RETRY_REQUIRED·BLOCKED)을 세션 하나로 이어서 처리 (사람 전용)",
+    )  # fmt: skip
+    parser.add_argument("--extend", action="store_true", help="--continue: BLOCKED 상한 50%% 연장")
+    parser.add_argument("--reason", help="--reject 이유, --continue 지시")
     parser.add_argument("--max-parallel", type=int, default=3)
     parser.add_argument("--wall-timeout", type=float, default=DEFAULT_WALL_TIMEOUT_MIN, help="분")
     parser.add_argument(
@@ -1256,6 +1360,13 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return 1
         print(f"계획 초안: {plan.PLANS_DIR}/{plan_id}.md (계획자, 사람이 확인)")
         return plan.main(["check", plan_id], root=root)
+    if args.continue_id:
+        try:
+            return continue_job(root, args.continue_id, args.reason or "", args.extend,
+                                args.keep_merged)  # fmt: skip
+        except DispatchError as error:
+            print(f"오류: {error}")
+            return 2
     if args.approve or args.reject:
         if args.reject and not args.reason:
             print("오류: --reject에는 --reason이 필요합니다")
