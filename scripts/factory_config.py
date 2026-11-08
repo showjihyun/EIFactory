@@ -35,6 +35,8 @@ BUDGET_DEFAULTS = {"session": 5.0, "reviewer_call": 0.5, "reviewer_total": 1.5, 
 # 정책·절차 파일, 도구 래퍼, 격리 환경, 이 설정. 어느 레포에서나 잠그고 HIGH로 본다
 KIT_POLICY = [
     "AGENTS.md",
+    # 화면 디자인 기준 (factory-v10). 사람이 정하고 승인한다. Builder는 따르기만 한다
+    "DESIGN.md",
     "CLAUDE.md",
     "factory/PROCESS.md",
     "factory/prompts/*",
@@ -48,6 +50,8 @@ KIT_POLICY = [
     "docker/*",
 ]
 KIT_LOCK = ["scripts/*", *KIT_POLICY]
+# 화면을 바꾸는 경로 (테스트 제외). 계획에 있으면 DESIGN.md가 있어야 한다 (factory-v10)
+DEFAULT_UI_PATHS = ["frontend/src/*.tsx", "frontend/src/*.css"]
 KIT_NO_NEW = [
     "scripts/*",
     "factory/prompts/*",
@@ -93,6 +97,7 @@ class Config:
     notify_toast: bool = True
     # 사용자 흐름 테스트가 남긴 화면 스크린샷 (레포 기준 glob). 승인 요약·브리핑에 붙인다
     screenshots: list[str] = field(default_factory=list)
+    ui_paths: list[str] = field(default_factory=lambda: list(DEFAULT_UI_PATHS))
 
     def acceptance_patterns(self, job_id: str) -> list[re.Pattern[str]]:
         return [
@@ -213,6 +218,7 @@ def load_config(root: Path) -> Config:
             budgets=_budgets(data.get("budgets") or {}),
             notify_toast=_notify_toast(data.get("notify", {})),
             screenshots=_screenshots(data.get("screenshots", [])),
+            ui_paths=[str(p) for p in data.get("ui_paths", DEFAULT_UI_PATHS)],
             job_verify_args=[str(a) for a in job_verify.get("args", [])],
             # 키트 파일(scripts/, 정책·도구 래퍼·격리 환경)이 바뀌면 언제나 전체 검증
             job_verify_full_if_changed=_merge(

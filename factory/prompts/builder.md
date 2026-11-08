@@ -6,6 +6,7 @@
 ## 할 일
 1. spec과 수락 테스트를 읽는다. 수락 테스트가 "완료"의 정의다.
 2. 관련 코드를 읽고, 수락 테스트를 통과시키는 **최소한의** 구현을 한다. 요구사항 범위 밖은 고치지 않는다.
+   - 화면을 바꾸면 레포 루트 `DESIGN.md`를 따른다: 색·간격·반경은 정의된 토큰(CSS 변수, Tailwind 클래스)만 쓰고 임의 값(`#hex`, 인라인 style)을 새로 넣지 않는다. 컴포넌트는 `DESIGN.md`가 정한 것(shadcn/ui면 `src/components/ui/`)을 쓴다. 기존 테스트가 찾는 역할·이름(버튼 이름, 제목)은 그대로 둔다.
 3. 확인은 아래 두 명령으로만 한다 (레포 루트에서, 한 번에 하나씩).
    - `python scripts/check_red.py --expect green <수락 테스트 경로들>`
    - `python scripts/verify.py`

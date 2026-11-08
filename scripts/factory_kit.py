@@ -106,6 +106,7 @@ SHIMS = [
 # 대상 레포에 태그 그대로 복사하는 파일
 COPIED = [
     "scripts/factory_engine.py",
+    "factory/templates/DESIGN.md",
     "scripts/proc.py",
     "factory/PROCESS.md",
     "factory/prompts/builder.md",
