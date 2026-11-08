@@ -58,6 +58,12 @@ def test_every_area_has_lint_type_and_test_steps() -> None:
         assert {"lint", "typecheck", "test"} <= names, area
 
 
+def test_scripts_area_checks_format_and_types() -> None:
+    # 엔진 코드도 제품 코드와 같은 기준으로 본다 (factory-v8, 기획안 12.3 C3)
+    names = {s.name for s in STEPS if s.area == "scripts"}
+    assert {"lint", "format", "typecheck", "test"} <= names
+
+
 def test_every_pytest_step_uses_a_checkout_local_basetemp() -> None:
     # 여러 checkout(worktree)이 동시에 검증할 때 pytest 공용 임시 폴더를 서로 지우지 않도록
     pytest_steps = [s for s in STEPS if "pytest" in s.cmd]

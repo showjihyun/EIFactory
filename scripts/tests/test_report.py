@@ -395,9 +395,11 @@ def commit_at(repo: Path, files: dict[str, str], when: str) -> None:
     )  # fmt: skip
 
 
-BRANCHY = "def f(x):\n" + "".join(
-    f"    if x == {i}:\n        return {i}\n" for i in range(12)
-) + "    return -1\n"  # 복잡도 13
+BRANCHY = (
+    "def f(x):\n"
+    + "".join(f"    if x == {i}:\n        return {i}\n" for i in range(12))
+    + "    return -1\n"
+)  # 복잡도 13
 
 
 def test_code_health_snapshot(tmp_path: Path) -> None:
