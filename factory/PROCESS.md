@@ -251,11 +251,18 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - `SPEC_READY (CONFLICT)`면 출력된 `git diff`로 이전에 바꾼 기존 테스트를 보고, 새 base 기준으로 다시 바꾼 뒤 4번(`spec`)부터 반복
 10. `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
 
+## 화면 디자인 기준 (`DESIGN.md`, factory-v10)
+
+- 화면 작업은 레포 루트 `DESIGN.md`를 따른다. 사람이 쓰고 승인하며, 잠금·HIGH라 팩토리 작업은 고치지 못한다.
+- 디자인 원본: 사람이 디자인 URL(Figma 등)을 주면 그것이 기준이다. 없으면 shadcn/ui 기준으로 쓴다 (템플릿 `factory/templates/DESIGN.md`).
+- `plan.py check`는 화면 경로(`ui_paths`, 기본 `frontend/src/*.tsx`·`*.css`, 테스트 제외)를 바꾸는 작업이 있는데 `DESIGN.md`가 없으면 계획을 거부한다.
+- Builder는 정의된 토큰·컴포넌트만 쓴다 (임의 색·인라인 style 금지). code 리뷰어가 따르는지 본다.
+
 ## 위험 등급 계산 (verify가 diff로 계산, merge가 자동 승인 작업에 대해 다시 계산)
 
 | 등급 | 조건 | 승인 |
 |---|---|---|
-| HIGH | `auth.py`·`settings.py`, 정책·절차 파일, CI 설정 변경 / `DELETE FROM`이 새로 추가됨 | 사람 |
+| HIGH | `auth.py`·`settings.py`, 정책·절차 파일, 디자인 기준(`DESIGN.md`), CI 설정 변경 / `DELETE FROM`이 새로 추가됨 | 사람 |
 | MEDIUM | 의존성·검증 설정 파일 변경 / DB 스키마(`CREATE`·`ALTER TABLE`) 변경 / API 경로 추가·삭제 / 테스트 skip·xfail 추가 / 400줄 또는 15파일 이상 / refactor 유형 | 사람 |
 | LOW | 그 밖의 경우 | 자동 (Validator PASS 후 자동 머지) |
 

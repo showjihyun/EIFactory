@@ -802,12 +802,18 @@ def _create_job_branch(root: Path, state: State) -> tuple[str, str]:
     """다음 job ID로 브랜치를 만든다.
 
     브랜치는 worktree끼리 공유되므로, 상태 파일의 작업 수가 아니라 이미 있는 factory/J*
-    브랜치까지 보고 번호를 정한다. 다른 worktree가 동시에 같은 번호를 잡으면 다음 번호로 재시도한다.
+    브랜치, base에 남은 spec(머지된 작업)까지 보고 번호를 정한다. 다른 worktree가 동시에
+    같은 번호를 잡으면 다음 번호로 재시도한다.
     """
     used = {int(j[1:]) for j in state["jobs"] if re.fullmatch(r"J\d+", j)}
     for ref in _git(root, "branch", "--list", "factory/J*", "--format=%(refname:short)").split():
         if re.fullmatch(r"factory/J\d+", ref):
             used.add(int(ref.split("/J")[1]))
+    # 머지된 작업은 브랜치를 지워도 spec이 base에 남는다. 그 번호를 다시 쓰면 spec·작업 기록을
+    # 덮어쓴다 (randomy J021 실측, factory-v11)
+    for spec in (root / SPECS_DIR).glob("J*.md"):
+        if re.fullmatch(r"J\d+", spec.stem):
+            used.add(int(spec.stem[1:]))
     number = max(used, default=0) + 1
     for _ in range(20):
         job_id = f"J{number:03d}"

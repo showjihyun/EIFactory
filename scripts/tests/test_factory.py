@@ -215,6 +215,18 @@ def test_new_creates_job_branch_and_state_files(h: Harness) -> None:
     assert "J001" in (h.repo / "factory-state.md").read_text(encoding="utf-8")
 
 
+def test_new_does_not_reuse_the_id_of_a_merged_job_whose_branch_is_gone(h: Harness) -> None:
+    # 머지된 작업 브랜치를 지워도 그 spec이 base에 남아 있으면 번호를 다시 쓰지 않는다.
+    # 다시 쓰면 spec·작업 기록을 덮어쓴다 (randomy J021 실측, factory-v11)
+    spec = h.repo / "factory/specs/J021.md"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text("# J021\n", encoding="utf-8")
+    git(h.repo, "add", "-A")
+    git(h.repo, "commit", "-qm", "J021 merged")
+    assert h.run("new", "다음 작업") == 0
+    assert h.state()["active"] == "J022"
+
+
 def test_new_records_the_plan_it_came_from(h: Harness) -> None:
     # 계획 실행(--run-plan)이 만든 작업은 계획 ID와 예상 등급을 남긴다 (기획안 6.5, KPI 적중률)
     assert h.run("new", "계획 작업", "--plan", "P001:A", "--expected-risk", "MEDIUM") == 0
