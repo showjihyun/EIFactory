@@ -30,6 +30,8 @@ def root(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "factory").mkdir(parents=True)
     shutil.copy(SCRIPTS.parent / "factory" / "config.json", repo / "factory" / "config.json")
+    # 화면 작업 계획은 사람이 승인한 DESIGN.md가 있어야 통과한다 (factory-v10)
+    (repo / "DESIGN.md").write_text("# 디자인\n", encoding="utf-8")
     git(repo, "init", "-q", "-b", "main")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "base")
@@ -133,6 +135,26 @@ def test_check_rejects_bad_drafts(
     assert code == 1
     assert message in out
     assert not state_path(root).exists()
+
+
+def test_screen_jobs_need_an_approved_design_doc(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 디자인 URL(Figma 등)이 없으면 shadcn/ui 기준 DESIGN.md를 먼저 사람이 승인한다 (factory-v10)
+    (root / "DESIGN.md").unlink()
+    write_plan(root, [draft("A", paths=["frontend/src/App.tsx", "frontend/src/App.test.tsx"])])
+    code, out = check(root, capsys)
+    assert code == 1
+    assert "DESIGN.md" in out and "shadcn/ui" in out and "frontend/src/App.tsx" in out
+    assert not state_path(root).exists()
+
+
+def test_jobs_without_screen_changes_do_not_need_a_design_doc(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (root / "DESIGN.md").unlink()
+    write_plan(root, [draft("A", paths=["backend/src/bookmarks/main.py"])])
+    assert check(root, capsys)[0] == 0
 
 
 def test_locked_non_test_paths_go_to_the_human(

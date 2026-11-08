@@ -26,6 +26,9 @@ def test_project_values_are_merged_with_kit_protection(tmp_path: Path) -> None:
     for path in ("scripts/*", "AGENTS.md", ".claude/*", ".codex/*", "factory/config.json"):
         assert path in cfg.lock_patterns
     assert "factory/config.json" in cfg.high_paths
+    # 디자인 기준은 사람이 정한다: Builder가 못 고치고, 바꾸면 HIGH (factory-v10)
+    assert "DESIGN.md" in cfg.lock_patterns and "DESIGN.md" in cfg.high_paths
+    assert "frontend/src/*.tsx" in cfg.ui_paths
 
 
 def test_missing_config_keeps_kit_protection(tmp_path: Path) -> None:

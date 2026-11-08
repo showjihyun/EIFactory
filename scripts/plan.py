@@ -64,6 +64,8 @@ PLANS_DIR = "factory/plans"
 FIELDS = ("id", "requirement", "type", "size", "paths", "touches", "depends_on",
           "assumptions", "design", "acceptance_hints")  # fmt: skip
 PLANNER_PROMPT = "factory/prompts/planner.md"
+DESIGN_PATH = "DESIGN.md"
+DESIGN_TEMPLATE = "factory/templates/DESIGN.md"
 PLANNER_BUDGET_USD = "1.0"  # 호출당 상한 (임시값, 사람 결정)
 _STRINGS = {"type": "array", "items": {"type": "string"}}
 # 계획자 출력 형식. Claude는 --json-schema로 CLI가 강제한다
@@ -250,6 +252,17 @@ def check_plan(root: Path, plan_id: str) -> dict[str, Any]:
     cycle = _cycle(jobs)
     if cycle:
         raise PlanError(f"depends_on 순환: {' → '.join(cycle)}")
+    screens = sorted({
+        p for j in jobs for p in j["paths"]
+        if _matches(p, cfg.ui_paths) and not _matches(p, cfg.test_patterns)
+    })  # fmt: skip
+    if screens and not (root / DESIGN_PATH).is_file():
+        # 디자인 기준 없이 화면을 만들면 작업마다 모양이 제각각이 된다 (randomy 1차, factory-v10)
+        raise PlanError(
+            f"화면을 바꾸는 작업이 있는데 {DESIGN_PATH}가 없습니다 ({', '.join(screens)}). "
+            "디자인 URL(Figma 등)이 있으면 그 URL과 토큰을, 없으면 shadcn/ui 기준으로 "
+            f"{DESIGN_PATH}를 먼저 쓰고 사람이 승인해 커밋하세요 (템플릿 {DESIGN_TEMPLATE})"
+        )
     checked = []
     for item in jobs:
         risk, reasons = predict(cfg, item)
