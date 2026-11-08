@@ -46,7 +46,7 @@ ENGINE_ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_ROOT = Path(os.environ.get("FACTORY_REPO") or ENGINE_ROOT)
 
 TYPES = {"feature", "bugfix", "copy", "refactor"}
-SIZE_CAPS = {"small": 15 * 60, "medium": 30 * 60}
+SIZE_CAPS = {"small": 15 * 60, "medium": 20 * 60}  # 중형은 factory-v9에 30 → 20분 (실측)
 RISKS = ["LOW", "MEDIUM", "HIGH"]
 SOFT_RATIO = 0.8
 MAX_ATTEMPTS = 3

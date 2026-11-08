@@ -133,7 +133,7 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 1. 기본 checkout이 base 브랜치 위에 있고 깨끗해야 한다 (머지가 이곳에서 일어난다). 실행 중에는 기본 checkout을 고치지 않는다.
 2. 요구사항마다 `../<레포>.jobs/<작업 ID>/`에 worktree를 만들고 의존성을 설치한 뒤 `factory.py new --base <base>`로 작업을 만든다. 작업 상태는 worktree마다 따로 있다.
 3. 작업마다 headless `claude -p` 세션을 띄운다. 권한은 `.claude/settings.json`의 allow 목록을 그대로 넘긴다 (새 worktree는 신뢰 승인 전이라 프로젝트 설정의 allow가 무시된다. hook은 동작한다).
-4. 벽시계 상한(기본 40분)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
+4. 벽시계 상한(기본 30분, factory-v9)을 넘으면 세션을 프로세스 트리째 종료하고 BLOCKED(`TIMEOUT`)로 기록한다.
    - 비용 상한 (`--budget-usd`, 기본 $5, API 환산 임시값): Claude 세션에 `--max-budget-usd`로 건다. 상한에 닿아 세션이 작업 도중 멈추면 BLOCKED(`BUDGET`). 리뷰어 호출은 하나당 $1 (`FACTORY_REVIEW_BUDGET_USD`). Codex CLI에는 같은 옵션이 없어 벽시계 상한만 적용되고, 토큰 수는 기록한다.
    - 세션 비용·토큰은 결과 표와 `dispatch-<시각>.json`에 남는다.
 5. 세션이 끝났는데 작업이 rebase 충돌로 RETRY_REQUIRED이면(호스트 머지, `--approve`, 세션이 멈춘 경우) 같은 worktree에서 세션을 이어서 띄운다 (최대 2회, 로그 `logs/<ID>.r<n>.jsonl`, 호스트 기록 `continue`). 이어서 처리한 세션 비용도 작업 비용에 들어간다. 사람이 반려한 작업도 같은 길로 이어서 고친다. 새 세션 전에 호스트가 `recover --force`로 끝난 세션을 이어받는다 (heartbeat 정리, 세션 없이 흐른 시계 되돌림). 이어서 처리를 다 쓰고도 RETRY_REQUIRED이면 BLOCKED(`SESSION_ENDED`)로 둔다 (factory-v7).
@@ -216,7 +216,7 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
 | 필드 | 값 |
 |---|---|
 | `type` | `feature` / `bugfix` / `copy` / `refactor` |
-| `size` | `small` (상한 15분) / `medium` (상한 30분). 중형을 넘으면 작업을 만들지 말고 분할을 제안한다 |
+| `size` | `small` (상한 15분) / `medium` (상한 20분). 중형을 넘으면 작업을 만들지 말고 분할을 제안한다 |
 | `risk` | `LOW` / `MEDIUM` / `HIGH` (최종 등급은 `verify`가 diff로 계산한 등급과 비교해 높은 쪽) |
 | `acceptance_tests` | 1개 이상. 백엔드 `backend/tests/acceptance/test_<ID>.py`, 프론트엔드 `frontend/src/**/<Name>.<ID>.accept.test.tsx`, 사용자 흐름 `frontend/e2e/<name>.<ID>.accept.e2e.ts` (Playwright) |
 | `changed_tests` | Spec 단계에서 바꾼 기존 테스트 파일 (없으면 `[]`) |

@@ -601,6 +601,15 @@ def test_small_job_runs_until_fifteen_minutes(h: Harness) -> None:
     assert h.job()["status"] == "VERIFYING"
 
 
+def test_medium_job_cap_is_twenty_minutes(h: Harness) -> None:
+    # 중형 실측 8개 중앙 4.8분·최대 11.9분 (randomy). 상한 30분 → 20분 (factory-v9, 기획안 12.3 C4)
+    h.to_building(size="medium")
+    assert h.job()["time"]["cap_s"] == 20 * 60
+    h.advance(21 * 60)
+    assert h.run("verify", "J001") != 0
+    assert h.job()["blocked"]["reason"] == "TIMEOUT"
+
+
 def test_failure_before_soft_cap_still_retries(h: Harness) -> None:
     h.to_building()
     h.configure(red=RED_OK, green=GREEN_OK, verify=[verify_fail("lint")], validator="")

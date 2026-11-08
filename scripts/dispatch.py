@@ -74,7 +74,7 @@ BASE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "Task"]
 # 오케스트레이터 모델 (기획안 6.6). Builder·리뷰어 모델은 factory.py의 MODELS가 정한다
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6-astra"}
 API_KEYS = {"claude": ["ANTHROPIC_API_KEY"], "codex": ["CODEX_API_KEY", "OPENAI_API_KEY"]}
-DEFAULT_WALL_TIMEOUT_MIN = 40.0  # 중형 상한 30분 + 정리 여유
+DEFAULT_WALL_TIMEOUT_MIN = 30.0  # 중형 상한 20분 + 정리 여유
 # 세션 하나의 비용 상한 (API 환산, 임시값). 규모는 spec에서 정해지므로 중형 기준 하나로 건다.
 # Phase 1~3 실제 세션 31개의 최대 $1.21 (리뷰어 제외)의 약 4배. Claude만 적용 (`--max-budget-usd`)
 DEFAULT_BUDGET_USD = 5.0
