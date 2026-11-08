@@ -98,6 +98,8 @@ PLAN_SCHEMA: dict[str, Any] = {
     "required": ["goal", "jobs"],
     "additionalProperties": False,
 }  # fmt: skip
+# 범위 밖 누락 후보 (factory-v12). 작업으로 만들지 않고 사람에게 보여 주기만 한다 (기획안 12.4 G2)
+PLAN_SCHEMA["properties"]["gaps"] = _STRINGS
 
 
 class PlanError(Exception):
@@ -241,6 +243,9 @@ def check_plan(root: Path, plan_id: str) -> dict[str, Any]:
     errors = [e for item in body["jobs"] for e in draft_problems(item)]
     if errors:
         raise PlanError("작업 초안 형식 오류:\n- " + "\n- ".join(errors))
+    gaps = body.get("gaps", [])
+    if not isinstance(gaps, list) or not all(isinstance(g, str) and g.strip() for g in gaps):
+        raise PlanError("gaps(범위 밖 누락 후보)는 비어 있지 않은 문장 목록 (없으면 생략)")
     jobs: list[dict[str, Any]] = body["jobs"]
     ids = [j["id"] for j in jobs]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -271,7 +276,7 @@ def check_plan(root: Path, plan_id: str) -> dict[str, Any]:
                         "route": where, "route_reason": why})  # fmt: skip
     return {"id": plan_id, "goal": body.get("goal", ""), "status": "CHECKED",
             "checked_at": time.time(), "doc_sha": _sha(_doc(root, plan_id)),
-            "jobs": checked}  # fmt: skip
+            "jobs": checked, "gaps": gaps}  # fmt: skip
 
 
 def load_state(root: Path, plan_id: str) -> dict[str, Any] | None:
@@ -487,8 +492,10 @@ def draft_plan(root: Path, goal: str) -> str:
     plan_id = next_plan_id(root)
     path = root / PLANS_DIR / f"{plan_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps({"goal": body.get("goal") or goal, "jobs": body["jobs"]},
-                      ensure_ascii=False, indent=2)  # fmt: skip
+    out: dict[str, Any] = {"goal": body.get("goal") or goal, "jobs": body["jobs"]}
+    if body.get("gaps"):
+        out["gaps"] = body["gaps"]
+    text = json.dumps(out, ensure_ascii=False, indent=2)
     path.write_text(
         f"# {plan_id} 계획 (계획자 초안, 사람이 확인·수정)\n\n"
         f"목표: {goal}\n\n"
@@ -516,6 +523,9 @@ def render(state: dict[str, Any]) -> str:
     notes = [f"- {j['id']}: {j['route_reason']}" for j in state["jobs"] if j["route_reason"]]
     if notes:
         lines += ["", "팩토리로 보내지 않는 작업:", *notes]
+    if state.get("gaps"):
+        lines += ["", "범위 밖 누락 후보 (작업으로 만들지 않음. 다음 계획에 넣을지 사람이 정한다):"]
+        lines += [f"- {g}" for g in state["gaps"]]
     lines += [
         "",
         "예상 등급은 참고값이다. 실제 등급은 작업마다 verify가 다시 계산한다.",

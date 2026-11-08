@@ -251,6 +251,12 @@ python scripts/dispatch.py --isolation docker --max-parallel 3 "<요구사항>" 
    - `SPEC_READY (CONFLICT)`면 출력된 `git diff`로 이전에 바꾼 기존 테스트를 보고, 새 base 기준으로 다시 바꾼 뒤 4번(`spec`)부터 반복
 10. `MERGED`, `APPROVAL_REQUIRED`, `BLOCKED` 중 하나가 되면 멈추고 `status`를 보고한다. 승인·재개는 사람이 한다.
 
+## 제품 범위 점검 (`PRODUCT.md`, factory-v12)
+
+- 제품 레포 루트 `PRODUCT.md`(사람 승인)에 범주 기본 기능 대조, 데이터 항목별 보기, 제외(외부 연동과 앱 안 기능 구분), 갭 리뷰 기록을 둔다 (템플릿 `factory/templates/PRODUCT.md`).
+- 계획자는 목표 밖 작업을 만들지 않고, 빠져 보이는 기능을 `gaps`로 따로 낸다. `plan.py check`가 표 아래에 보여 주고 사람이 다음 계획에 넣을지 정한다.
+- code 리뷰어는 날짜·숫자처럼 정렬·계산할 값을 자유 글로만 저장하는 새 필드를 `notes_for_human`에 적는다.
+
 ## 화면 디자인 기준 (`DESIGN.md`, factory-v10)
 
 - 화면 작업은 레포 루트 `DESIGN.md`를 따른다. 사람이 쓰고 승인하며, 잠금·HIGH라 팩토리 작업은 고치지 못한다.
