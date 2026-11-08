@@ -107,6 +107,7 @@ SHIMS = [
 COPIED = [
     "scripts/factory_engine.py",
     "factory/templates/DESIGN.md",
+    "factory/templates/PRODUCT.md",
     "scripts/proc.py",
     "factory/PROCESS.md",
     "factory/prompts/builder.md",

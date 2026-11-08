@@ -208,6 +208,56 @@ def test_check_prints_a_table_for_the_human(root: Path, capsys: pytest.CaptureFi
     assert "dispatch.py --run-plan P001" in out
 
 
+def test_check_shows_scope_gaps_without_turning_them_into_jobs(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 계획자는 목표 밖 작업을 만들지 않고, 빠져 보이는 기능을 gaps로 따로 낸다 (factory-v12,
+    # 기획안 12.4 G2: randomy 캘린더 누락)
+    body = {
+        "goal": "목표",
+        "jobs": [draft("A")],
+        "gaps": [
+            "할 일 기한이 자유 글이라 날짜로 배치할 수 없다",
+            "날짜를 보는 캘린더 화면이 없다",
+        ],
+    }
+    path = root / "factory" / "plans" / "P001.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# P001\n\n```json\n{json.dumps(body, ensure_ascii=False)}\n```\n", "utf-8")
+    code, out = check(root, capsys)
+    assert code == 0
+    assert "범위 밖 누락 후보" in out and "캘린더 화면이 없다" in out
+    assert state(root)["gaps"] == body["gaps"]
+    assert [j["id"] for j in state(root)["jobs"]] == ["A"]
+
+
+def test_check_rejects_gaps_that_are_not_a_list_of_sentences(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    body = {"goal": "목표", "jobs": [draft("A")], "gaps": [{"x": 1}]}
+    path = root / "factory" / "plans" / "P001.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# P001\n\n```json\n{json.dumps(body, ensure_ascii=False)}\n```\n", "utf-8")
+    code, out = check(root, capsys)
+    assert code == 1 and "gaps" in out
+
+
+def test_planner_may_report_gaps_and_the_draft_keeps_them(
+    root: Path, planner: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    import dispatch
+
+    gaps = ["날짜를 보는 캘린더 화면이 없다"]
+    monkeypatch.setenv("FAKE_PLANNER_PLAN", json.dumps({"goal": "목표", "jobs": [draft("A")],
+                                                        "gaps": gaps}))  # fmt: skip
+    assert dispatch.main(["--plan", "목표"], root=root) == 0
+    assert state(root)["gaps"] == gaps
+    cmd = plan.planner_command(root)
+    schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+    assert "gaps" in schema["properties"] and "gaps" not in schema["required"]
+
+
 # ---------- 계획자 세션 (dispatch.py --plan, 6단계) ----------
 
 FAKE_PLANNER = r"""
