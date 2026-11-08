@@ -430,7 +430,7 @@ def planner_prompt(root: Path, goal: str) -> str:
         f"- MEDIUM 경로: {', '.join(cfg.medium_paths)}",
         f"- 팩토리 작업이 바꿀 수 없는 잠긴 경로(기존 테스트 제외): {', '.join(locked)}",
         f"- touches 표시: {touches}",
-        "- 중형(medium)에는 design(설계 결정)이 필요하다. 크기 상한: small 15분, medium 30분",
+        "- 중형(medium)에는 design(설계 결정)이 필요하다. 크기 상한: small 15분, medium 20분",
     ]
     default = "목표를 팩토리 작업 초안으로 나눈다. JSON으로만 답한다."
     return "\n\n".join([
