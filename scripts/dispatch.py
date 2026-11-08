@@ -1041,6 +1041,34 @@ def continue_job(root: Path, job_id: str, note: str, extend: bool, keep_merged: 
     return 0 if job["status"] in {"APPROVAL_REQUIRED", "MERGED"} else 1
 
 
+def drop_job(root: Path, job_id: str) -> int:
+    """작업을 버린다 (사람 전용, factory-v8). 기본 checkout에서 실행한다.
+
+    worktree의 factory.py drop은 worktree 밖 기록을 갱신하지 않아 J020이 기록·보고서에 BLOCKED로
+    남았다. 여기서는 drop(이미 했으면 건너뜀) → 기록 → worktree 정리 순서로 한다. 브랜치는 보관한다.
+    """
+    worktree = _jobs_dir(root) / job_id
+    if not (worktree / "factory/state.json").exists():
+        raise DispatchError(f"{job_id}: 작업 worktree가 없습니다 ({worktree})")
+    job = _load_job(worktree, job_id)
+    if job["status"] == "MERGED":
+        raise DispatchError(f"{job_id}: 이미 머지된 작업입니다")
+    if job["status"] != "DROPPED":
+        done = _factory(root, worktree, "drop", job_id)
+        print(done.stdout.strip())
+        if done.returncode != 0:
+            return done.returncode
+        job = _load_job(worktree, job_id)
+    _save_record(root, job_id, job)
+    _record_host(root, job_id, "drop", job)
+    result: dict[str, Any] = {}
+    if not _remove_worktree(root, worktree, result):
+        print(f"worktree를 지우지 못했습니다: {result.get('cleanup_error')}")
+        return 1
+    print(f"{job_id}: DROPPED, 기록 갱신, worktree 정리 (브랜치 {job['branch']}는 보관)")
+    return 0
+
+
 def decide(root: Path, job_id: str, reject: str | None, keep_merged: bool = False) -> int:
     """승인 대기 작업을 사람이 승인(머지) 또는 반려한다. 기본 checkout의 factory.py로 실행한다."""
     worktree = _jobs_dir(root) / job_id
@@ -1260,8 +1288,7 @@ def _summary(report: dict[str, Any]) -> str:
         "",
         "승인 대기: `python scripts/dispatch.py --approve <ID>` (반려는 `--reject <ID> --reason`). "
         "BLOCKED: `python scripts/dispatch.py --continue <ID> [--reason 지시] [--extend]` "
-        "(멈춘 단계부터 세션 하나로 이어서) 또는 해당 worktree에서 "
-        "`python scripts/factory.py drop <ID>`.",
+        "(멈춘 단계부터 세션 하나로 이어서) 또는 `python scripts/dispatch.py --drop <ID>`.",
     ]
     return "\n".join(lines)
 
@@ -1333,6 +1360,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "--continue", dest="continue_id", metavar="ID",
         help="멈춘 작업(RETRY_REQUIRED·BLOCKED)을 세션 하나로 이어서 처리 (사람 전용)",
     )  # fmt: skip
+    parser.add_argument("--drop", metavar="ID", help="작업을 버림 (사람 전용, 브랜치는 보관)")
     parser.add_argument("--extend", action="store_true", help="--continue: BLOCKED 상한 50%% 연장")
     parser.add_argument("--reason", help="--reject 이유, --continue 지시")
     parser.add_argument("--max-parallel", type=int, default=3)
@@ -1360,6 +1388,12 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return 1
         print(f"계획 초안: {plan.PLANS_DIR}/{plan_id}.md (계획자, 사람이 확인)")
         return plan.main(["check", plan_id], root=root)
+    if args.drop:
+        try:
+            return drop_job(root, args.drop)
+        except DispatchError as error:
+            print(f"오류: {error}")
+            return 2
     if args.continue_id:
         try:
             return continue_job(root, args.continue_id, args.reason or "", args.extend,

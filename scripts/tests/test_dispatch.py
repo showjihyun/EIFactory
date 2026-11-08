@@ -779,6 +779,38 @@ def test_review_texts_are_kept_after_the_worktree_is_removed(
     assert {f"{job_id}-1-code.txt", f"{job_id}-approval.md"} <= names
 
 
+def test_drop_closes_the_job_records_it_and_removes_the_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 기본 checkout에서 버린다. worktree 밖 기록도 DROPPED가 된다 (factory-v8, J020 실측)
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch.main(["--drop", job_id], root=repo) == 0
+    record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    assert record["status"] == "DROPPED"
+    assert not Path(job["worktree"]).exists()
+    assert git(repo, "branch", "--list", f"factory/{job_id}")  # 브랜치는 보관
+    events = [e["action"] for e in dispatch.host_record(repo, job_id)["events"]]
+    assert events[-1] == "drop"
+
+
+def test_drop_syncs_a_job_already_dropped_in_its_worktree(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # worktree에서 factory.py drop만 한 작업: 기록이 승인 대기로 남아 있던 경우 (J020)
+    job = waiting_job(repo, monkeypatch)
+    job_id = job["job_id"]
+    assert dispatch._factory(repo, Path(job["worktree"]), "drop", job_id).returncode == 0
+    assert dispatch.main(["--drop", job_id], root=repo) == 0
+    record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
+    assert record["status"] == "DROPPED"
+    assert not Path(job["worktree"]).exists()
+
+
+def test_drop_unknown_job_fails(repo: Path) -> None:
+    assert dispatch.main(["--drop", "J999"], root=repo) == 2
+
+
 def test_approve_conflict_continues_session_on_new_base(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1157,9 +1157,10 @@ def _parse_verdict(text: str) -> dict[str, Any] | None:
                 else []
             )
             up = parsed.get("risk_up")
-            valid = isinstance(up, dict) and up.get("to") in ("MEDIUM", "HIGH")
             parsed["risk_up"] = (
-                {"to": up["to"], "reason": str(up.get("reason", ""))} if valid else None
+                {"to": up["to"], "reason": str(up.get("reason", ""))}
+                if isinstance(up, dict) and up.get("to") in ("MEDIUM", "HIGH")
+                else None
             )
             return parsed
     return None
