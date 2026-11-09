@@ -68,7 +68,7 @@ PROMOTE_AFTER = 2
 # 리뷰어 호출 하나당 비용 상한 (API 환산, 임시값). Claude만 적용 (Codex CLI에는 옵션이 없다)
 REVIEW_BUDGET_USD = 0.5  # factory_config.BUDGET_DEFAULTS와 같다 (작업에 고정된 값이 우선)
 # 에이전트 세션(FACTORY_AGENT_SESSION=1)에서는 factory.py가 직접 거부한다 (도구 hook과 별개)
-HUMAN_ONLY = {"approve", "resume", "drop"}
+HUMAN_ONLY = {"approve", "resume", "drop", "reopen-spec"}
 
 ACTIVE_STATUSES = {"QUEUED", "SPEC_READY", "BUILDING", "RETRY_REQUIRED", "VERIFYING"}
 CLOSED_STATUSES = {"MERGED", "DROPPED"}
@@ -1846,15 +1846,68 @@ def cmd_recover(root: Path, state: State, job_id: str, force: bool) -> str:
     return f"{job_id}: 이어받음 ({job['status']}, 끊긴 시간 {gap}{done}). 다음: {next_step}"
 
 
+def _extend_cap(job: Job) -> None:
+    if job["time"]["extended"]:
+        raise FactoryError(f"{job['id']}는 이미 한 번 연장했습니다 (split 또는 drop)")
+    base_cap = SIZE_CAPS.get(job.get("size") or "small", SIZE_CAPS["small"])
+    job["time"]["cap_s"] = job["time"]["cap_s"] + int(base_cap * EXTEND_RATIO)
+    job["time"]["extended"] = True
+
+
+def cmd_reopen_spec(root: Path, state: State, job_id: str, reason: str, extend: bool) -> str:
+    """사람 결정으로 잠긴 테스트를 고칠 수 있게 Spec 단계로 되돌린다 (factory-v13, J030·J032 실측).
+
+    Red를 다시 확인해야 하므로 구현은 작업 트리에서 빼고 spec·수락 테스트·기존 테스트 변경만
+    남긴다. 이전 구현은 ref에 보관해 Builder가 참고할 수 있게 한다.
+    """
+    job = _job(state, job_id)
+    _require(job, "BLOCKED", "RETRY_REQUIRED")
+    if not reason.strip():
+        raise FactoryError("reopen-spec에는 사람의 결정(--reason)이 필요합니다")
+    if not job["locks"]:
+        raise FactoryError(f"{job_id}는 아직 잠기지 않았습니다. Spec 단계라면 resume으로 잇습니다")
+    if extend:
+        _extend_cap(job)
+    own = [job["spec_path"], *(t.split("::")[0] for t in job["acceptance_tests"]),
+           *job["changed_tests"]]  # fmt: skip
+    own = [rel for rel in dict.fromkeys(own) if (root / rel).is_file()]
+    fork = _fork_point(root, job)
+    _commit_job(root, job, f"factory {job_id} (Spec 되돌리기 전 보관): {job['requirement']}")
+    head = _git(root, "rev-parse", "HEAD").strip()
+    reopens = job.setdefault("spec_reopens", [])
+    ref = f"refs/factory/reopen/{job_id}-{len(reopens) + 1}"
+    _git(root, "update-ref", ref, head)
+    _git(root, "reset", "-q", "--hard", fork)
+    _git(root, "checkout", head, "--", *own)
+    _git(root, "reset", "-q")  # 작업 파일은 커밋하지 않은 새 파일로 둔다
+    reopens.append(
+        {
+            "at": now(),
+            "from": job["checkpoint"],
+            "reason": reason,
+            "failure": (job.get("blocked") or {}).get("detail") or job.get("last_failure") or "-",
+            "ref": ref,
+            "fork": fork,
+            "attempts": job["attempts"],
+            "spec_revisions": job["spec_revisions"],
+        }
+    )
+    job.update(locks={}, blocked=None, last_failure=None, approval=None, verified_tree=None,
+               attempts=0, spec_revisions=0)  # fmt: skip
+    _set_status(job, "SPEC_READY")
+    _start_clock(job, now())
+    _clear_heartbeat(root)
+    return (
+        f"{job_id}: SPEC_READY (사람 결정으로 되돌림). 이전 구현은 {ref}에 보관. "
+        f"spec·수락 테스트를 고친 뒤 spec {job_id} → red {job_id} → Builder"
+    )
+
+
 def cmd_resume(root: Path, state: State, job_id: str, extend: bool) -> str:
     job = _job(state, job_id)
     _require(job, "BLOCKED")
     if extend:
-        if job["time"]["extended"]:
-            raise FactoryError(f"{job_id}는 이미 한 번 연장했습니다 (split 또는 drop)")
-        base_cap = SIZE_CAPS.get(job.get("size") or "small", SIZE_CAPS["small"])
-        job["time"]["cap_s"] = job["time"]["cap_s"] + int(base_cap * EXTEND_RATIO)
-        job["time"]["extended"] = True
+        _extend_cap(job)
     target = job["checkpoint"]
     job["blocked"] = None
     job["last_failure"] = None
@@ -1947,6 +2000,10 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     resume = sub.add_parser("resume")
     resume.add_argument("job_id")
     resume.add_argument("--extend", action="store_true")
+    reopen = sub.add_parser("reopen-spec")
+    reopen.add_argument("job_id")
+    reopen.add_argument("--reason", required=True)
+    reopen.add_argument("--extend", action="store_true")
     recover = sub.add_parser("recover")
     recover.add_argument("job_id")
     recover.add_argument("--force", action="store_true")
@@ -1954,7 +2011,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     human_only = args.command in HUMAN_ONLY or (args.command == "recover" and args.force)
     if human_only and os.environ.get("FACTORY_AGENT_SESSION") == "1":
         print(
-            "오류: approve·resume·drop·recover --force는 사람 전용입니다. "
+            "오류: approve·resume·drop·reopen-spec·recover --force는 사람 전용입니다. "
             "에이전트 세션에서는 실행할 수 없습니다 (사람에게 안내만 하세요)."
         )
         return 2
@@ -1983,6 +2040,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             code, message = cmd_approve(root, state, args.job_id, args.reject)
         elif args.command == "resume":
             message = cmd_resume(root, state, args.job_id, args.extend)
+        elif args.command == "reopen-spec":
+            message = cmd_reopen_spec(root, state, args.job_id, args.reason, args.extend)
         elif args.command == "drop":
             message = cmd_drop(root, state, args.job_id)
         elif args.all:

@@ -29,7 +29,7 @@ Builder는 오케스트레이터의 대화를 넘겨받지 않는다. 호출할 
 QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ──────────────────────→ APPROVED → MERGED
               ▲  (red 실패, 1회)      ▲      └─ (MEDIUM·HIGH) → APPROVAL_REQUIRED ─┘ (사람 approve)
               └──────┘                └─ RETRY_REQUIRED (verify/validate 실패, 사람 반려, 머지 때 rebase 충돌)
-어느 단계에서든 → BLOCKED (사유 코드) → 사람이 resume 또는 drop
+어느 단계에서든 → BLOCKED (사유 코드) → 사람이 resume, reopen-spec 또는 drop
 ```
 
 | 명령 | 허용 상태 | 하는 일 | 성공 시 | 실패 시 |
@@ -46,6 +46,7 @@ QUEUED → SPEC_READY → BUILDING → VERIFYING ─┬─ (LOW) ─────
 | `approve <ID>` / `approve <ID> --reject "..."` | APPROVAL_REQUIRED | **사람 전용.** 승인 기록 후 바로 머지 / 반려 | MERGED / RETRY_REQUIRED | 머지 실패는 `merge`와 같음 |
 | `resume <ID> [--extend]` | BLOCKED | **사람 전용.** checkpoint부터 재개, `--extend`는 상한 50% 연장 1회 | checkpoint 상태 | - |
 | `recover <ID> --force` | 진행 중, APPROVED | **사람 전용.** 이전 세션이 끝난 것이 확실할 때 5분을 기다리지 않고 이어받기 | 같은 상태 | - |
+| `reopen-spec <ID> --reason "사람 결정" [--extend]` | BLOCKED, RETRY_REQUIRED (잠금 뒤) | **사람 전용.** 잠금을 풀고 구현을 `refs/factory/reopen/<ID>-<n>`에 보관한 뒤 작업 트리에는 spec·수락 테스트·기존 테스트 변경만 남긴다. 수정·스펙 재작성 횟수는 0으로 (factory-v13) | SPEC_READY | 오류 출력, 상태 유지 |
 | `drop <ID>` | 종료 안 된 작업 | **사람 전용.** 작업 종료, 브랜치 보관 | DROPPED | - |
 
 ### 대시보드 (`scripts/monitor.py`, 읽기 전용 + API 키 입력)
@@ -140,6 +141,7 @@ python scripts/dispatch.py --max-parallel 3 "<요구사항 1>" "<요구사항 2>
 6. MERGED 작업의 worktree는 지우고, APPROVAL_REQUIRED·BLOCKED 작업은 남긴다.
    - 승인 대기는 **기본 checkout에서** `python scripts/dispatch.py --approve <ID>` (반려 `--reject <ID> --reason "..."`). 작업 worktree의 `scripts/`와 상태 파일은 세션이 바꿀 수 있으므로 그 worktree의 `factory.py approve`는 쓰지 않는다. 승인 요약(`factory/reviews/<ID>-approval.md`)도 세션이 쓴 파일이니 diff(`git -C <worktree> diff <base>`)를 직접 본다.
    - BLOCKED는 **기본 checkout에서** `python scripts/dispatch.py --continue <ID> [--reason "지시"] [--extend]`로 멈춘 단계부터 세션 하나로 이어서 처리한다 (resume + 이어서 처리, RETRY_REQUIRED도 받음, factory-v7). 버릴 때는 기본 checkout에서 `python scripts/dispatch.py --drop <ID>` (worktree 밖 기록 갱신, worktree 정리, 브랜치 보관, factory-v8).
+   - 잠긴 테스트가 틀렸거나 사람 결정으로 바뀌어야 하면 **기본 checkout에서** `python scripts/dispatch.py --continue <ID> --to-spec --reason "사람 결정" [--extend]`로 Spec 단계부터 세션 하나로 다시 한다 (reopen-spec + 이어서 처리, Red부터 다시 확인, factory-v13). 사유 없이는 실행되지 않는다.
    - 리뷰 원문과 승인 요약은 기록할 때마다 `../<레포>.jobs/meta/<ID>/reviews/`에 복사해 worktree를 지운 뒤에도 남긴다 (factory-v7).
    - 호스트 머지(컨테이너·Codex 세션)와 `--approve`는 상태 파일을 믿지 않는다 (`FACTORY_UNTRUSTED_STATE=1`): 설정은 기본 checkout에서 읽고, 수락 테스트 목록은 diff에서도 찾고, base가 그대로여도 수락 테스트 Green과 `verify`를 다시 돌린다 (컨테이너 작업이면 오프라인 컨테이너에서). 잠긴 파일(기존 테스트, 검증 설정)이 바뀐 자동 승인 작업은 머지하지 않고 사람 승인으로 돌린다.
    - 세션 정보(격리 방식, 이미지)는 worktree 밖 `../<레포>.jobs/meta/<ID>/session.json`에 둔다.

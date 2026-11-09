@@ -54,6 +54,10 @@ print("session-env", os.environ.get("FACTORY_AGENT_SESSION"), os.environ.get("FA
 state = json.loads((root / "factory/state.json").read_text(encoding="utf-8"))
 job_id = state["active"]
 requirement = state["jobs"][job_id]["requirement"]
+if state["jobs"][job_id]["status"] == "SPEC_READY":
+    # 사람이 Spec 단계로 되돌린 작업 (프롬프트를 로그로 확인한다)
+    sys.stdout.reconfigure(encoding="utf-8")
+    print("prompt:", sys.argv[-1].replace(chr(10), " "), flush=True)
 if "[QUIT]" in requirement and os.environ.get("FAKE_AGENT_QUIT_TAG"):
     # 계획 시험용: 표시가 붙은 작업만 세션이 중간에 끝난다 (BLOCKED)
     print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.1}))
@@ -757,6 +761,46 @@ def test_continue_runs_a_session_with_the_human_note(
     assert events[-2:] == ["resume", "continue"]
     record = json.loads(Path(job["record"]).read_text(encoding="utf-8"))
     assert record["status"] == "APPROVAL_REQUIRED"
+
+
+def test_continue_to_spec_reruns_from_spec_with_the_human_decision(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 사람 결정으로 잠긴 테스트를 고쳐야 하면 작업을 버리지 않고 Spec부터 잇는다 (factory-v13)
+    job = stuck_after_reject(repo, monkeypatch)
+    job_id = job["job_id"]
+    code = dispatch.main(
+        ["--continue", job_id, "--to-spec", "--reason", "기대값 35를 42로 고쳐라"], root=repo
+    )
+    assert code == 0
+    state = job_state(job)
+    assert state["status"] == "APPROVAL_REQUIRED"
+    reopen = state["spec_reopens"][-1]
+    assert reopen["reason"] == "기대값 35를 42로 고쳐라"
+    logs = repo.parent / f"{repo.name}.jobs" / "logs"
+    text = (logs / f"{job_id}.r4.jsonl").read_text(encoding="utf-8")
+    assert "기대값 35를 42로 고쳐라" in text and reopen["ref"] in text and "4번" in text
+    events = [e["action"] for e in dispatch.host_record(repo, job_id)["events"]]
+    assert events[-2:] == ["reopen-spec", "continue"]
+
+
+def test_continue_to_spec_needs_a_reason(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    job = stuck_after_reject(repo, monkeypatch)
+    assert dispatch.main(["--continue", job["job_id"], "--to-spec"], root=repo) == 2
+    assert job_state(job)["status"] == "BLOCKED"
+
+
+def test_continue_to_spec_session_that_quits_is_blocked(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Spec 단계에서 세션이 끝나면 시계가 흐르는 채로 두지 않는다
+    job = stuck_after_reject(repo, monkeypatch)
+    monkeypatch.setenv("FAKE_AGENT_MODE", "quit")
+    code = dispatch.main(["--continue", job["job_id"], "--to-spec", "--reason", "다시"], root=repo)
+    assert code == 1
+    state = job_state(job)
+    assert state["status"] == "BLOCKED" and state["blocked"]["reason"] == "SESSION_ENDED"
+    assert state["checkpoint"] == "SPEC_READY"
 
 
 def test_continue_refuses_a_job_that_is_not_stopped(

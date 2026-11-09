@@ -205,7 +205,9 @@ def run_pytest(targets: list[str], cwd: Path, base: list[str] | None = None) -> 
 def run_vitest(targets: list[str], cwd: Path) -> list[TestResult]:
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "vitest.json"
-        cmd = ["npx", "vitest", "run", *targets, "--reporter=json", f"--outputFile={report}"]
+        # Red 때 변환한 import.meta.glob 결과를 다시 쓰지 않는다 (factory-v13, J033 실측)
+        cmd = ["npx", "vitest", "run", *targets, "--no-fsModuleCache", "--reporter=json",
+               f"--outputFile={report}"]  # fmt: skip
         subprocess.run(
             resolve_command(cmd),
             cwd=cwd,

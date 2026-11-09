@@ -2030,3 +2030,88 @@ def test_reviewer_total_blocks_on_actual_spend(h: Harness) -> None:
     assert h.job()["blocked"]["reason"] == "BUDGET"
     assert "리뷰어 합계" in h.job()["blocked"]["detail"]
     assert len(h.calls("validator")) == before  # 리뷰어를 띄우지 않았다
+
+
+# ---------- 사람 결정으로 Spec 단계로 되돌리기 (reopen-spec, factory-v13) ----------
+
+
+def blocked_in_building(h: Harness) -> Path:
+    h.to_building()
+    extra = h.repo / "backend/src/bookmarks/extra.py"
+    extra.write_text("VALUE = 1\n", encoding="utf-8")
+    h.run("block", "J001", "--reason", "TEST_INVALID", "--detail", "기대값 35가 틀림")
+    return extra
+
+
+def test_reopen_spec_unlocks_and_keeps_only_spec_and_tests(h: Harness) -> None:
+    extra = blocked_in_building(h)
+    assert h.run("reopen-spec", "J001", "--reason", "35를 42로 고친다") == 0
+    job = h.job()
+    assert job["status"] == "SPEC_READY"
+    assert job["locks"] == {} and job["blocked"] is None
+    assert not extra.exists()
+    assert (h.repo / "factory/specs/J001.md").exists()
+    assert (h.repo / "backend/tests/acceptance/test_J001.py").exists()
+    reopen = job["spec_reopens"][-1]
+    assert reopen["reason"] == "35를 42로 고친다"
+    assert reopen["from"] == "BUILDING"
+    assert "기대값 35가 틀림" in reopen["failure"]
+    # 이전 구현은 잃지 않는다
+    kept = factory._git(h.repo, "show", f"{reopen['ref']}:backend/src/bookmarks/extra.py")
+    assert kept.strip() == "VALUE = 1"
+
+
+def test_reopened_job_can_change_its_test_and_locks_it_again(h: Harness) -> None:
+    blocked_in_building(h)
+    h.run("reopen-spec", "J001", "--reason", "테스트를 고친다")
+    test = h.repo / "backend/tests/acceptance/test_J001.py"
+    test.write_text("def test_new():\n    assert 1 == 2\n", encoding="utf-8")
+    assert h.run("spec", "J001") == 0
+    assert h.run("red", "J001") == 0
+    job = h.job()
+    assert job["status"] == "BUILDING"
+    assert job["locks"]["backend/tests/acceptance/test_J001.py"] == factory._sha(test)
+    assert h.run("verify", "J001") == 0
+    assert h.job()["blocked"] is None
+
+
+def test_reopen_spec_resets_the_retry_counters(h: Harness) -> None:
+    blocked_in_building(h)
+    state = h.state()
+    state["jobs"]["J001"].update(attempts=2, spec_revisions=1)
+    (h.repo / "factory/state.json").write_text(json.dumps(state), encoding="utf-8")
+    h.run("reopen-spec", "J001", "--reason", "다시")
+    job = h.job()
+    assert (job["attempts"], job["spec_revisions"]) == (0, 0)
+    assert job["spec_reopens"][-1]["attempts"] == 2
+
+
+def test_reopen_spec_needs_a_human_reason(h: Harness) -> None:
+    blocked_in_building(h)
+    assert h.run("reopen-spec", "J001", "--reason", "  ") != 0
+    assert h.job()["status"] == "BLOCKED"
+
+
+def test_reopen_spec_refuses_a_job_that_was_never_locked(h: Harness) -> None:
+    h.configure(red=RED_OK, green=GREEN_OK, verify=VERIFY_OK, validator="")
+    h.run("new", "요구사항")
+    h.write_spec()
+    h.run("spec", "J001")
+    h.run("block", "J001", "--reason", "MANUAL", "--detail", "잠시 중단")
+    assert h.run("reopen-spec", "J001", "--reason", "다시") != 0
+    assert h.job()["status"] == "BLOCKED"
+
+
+def test_reopen_spec_can_extend_the_time_cap_once(h: Harness) -> None:
+    blocked_in_building(h)
+    before = h.job()["time"]["cap_s"]
+    assert h.run("reopen-spec", "J001", "--reason", "다시", "--extend") == 0
+    assert h.job()["time"]["cap_s"] > before
+    assert h.job()["time"]["extended"] is True
+
+
+def test_reopen_spec_is_human_only(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    blocked_in_building(h)
+    monkeypatch.setenv("FACTORY_AGENT_SESSION", "1")
+    assert h.run("reopen-spec", "J001", "--reason", "세션이 스스로") == 2
+    assert h.job()["status"] == "BLOCKED"

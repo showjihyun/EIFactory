@@ -79,6 +79,12 @@ def test_frontend_runs_user_flow_tests() -> None:
     assert [s.cmd for s in e2e] == [["npm", "run", "-s", "e2e"]]
 
 
+def test_frontend_tests_do_not_reuse_transformed_modules() -> None:
+    # 세션이 구현 전에 돌린 vitest의 변환 캐시를 verify가 쓰지 않는다 (factory-v13, J033 실측)
+    step = next(s for s in STEPS if s.area == "frontend" and s.name == "test")
+    assert step.cmd == ["npm", "run", "-s", "test", "--", "--no-fsModuleCache"]
+
+
 def test_select_steps_by_area_and_skip() -> None:
     areas = {s.area for s in select_steps("all", [])}
     assert areas == {"backend", "frontend", "scripts"}
