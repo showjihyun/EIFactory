@@ -149,6 +149,15 @@ RESUME_TASK = (
     "factory/PROCESS.md 절차대로 그 다음 단계부터 진행해. 잠긴 수락 테스트는 바꾸지 않고, 지시가 "
     "새 동작이면 Builder가 새 테스트 파일을 더한다."
 )
+# 사람이 Spec 단계로 되돌린 작업을 이어서 처리하는 세션 (factory-v13, --continue --to-spec)
+SPEC_RESUME_TASK = (
+    "작업 {job_id}는 사람이 Spec 단계로 되돌렸다. 되돌리기 전 실패: {failure}. 사람의 결정: {note} "
+    "호스트가 이미 이어받았다 ({recovered}). 잠금은 풀렸고 구현은 작업 트리에서 뺐다. 이전 구현은 "
+    "`git diff {fork} {ref}`로 본다. recover 없이 factory/PROCESS.md 4번부터 진행해: "
+    "사람의 결정대로 spec·수락 테스트(필요하면 changed_tests)를 고치고 "
+    "spec {job_id} → red {job_id} → Builder. 사람의 결정에 없는 기대값은 바꾸지 않는다. "
+    "Builder에게 이전 구현을 참고하라고 전한다."
+)
 CONTINUE_HEAD = {
     "claude": "factory 스킬로 작업 {job_id}를 이어서 처리해. 요구사항: {requirement}\n",
     "codex": "`.agents/skills/factory/SKILL.md`의 factory 스킬을 읽고, 그 절차로 작업 {job_id}를 "
@@ -905,6 +914,7 @@ def continue_session(
     docker: DockerJob | None,
     session_cap: float,
     note: str | None = None,
+    to_spec: bool = False,
 ) -> dict[str, Any]:
     """충돌·반려로 이어서 처리할 작업(note가 있으면 사람이 멈춘 작업)을 세션 하나로 처리한다.
 
@@ -921,6 +931,18 @@ def continue_session(
     n = 2 + len(list(logs.glob(f"{job_id}.r*.jsonl")))
     if note is None:
         prompt = continue_prompt(job, job_id, args.agent)
+    elif to_spec:
+        reopen = job["spec_reopens"][-1]
+        head = CONTINUE_HEAD["codex" if args.agent == "codex" else "claude"]
+        prompt = (head + SPEC_RESUME_TASK).format(
+            job_id=job_id,
+            requirement=job["requirement"],
+            failure=reopen["failure"],
+            note=note,
+            recovered=recovered.stdout.strip()[-300:],
+            fork=reopen["fork"],
+            ref=reopen["ref"],
+        )
     else:
         head = CONTINUE_HEAD["codex" if args.agent == "codex" else "claude"]
         prompt = (head + RESUME_TASK).format(
@@ -974,13 +996,13 @@ def _remove_worktree(root: Path, worktree: Path, result: dict[str, Any]) -> bool
 
 
 def _block_unfinished(
-    root: Path, worktree: Path, job_id: str, job: dict[str, Any]
+    root: Path, worktree: Path, job_id: str, job: dict[str, Any], to_spec: bool = False
 ) -> dict[str, Any]:
     """이어서 처리 세션을 다 쓰고도 고칠 것이 남은 작업은 BLOCKED로 둔다.
 
     RETRY_REQUIRED로 두면 세션이 없는데도 활성 시간이 흘러 나중에 TIMEOUT이 된다 (J020 실측).
     """
-    if not needs_continue(job):
+    if not needs_continue(job) and not (to_spec and job["status"] in ACTIVE):
         return job
     detail = f"이어서 처리 세션이 끝났는데 {job['status']}에 남음: {job.get('last_failure') or '-'}"
     _factory(root, worktree, "block", job_id, "--reason", "SESSION_ENDED", "--detail", detail)
@@ -998,7 +1020,9 @@ def _job_docker(root: Path, worktree: Path, job_id: str, info: dict[str, Any]) -
     return docker
 
 
-def continue_job(root: Path, job_id: str, note: str, extend: bool, keep_merged: bool) -> int:
+def continue_job(
+    root: Path, job_id: str, note: str, extend: bool, keep_merged: bool, to_spec: bool = False
+) -> int:
     """멈춘 작업(RETRY_REQUIRED·BLOCKED)을 사람 지시와 함께 세션 하나로 이어서 처리한다.
 
     factory-v7. BLOCKED면 resume(사람 전용)으로 멈춘 단계에 되돌린 뒤 처리한다.
@@ -1011,7 +1035,17 @@ def continue_job(root: Path, job_id: str, note: str, extend: bool, keep_merged: 
     job = _load_job(worktree, job_id)
     if job["status"] not in {"RETRY_REQUIRED", "BLOCKED"}:
         raise DispatchError(f"{job_id}: 멈춘 작업이 아닙니다 ({job['status']})")
-    if job["status"] == "BLOCKED":
+    if to_spec and not note.strip():
+        raise DispatchError("--to-spec에는 사람의 결정(--reason)이 필요합니다")
+    if to_spec:
+        done = _factory(root, worktree, "reopen-spec", job_id, "--reason", note,
+                        *(["--extend"] if extend else []))  # fmt: skip
+        print(done.stdout.strip())
+        job = _load_job(worktree, job_id)
+        _record_host(root, job_id, "reopen-spec", job)
+        if done.returncode != 0:
+            return done.returncode
+    elif job["status"] == "BLOCKED":
         done = _factory(root, worktree, "resume", job_id, *(["--extend"] if extend else []))
         print(done.stdout.strip())
         job = _load_job(worktree, job_id)
@@ -1025,9 +1059,10 @@ def continue_job(root: Path, job_id: str, note: str, extend: bool, keep_merged: 
     try:
         args = _session_args(root, info, docker is not None)
         cap = float((job.get("budgets_applied") or {}).get("session", DEFAULT_BUDGET_USD))
-        more = continue_session(root, worktree, job_id, args, docker, cap, note=note)
+        more = continue_session(root, worktree, job_id, args, docker, cap, note=note,
+                                to_spec=to_spec)  # fmt: skip
         print(f"{job_id}: 이어서 처리 (세션 {more['round']}) → {more['status']}")
-        job = _block_unfinished(root, worktree, job_id, _load_job(worktree, job_id))
+        job = _block_unfinished(root, worktree, job_id, _load_job(worktree, job_id), to_spec)
         _save_record(root, job_id, job)
     finally:
         if docker:
@@ -1288,7 +1323,9 @@ def _summary(report: dict[str, Any]) -> str:
         "",
         "승인 대기: `python scripts/dispatch.py --approve <ID>` (반려는 `--reject <ID> --reason`). "
         "BLOCKED: `python scripts/dispatch.py --continue <ID> [--reason 지시] [--extend]` "
-        "(멈춘 단계부터 세션 하나로 이어서) 또는 `python scripts/dispatch.py --drop <ID>`.",
+        "(멈춘 단계부터 세션 하나로 이어서), 잠긴 테스트를 고쳐야 하면 "
+        "`--continue <ID> --to-spec --reason 결정`, "
+        "버릴 때는 `python scripts/dispatch.py --drop <ID>`.",
     ]
     return "\n".join(lines)
 
@@ -1360,6 +1397,10 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         "--continue", dest="continue_id", metavar="ID",
         help="멈춘 작업(RETRY_REQUIRED·BLOCKED)을 세션 하나로 이어서 처리 (사람 전용)",
     )  # fmt: skip
+    parser.add_argument(
+        "--to-spec", action="store_true",
+        help="--continue: 사람 결정(--reason)으로 Spec 단계부터 다시 (잠긴 테스트 수정)",
+    )  # fmt: skip
     parser.add_argument("--drop", metavar="ID", help="작업을 버림 (사람 전용, 브랜치는 보관)")
     parser.add_argument("--extend", action="store_true", help="--continue: BLOCKED 상한 50%% 연장")
     parser.add_argument("--reason", help="--reject 이유, --continue 지시")
@@ -1397,7 +1438,7 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     if args.continue_id:
         try:
             return continue_job(root, args.continue_id, args.reason or "", args.extend,
-                                args.keep_merged)  # fmt: skip
+                                args.keep_merged, args.to_spec)  # fmt: skip
         except DispatchError as error:
             print(f"오류: {error}")
             return 2

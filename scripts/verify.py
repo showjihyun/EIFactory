@@ -53,7 +53,8 @@ STEPS: list[Step] = [
     Step("backend", "test", ["uv", "run", "pytest", "--basetemp=.pytest_tmp"], "backend"),
     Step("frontend", "lint", ["npm", "run", "-s", "lint"], "frontend"),
     Step("frontend", "typecheck", ["npm", "run", "-s", "typecheck"], "frontend"),
-    Step("frontend", "test", ["npm", "run", "-s", "test"], "frontend"),
+    # 구현 전에 돌린 vitest의 변환 캐시를 쓰지 않는다 (factory-v13, J033 실측)
+    Step("frontend", "test", ["npm", "run", "-s", "test", "--", "--no-fsModuleCache"], "frontend"),
     # 사용자 흐름 (Playwright): 백엔드·화면을 실제로 띄워 브라우저로 확인한다
     Step("frontend", "e2e", ["npm", "run", "-s", "e2e"], "frontend"),
     Step(

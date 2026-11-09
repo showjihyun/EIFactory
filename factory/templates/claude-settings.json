@@ -24,6 +24,7 @@
       "Bash(python scripts/factory.py approve:*)",
       "Bash(python scripts/factory.py resume:*)",
       "Bash(python scripts/factory.py drop:*)",
+      "Bash(python scripts/factory.py reopen-spec:*)",
       "Bash(python scripts/dispatch.py:*)",
       "Bash(python scripts/issues.py:*)",
       "Bash(python scripts/factory_settings.py set:*)"

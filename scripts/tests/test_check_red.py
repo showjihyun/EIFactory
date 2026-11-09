@@ -20,6 +20,7 @@ from check_red import (  # noqa: E402
     parse_playwright,
     parse_vitest,
     run_pytest,
+    run_vitest,
 )
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?>
@@ -264,3 +265,18 @@ def test_parse_playwright_global_error_is_an_error() -> None:
     results = parse_playwright(report)
     assert [r.outcome for r in results] == [Outcome.ERROR]
     assert "webServer" in results[0].detail
+
+
+def test_run_vitest_does_not_reuse_transformed_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Red 때 변환한 import.meta.glob 결과를 다시 쓰면 구현 뒤에도 실패한다 (factory-v13, J033 실측)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_vitest(["a.test.tsx"], cwd=tmp_path)
+    assert "--no-fsModuleCache" in seen[0]
